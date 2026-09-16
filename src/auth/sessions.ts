@@ -268,12 +268,7 @@ export class SessionService {
     );
 
     await this.transaction(async (client) => {
-      await this.config.store.markRefreshTokenUsed(
-        current.id,
-        nextRefreshTokenId,
-        now,
-        client,
-      );
+      // Insert the replacement first so replaced_by can satisfy the FK.
       await this.config.store.createRefreshToken(
         {
           id: nextRefreshTokenId,
@@ -281,6 +276,12 @@ export class SessionService {
           tokenHash: hashOpaqueToken(this.config.tokenSecret, nextRefreshToken),
           expiresAt: sessionExpiresAt,
         },
+        client,
+      );
+      await this.config.store.markRefreshTokenUsed(
+        current.id,
+        nextRefreshTokenId,
+        now,
         client,
       );
     });

@@ -290,14 +290,32 @@ password → MFA challenge → createAuthenticatedSession()
 
 Authorization and `AuthContext` do not need to change.
 
-## Development helper
+## Development helpers
 
 ```bash
 npm run auth:issue-dev-token -- --user-id <identity.users.id>
+npm run auth:bootstrap-password -- --user-id <identity.users.id>
 ```
 
-Development only. Prefer `POST /auth/login` once the account has a password
+Both commands refuse to run unless `APP_ENV=development`. They are not available
+in staging or production.
+
+`auth:bootstrap-password` attaches a Kode password to an **existing**
+`identity.users` row so local engineers can exercise `POST /auth/login`. It
+does not create users and does not change identity, organization, membership,
+role, or profile data. The password is prompted interactively (never as a CLI
+argument) and hashed with the same Argon2id parameters as normal password
+create/change. Replacing an existing credential requires `--force`.
+
+Prefer login over `auth:issue-dev-token` once the account has a password
 credential.
+
+### Production passwords are not migrated
+
+Supabase Auth password hashes are **not** copied into Kode. Migrated production
+identity rows will not have a usable `identity.password_credentials` secret
+until the user completes a future secure Kode password setup/reset flow. Do not
+use the development bootstrap command to provision production passwords.
 
 ## Known limitations
 
@@ -305,3 +323,4 @@ credential.
 - Redis rate limiting is required for staging/production auth abuse controls.
 - Access JWTs are not denylisted; they die at `exp` after logout.
 - No MFA, social login, or magic link.
+- Production user password setup/reset email is not implemented yet.

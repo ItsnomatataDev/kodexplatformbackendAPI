@@ -168,6 +168,11 @@ test('valid login creates a session and returns tokens for the server identity',
   assert.equal(typeof body.access_token, 'string');
   assert.equal(typeof body.refresh_token, 'string');
   assert.equal((await store.listActiveSessions(userA)).length, 1);
+  const serialized = JSON.stringify(body);
+  assert.equal('password_hash' in body, false);
+  assert.equal('passwordHash' in body, false);
+  assert.doesNotMatch(serialized, /\$argon2id\$/);
+  assert.doesNotMatch(serialized, new RegExp(password));
 
   const me = await app.request('/api/me', {
     headers: { Authorization: `Bearer ${body.access_token}` },
@@ -447,6 +452,28 @@ test('password change requires the current password and invalidates other sessio
       oldRefresh.error?.code === 'REFRESH_TOKEN_REPLAY' ||
       oldRefresh.error?.code === 'INVALID_REFRESH_TOKEN',
   );
+
+  const oldPasswordLogin = await json(
+    await app.request('/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'user@example.com', password }),
+    }),
+  );
+  assert.equal(oldPasswordLogin.error?.code, 'INVALID_CREDENTIALS');
+
+  const newPasswordLogin = await json(
+    await app.request('/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: 'user@example.com',
+        password: 'brand-new-password',
+      }),
+    }),
+  );
+  assert.equal(newPasswordLogin.user?.id, userA);
+  assert.equal((await store.listActiveSessions(userA)).length, 2);
 });
 
 test('password reset does not reveal accounts and invalidates sessions after a valid confirm', async () => {

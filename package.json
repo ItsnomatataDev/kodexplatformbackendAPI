@@ -8,12 +8,13 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "typecheck": "tsc --noEmit -p tsconfig.check.json",
-    "test": "APP_ENV=development NODE_ENV=development HOST=127.0.0.1 LOG_LEVEL=silent DATABASE_HOST=127.0.0.1 DATABASE_NAME=kode_platform DATABASE_USER=kode DATABASE_PASSWORD=test AUTH_TOKEN_SECRET=dev-only-kode-platform-access-token-secret tsx --test tests/environment-guards.test.ts tests/authorization.test.ts tests/authentication.test.ts tests/auth-lifecycle.test.ts tests/security-config.test.ts",
+    "test": "APP_ENV=development NODE_ENV=development HOST=127.0.0.1 LOG_LEVEL=silent DATABASE_HOST=127.0.0.1 DATABASE_NAME=kode_platform DATABASE_USER=kode DATABASE_PASSWORD=test AUTH_TOKEN_SECRET=dev-only-kode-platform-access-token-secret tsx --test tests/environment-guards.test.ts tests/authorization.test.ts tests/authentication.test.ts tests/auth-lifecycle.test.ts tests/security-config.test.ts tests/bootstrap-password.test.ts",
     "check": "npm run typecheck && npm run test",
     "migrate": "tsx scripts/migrate.ts",
     "migrate:identity": "tsx scripts/migration/migrate-identity.ts",
     "verify:env": "tsx scripts/verify-environment.ts",
-    "auth:issue-dev-token": "tsx scripts/issue-dev-token.ts"
+    "auth:issue-dev-token": "tsx scripts/issue-dev-token.ts",
+    "auth:bootstrap-password": "tsx scripts/bootstrap-dev-password.ts"
   },
   "keywords": [],
   "author": "",
