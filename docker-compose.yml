@@ -1,0 +1,63 @@
+# Development stack only.
+# Do not use these services, ports, or volumes for staging or production.
+# Compose project name keeps volume names isolated from any future staging file.
+
+name: kode-platform-dev
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: kode-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kode_platform
+      POSTGRES_USER: kode
+      POSTGRES_PASSWORD: kode_dev_password
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - kode_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kode -d kode_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    container_name: kode-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - kode_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: kode-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: kode_dev
+      MINIO_ROOT_PASSWORD: kode_dev_minio_password
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - kode_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  kode_postgres_data:
+  kode_redis_data:
+  kode_minio_data:

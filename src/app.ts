@@ -1,10 +1,41 @@
+import './types/hono.js';
 import { Hono } from 'hono';
-import health from './routes/health.js';
+import { env } from './config/env.js';
+import {
+  createDefaultAuthDependencies,
+  createDefaultAuthLifecycle,
+  createDefaultMeDependencies,
+} from './auth/defaults.js';
+import { createAuthMiddleware } from './auth/middleware.js';
+import type { AuthDependencies } from './auth/middleware.js';
+import { createAuthRoutes, type AuthRouteDependencies } from './auth/routes.js';
 import { errorHandler } from './middleware/error-handler.js';
+import { requestContext } from './middleware/request-context.js';
+import { corsMiddleware } from './middleware/cors.js';
+import { csrfMiddleware } from './middleware/csrf.js';
+import { securityHeadersMiddleware } from './middleware/security-headers.js';
+import health from './routes/health.js';
+import { createMeRoutes, type MeRouteDependencies } from './routes/me.js';
 
-export function createApp() {
+export type CreateAppOptions = {
+  auth?: AuthDependencies;
+  me?: MeRouteDependencies;
+  authLifecycle?: AuthRouteDependencies;
+  corsOrigins?: string[];
+};
+
+export function createApp(options: CreateAppOptions = {}) {
   const app = new Hono();
+  const authDependencies = options.auth ?? createDefaultAuthDependencies();
+  const meDependencies = options.me ?? createDefaultMeDependencies();
+  const authLifecycle =
+    options.authLifecycle ?? createDefaultAuthLifecycle(authDependencies);
+  const corsOrigins = options.corsOrigins ?? env.cors.allowedOrigins;
 
+  app.use('*', securityHeadersMiddleware(env.appEnv));
+  app.use('*', corsMiddleware(corsOrigins));
+  app.use('*', requestContext);
+  app.use('*', csrfMiddleware(corsOrigins));
   app.onError(errorHandler);
 
   app.get('/', (c) => {
@@ -16,6 +47,12 @@ export function createApp() {
   });
 
   app.route('/health', health);
+  app.route('/auth', createAuthRoutes(authLifecycle));
+
+  const api = new Hono();
+  api.use('*', createAuthMiddleware(authDependencies));
+  api.route('/me', createMeRoutes(meDependencies));
+  app.route('/api', api);
 
   return app;
 }
