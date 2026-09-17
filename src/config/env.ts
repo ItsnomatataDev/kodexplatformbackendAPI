@@ -10,7 +10,12 @@ import {
 import {
   assertInfrastructureSecurity,
   isLocalInfrastructure,
+  rejectKnownDevelopmentSecret,
 } from './infrastructure-security.js';
+import {
+  assertEmailDeliveryConfigured,
+  parseEmailDeliveryConfig,
+} from './email-delivery.js';
 import { readTlsCaFile } from './tls.js';
 
 function required(name: string): string {
@@ -70,10 +75,14 @@ function authSecretFromEnv(appEnvironment: ReturnType<typeof parseAppEnvironment
     throw new Error('AUTH_TOKEN_SECRET must be at least 32 characters.');
   }
 
-  if (appEnvironment !== 'development' && secret.includes('dev-only')) {
-    throw new Error(
-      'Staging/production cannot use a development AUTH_TOKEN_SECRET.',
-    );
+  if (appEnvironment !== 'development') {
+    rejectKnownDevelopmentSecret('AUTH_TOKEN_SECRET', secret);
+
+    if (secret.includes('dev-only')) {
+      throw new Error(
+        'Staging/production cannot use a development AUTH_TOKEN_SECRET.',
+      );
+    }
   }
 
   if (appEnvironment === 'production' && /change_me|replace_with_runtime_secret/i.test(secret)) {
@@ -220,6 +229,13 @@ assertInfrastructureSecurity({
   trustedProxyIps,
 });
 
+const email = parseEmailDeliveryConfig(process.env);
+assertEmailDeliveryConfigured({
+  appEnv,
+  localInfrastructure,
+  email,
+});
+
 export const env = {
   appEnv,
   nodeEnv,
@@ -257,6 +273,8 @@ export const env = {
     bucket: minioBucket,
     ca: readTlsCaFile(process.env.MINIO_TLS_CA_FILE, 'MINIO_TLS_CA_FILE'),
   },
+
+  email,
 
   auth: {
     tokenSecret: authSecretFromEnv(appEnv),

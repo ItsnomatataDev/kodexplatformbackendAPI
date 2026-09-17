@@ -346,6 +346,82 @@ test('PB-08 staging loopback may omit TLS while remote staging cannot', () => {
   );
 });
 
+test('PB-07 staging and production reject known development credentials without printing them', () => {
+  const developmentSecret = 'kode_dev_password';
+
+  assert.doesNotThrow(() =>
+    assertInfrastructureSecurity({
+      appEnv: 'development',
+      database: {
+        host: '127.0.0.1',
+        ssl: false,
+        rejectUnauthorized: true,
+        password: developmentSecret,
+      },
+      redis: {
+        host: '127.0.0.1',
+        tls: false,
+        rejectUnauthorized: true,
+        password: '',
+      },
+      minio: {
+        endpoint: 'http://127.0.0.1:9000',
+        accessKey: 'kode_dev',
+        secretKey: 'kode_dev_minio_password',
+      },
+      trustedProxyIps: [],
+    }),
+  );
+
+  assert.throws(
+    () =>
+      assertInfrastructureSecurity(
+        productionSecurity({ database: { password: developmentSecret } }),
+      ),
+    (error: unknown) => {
+      assert.equal(error instanceof Error, true);
+      const message = (error as Error).message;
+      assert.match(message, /DATABASE_PASSWORD/);
+      assert.match(message, /known development secret/);
+      assert.equal(message.includes(developmentSecret), false);
+      return true;
+    },
+  );
+  assert.throws(
+    () =>
+      assertInfrastructureSecurity(
+        stagingSecurity({
+          minio: { accessKey: 'kode_dev', secretKey: 'not-a-placeholder-secret' },
+        }),
+      ),
+    /MINIO_ACCESS_KEY/,
+  );
+  assert.throws(
+    () =>
+      assertInfrastructureSecurity(
+        productionSecurity({
+          minio: {
+            accessKey: 'not-a-placeholder-secret',
+            secretKey: 'kode_dev_minio_password',
+          },
+        }),
+      ),
+    (error: unknown) => {
+      const message = (error as Error).message;
+      assert.match(message, /MINIO_SECRET_KEY/);
+      assert.equal(message.includes('kode_dev_minio_password'), false);
+      return true;
+    },
+  );
+  assert.throws(
+    () =>
+      assertInfrastructureSecurity(
+        productionSecurity({ database: { password: 'change_me' } }),
+      ),
+    /non-placeholder secret/,
+  );
+});
+
 test('PB-10 MinIO production requires HTTPS and real credentials', () => {
   assert.equal(minioEndpointUsesHttps('http://127.0.0.1:9000'), false);
   assert.equal(minioEndpointUsesHttps('https://production-minio:9000'), true);

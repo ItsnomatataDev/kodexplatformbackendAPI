@@ -37,6 +37,16 @@ console.log(`Refresh token TTL seconds: ${env.auth.refreshTokenTtlSeconds}`);
 console.log(`Password reset TTL seconds: ${env.auth.passwordResetTtlSeconds}`);
 
 console.log('');
+console.log('=== EMAIL ===');
+console.log(`Provider: ${env.email.provider}`);
+if (env.email.provider === 'smtp') {
+  console.log(`SMTP host: ${env.email.host}`);
+  console.log(`SMTP port: ${env.email.port}`);
+  console.log(`SMTP TLS: ${env.email.secure ? 'smtps' : 'starttls-or-plain'}`);
+  console.log('SMTP credentials: configured');
+}
+
+console.log('');
 console.log('=== CORS ===');
 console.log(`Allowed origins: ${env.cors.allowedOrigins.join(', ')}`);
 

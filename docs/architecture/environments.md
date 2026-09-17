@@ -69,6 +69,8 @@ Guards:
 - hosts and endpoints must not contain `production`
 - `ALLOW_PRODUCTION` must not be `true`
 - `AUTH_TOKEN_SECRET` is required and must not use a `dev-only` development secret
+- Known local-development credentials cannot be reused
+- Remote staging requires `EMAIL_PROVIDER=smtp`; loopback staging may remain unconfigured
 
 Staging may run on loopback only when names/buckets still identify staging.
 That still requires separate data volumes from development.
@@ -89,6 +91,9 @@ Guards:
 - PostgreSQL, Redis, and MinIO hosts must not be loopback
 - `AUTH_TOKEN_SECRET` is required, at least 32 characters, and must not use
   `dev-only` or `change_me` placeholders
+- Known local-development credentials cannot be reused
+- `EMAIL_PROVIDER=smtp` is required; the process will not start with an
+  unconfigured mail sender
 
 Production is never an experimental migration environment.
 

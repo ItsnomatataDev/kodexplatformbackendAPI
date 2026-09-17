@@ -556,6 +556,60 @@ test('password reset does not reveal accounts and invalidates sessions after a v
   assert.ok(oldRefresh.error);
 });
 
+test('a second reset request invalidates the previous unused token', async () => {
+  const { app, email } = await createHarness();
+
+  await app.request('/auth/password/reset/request', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'user@example.com' }),
+  });
+  const firstToken = email.lastReset!.resetToken;
+
+  await app.request('/auth/password/reset/request', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'user@example.com' }),
+  });
+  const secondToken = email.lastReset!.resetToken;
+
+  const first = await json(
+    await app.request('/auth/password/reset/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: firstToken,
+        new_password: 'reset-password-1',
+      }),
+    }),
+  );
+  assert.equal(first.error?.code, 'INVALID_RESET_TOKEN');
+
+  const second = await json(
+    await app.request('/auth/password/reset/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: secondToken,
+        new_password: 'reset-password-1',
+      }),
+    }),
+  );
+  assert.equal(second.reset, true);
+
+  const reused = await json(
+    await app.request('/auth/password/reset/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: secondToken,
+        new_password: 'reset-password-2',
+      }),
+    }),
+  );
+  assert.equal(reused.error?.code, 'INVALID_RESET_TOKEN');
+});
+
 test('expired reset tokens are rejected', async () => {
   const { app, email, store } = await createHarness();
   await app.request('/auth/password/reset/request', {

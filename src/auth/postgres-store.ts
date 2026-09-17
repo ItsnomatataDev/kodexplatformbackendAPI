@@ -381,8 +381,9 @@ export class PostgresAuthStore implements AuthStore {
     input: Omit<PasswordResetRecord, 'usedAt' | 'createdAt'> & {
       createdAt?: Date;
     },
+    client?: TransactionClient,
   ) {
-    const result = await db.query<ResetRow>(
+    const result = await executor(client).query<ResetRow>(
       `
         INSERT INTO identity.password_reset_tokens (
           id,
@@ -435,8 +436,12 @@ export class PostgresAuthStore implements AuthStore {
     );
   }
 
-  async invalidatePasswordResetTokensForUser(userId: string, at: Date) {
-    await db.query(
+  async invalidatePasswordResetTokensForUser(
+    userId: string,
+    at: Date,
+    client?: TransactionClient,
+  ) {
+    await executor(client).query(
       `
         UPDATE identity.password_reset_tokens
         SET used_at = $2

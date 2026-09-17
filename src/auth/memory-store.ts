@@ -164,6 +164,7 @@ export class MemoryAuthStore implements AuthStore {
     input: Omit<PasswordResetRecord, 'usedAt' | 'createdAt'> & {
       createdAt?: Date;
     },
+    _client?: TransactionClient,
   ) {
     const record: PasswordResetRecord = {
       id: input.id,
@@ -191,7 +192,11 @@ export class MemoryAuthStore implements AuthStore {
     }
   }
 
-  async invalidatePasswordResetTokensForUser(userId: string, at: Date) {
+  async invalidatePasswordResetTokensForUser(
+    userId: string,
+    at: Date,
+    _client?: TransactionClient,
+  ) {
     for (const record of this.resetTokens.values()) {
       if (record.userId === userId && record.usedAt == null) {
         record.usedAt = at;

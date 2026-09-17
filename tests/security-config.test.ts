@@ -28,6 +28,14 @@ test('logger redaction paths hide credentials and tokens', async () => {
       resetToken: 'reset-secret',
       authorization: 'Bearer access-secret',
       cookie: 'kode_refresh=cookie-secret',
+      smtp: { password: 'smtp-password-secret', username: 'smtp-user' },
+      SMTP_PASSWORD: 'smtp-env-password',
+      EMAIL_API_KEY: 'email-provider-api-key',
+      RESEND_API_KEY: 'resend-provider-api-key',
+      email: {
+        password: 'nested-email-password',
+        apiKey: 'nested-email-api-key',
+      },
     },
     'auth probe',
   );
@@ -39,6 +47,13 @@ test('logger redaction paths hide credentials and tokens', async () => {
   assert.doesNotMatch(output, /reset-secret/);
   assert.doesNotMatch(output, /access-secret/);
   assert.doesNotMatch(output, /cookie-secret/);
+  assert.doesNotMatch(output, /smtp-password-secret/);
+  assert.doesNotMatch(output, /smtp-user/);
+  assert.doesNotMatch(output, /smtp-env-password/);
+  assert.doesNotMatch(output, /email-provider-api-key/);
+  assert.doesNotMatch(output, /resend-provider-api-key/);
+  assert.doesNotMatch(output, /nested-email-password/);
+  assert.doesNotMatch(output, /nested-email-api-key/);
 });
 
 test('CORS origins are environment-specific and cannot be wildcarded', () => {

@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import type { TransactionClient } from '../db/transaction.js';
+import { logger } from '../config/logger.js';
 import { UnauthorizedError } from '../http/errors.js';
+import { emailDomain, EmailDeliveryError } from './email.js';
 import { publishAuthEvent } from './events.js';
 import { hashPassword, validatePassword, verifyPassword } from './passwords.js';
 import { normalizeEmail } from './login.js';
@@ -19,10 +22,23 @@ export type PasswordServiceConfig = {
     to: string;
     resetToken: string;
   }) => Promise<void>;
+  withTransaction?: <T>(
+    work: (client?: TransactionClient) => Promise<T>,
+  ) => Promise<T>;
 };
 
 export class PasswordService {
   constructor(private readonly config: PasswordServiceConfig) {}
+
+  private async transaction<T>(
+    work: (client?: TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    if (this.config.withTransaction) {
+      return this.config.withTransaction(work);
+    }
+
+    return work();
+  }
 
   async changePassword(
     userId: string,
@@ -93,19 +109,42 @@ export class PasswordService {
     }
 
     const resetToken = generateOpaqueToken();
-    await this.config.store.createPasswordResetToken({
-      id: randomUUID(),
-      userId: identity.userId,
-      tokenHash: hashOpaqueToken(this.config.tokenSecret, resetToken),
-      expiresAt: new Date(
-        Date.now() + this.config.passwordResetTtlSeconds * 1000,
-      ),
+    const now = new Date();
+    await this.transaction(async (client) => {
+      await this.config.store.invalidatePasswordResetTokensForUser(
+        identity.userId,
+        now,
+        client,
+      );
+      await this.config.store.createPasswordResetToken(
+        {
+          id: randomUUID(),
+          userId: identity.userId,
+          tokenHash: hashOpaqueToken(this.config.tokenSecret, resetToken),
+          expiresAt: new Date(
+            Date.now() + this.config.passwordResetTtlSeconds * 1000,
+          ),
+        },
+        client,
+      );
     });
 
-    await this.config.sendPasswordResetEmail({
-      to: identity.email,
-      resetToken,
-    });
+    try {
+      await this.config.sendPasswordResetEmail({
+        to: identity.email,
+        resetToken,
+      });
+    } catch (error) {
+      if (!(error instanceof EmailDeliveryError)) {
+        logger.warn(
+          {
+            template: 'password_reset',
+            toDomain: emailDomain(identity.email),
+          },
+          'Password reset email delivery failed.',
+        );
+      }
+    }
   }
 
   async confirmPasswordReset(

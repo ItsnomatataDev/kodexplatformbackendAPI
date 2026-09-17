@@ -5,6 +5,13 @@ import {
 import type { AppEnvironment } from './environments.js';
 
 const PLACEHOLDER_SECRET = /^(change_me|replace_with_runtime_secret)$/i;
+
+const KNOWN_DEVELOPMENT_SECRETS = new Set([
+  'kode_dev_password',
+  'kode_dev_minio_password',
+  'kode_dev',
+  'dev-only-kode-platform-access-token-secret',
+]);
 const WILDCARD_PROXIES = new Set([
   '0.0.0.0',
   '0.0.0.0/0',
@@ -34,6 +41,23 @@ export type InfrastructureSecurityInput = {
   };
   trustedProxyIps: readonly string[];
 };
+
+export function isKnownDevelopmentSecret(value: string | undefined): boolean {
+  if (value == null) {
+    return false;
+  }
+
+  return KNOWN_DEVELOPMENT_SECRETS.has(value.trim());
+}
+
+export function rejectKnownDevelopmentSecret(
+  label: string,
+  value: string | undefined,
+): void {
+  if (isKnownDevelopmentSecret(value)) {
+    throw new Error(`${label} cannot use a known development secret.`);
+  }
+}
 
 export function isPlaceholderSecret(value: string | undefined): boolean {
   if (value == null) {
@@ -106,6 +130,13 @@ function requireSecret(label: string, value: string): void {
   if (isPlaceholderSecret(value)) {
     throw new Error(`${label} must be set to a non-placeholder secret.`);
   }
+}
+
+function rejectDevelopmentSecrets(config: InfrastructureSecurityInput): void {
+  rejectKnownDevelopmentSecret('DATABASE_PASSWORD', config.database.password);
+  rejectKnownDevelopmentSecret('REDIS_PASSWORD', config.redis.password);
+  rejectKnownDevelopmentSecret('MINIO_ACCESS_KEY', config.minio.accessKey);
+  rejectKnownDevelopmentSecret('MINIO_SECRET_KEY', config.minio.secretKey);
 }
 
 function requireVerifiedTls(label: string, enabled: boolean, rejectUnauthorized: boolean): void {
@@ -204,9 +235,11 @@ export function assertInfrastructureSecurity(config: InfrastructureSecurityInput
       return;
     case 'staging':
       assertStaging(config);
+      rejectDevelopmentSecrets(config);
       return;
     case 'production':
       assertProduction(config);
+      rejectDevelopmentSecrets(config);
       return;
   }
 }

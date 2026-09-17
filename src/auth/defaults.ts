@@ -10,7 +10,7 @@ import { PostgresAuthStore } from './postgres-store.js';
 import { SessionService } from './sessions.js';
 import { LoginService } from './login.js';
 import { PasswordService } from './password-service.js';
-import { UnconfiguredEmailSender } from './email.js';
+import { createEmailSender } from './email.js';
 import { MemoryRateLimiter } from './rate-limit.js';
 import { RedisRateLimiter } from './rate-limit-redis.js';
 
@@ -64,6 +64,8 @@ export function createDefaultAuthLifecycle(
     withTransaction,
   });
 
+  const emailSender = createEmailSender(env.email);
+
   return {
     auth,
     login: new LoginService({ store, sessions }),
@@ -74,7 +76,8 @@ export function createDefaultAuthLifecycle(
       tokenSecret: env.auth.tokenSecret,
       passwordResetTtlSeconds: env.auth.passwordResetTtlSeconds,
       sendPasswordResetEmail: (message) =>
-        new UnconfiguredEmailSender().sendPasswordReset(message),
+        emailSender.sendPasswordReset(message),
+      withTransaction,
     }),
     rateLimiter:
       env.appEnv === 'development'

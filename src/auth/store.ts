@@ -102,10 +102,15 @@ export type AuthStore = {
     input: Omit<PasswordResetRecord, 'usedAt' | 'createdAt'> & {
       createdAt?: Date;
     },
+    client?: TransactionClient,
   ): Promise<PasswordResetRecord>;
   findPasswordResetTokenByHash(
     tokenHash: string,
   ): Promise<PasswordResetRecord | null>;
   markPasswordResetTokenUsed(tokenId: string, usedAt: Date): Promise<void>;
-  invalidatePasswordResetTokensForUser(userId: string, at: Date): Promise<void>;
+  invalidatePasswordResetTokensForUser(
+    userId: string,
+    at: Date,
+    client?: TransactionClient,
+  ): Promise<void>;
 };

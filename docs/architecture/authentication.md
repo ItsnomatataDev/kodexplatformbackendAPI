@@ -164,17 +164,22 @@ generic success message.
 
 `POST /auth/password/reset/confirm` accepts `{ token, new_password }`.
 
-Reset tokens are random, hashed, 30 minutes by default, single-use. After
+Reset tokens are random, hashed, 30 minutes by default, single-use. A new
+reset request invalidates previous unused tokens for that user. After
 success, the password is updated, all sessions are revoked, outstanding reset
 tokens are invalidated, and `auth.password.reset.completed` is published. The
 user must log in again.
 
-### Email limitation
+### Email delivery
 
-No email provider is configured. `UnconfiguredEmailSender` is a real boundary
-that does **not** deliver mail and does **not** put the reset token in the API
-response or logs. Tests inject `CapturingEmailSender`. Until a provider is
-wired, production reset emails will not be sent.
+`EMAIL_PROVIDER` selects the sender. Development may use `unconfigured`, which
+does **not** deliver mail and does **not** put the reset token in the API
+response or logs. Tests inject `CapturingEmailSender`.
+
+Production and remote staging require `EMAIL_PROVIDER=smtp` with non-placeholder
+SMTP credentials. The process will not start without a real provider. Delivery
+failures are logged without the token or credentials and do not change the
+generic reset-request response.
 
 ## Rate limiting
 
