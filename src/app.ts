@@ -16,12 +16,16 @@ import { csrfMiddleware } from './middleware/csrf.js';
 import { securityHeadersMiddleware } from './middleware/security-headers.js';
 import health from './routes/health.js';
 import { createMeRoutes, type MeRouteDependencies } from './routes/me.js';
+import { createBoardRoutes } from './routes/boards.js';
+import { PostgresBoardStore } from './work/postgres-store.js';
+import type { BoardStore } from './work/store.js';
 
 export type CreateAppOptions = {
   auth?: AuthDependencies;
   me?: MeRouteDependencies;
   authLifecycle?: AuthRouteDependencies;
   corsOrigins?: string[];
+  boards?: BoardStore;
 };
 
 export function createApp(options: CreateAppOptions = {}) {
@@ -31,6 +35,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const authLifecycle =
     options.authLifecycle ?? createDefaultAuthLifecycle(authDependencies);
   const corsOrigins = options.corsOrigins ?? env.cors.allowedOrigins;
+  const boards = options.boards ?? new PostgresBoardStore();
 
   app.use('*', securityHeadersMiddleware(env.appEnv));
   app.use('*', corsMiddleware(corsOrigins));
@@ -52,6 +57,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const api = new Hono();
   api.use('*', createAuthMiddleware(authDependencies));
   api.route('/me', createMeRoutes(meDependencies));
+  api.route('/boards', createBoardRoutes({ store: boards }));
   app.route('/api', api);
 
   return app;
