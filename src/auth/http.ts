@@ -1,11 +1,7 @@
 import type { Context } from 'hono';
 
 export function requestMeta(c: Context) {
-  const forwarded = c.req.header('x-forwarded-for');
-  const ipAddress =
-    forwarded?.split(',')[0]?.trim() ||
-    c.req.header('x-real-ip') ||
-    null;
+  const ipAddress = c.get('clientIp') ?? null;
   const userAgent = c.req.header('user-agent')?.slice(0, 512) || null;
 
   return {

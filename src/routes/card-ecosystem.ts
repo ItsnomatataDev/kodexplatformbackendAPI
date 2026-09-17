@@ -6,6 +6,9 @@ import { requireOrganizationId } from '../authorization/organization.js';
 import { env } from '../config/env.js';
 import type { FileStorage } from '../files/storage.js';
 import { ConflictError, NotFoundError, ValidationError } from '../http/errors.js';
+import { decodeStrictBase64 } from '../http/base64.js';
+import { FIELD_LIMITS } from '../http/limits.js';
+import { rateLimitWork, type WorkRateLimitKind } from '../http/work-rate-limit.js';
 import {
   assertCommentOwner,
   readJson,
@@ -183,22 +186,29 @@ function authorize(
   });
 }
 
+async function authorizeMutation(
+  c: Parameters<typeof rateLimitWork>[0],
+  auth: ReturnType<typeof getAuth>,
+  action: string,
+  type: string,
+  organizationId: string,
+  id?: string,
+  kind: WorkRateLimitKind = 'mutation',
+) {
+  authorize(auth, action, type, organizationId, id);
+  await rateLimitWork(c, kind);
+}
+
 function safeFilename(value: string) {
   const trimmed = value.trim();
   const base = trimmed.split(/[/\\]/).pop() ?? trimmed;
-  return base.length > 0 ? base : 'attachment';
-}
-
-function decodeBase64(value: unknown, field: string) {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new ValidationError(`${field} is required.`, { field });
+  const filename = base.length > 0 ? base : 'attachment';
+  if (filename.length > FIELD_LIMITS.filename) {
+    throw new ValidationError(`filename must be at most ${FIELD_LIMITS.filename} characters.`, {
+      field: 'filename',
+    });
   }
-
-  try {
-    return Buffer.from(value, 'base64');
-  } catch {
-    throw new ValidationError(`${field} must be base64 encoded.`, { field });
-  }
+  return filename;
 }
 
 function resultOrConflict<T>(
@@ -233,19 +243,25 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
 
   routes.post('/:cardId/comments', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const cardId = requireId(c.req.param('cardId'), 'cardId');
-    authorize(auth, 'work.card_comments.create', 'work.card_comment', organizationId, cardId);
+    await authorizeMutation(c, auth, 'work.card_comments.create', 'work.card_comment', organizationId, cardId);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
     await requireCardInOrganization(dependencies.store, organizationId, cardId);
     const comment = await dependencies.store.createComment({
       organizationId,
       cardId,
       userId: auth.actor.userId,
-      body: readRequiredText(body.body, 'body'),
+      body: readRequiredText(body.body, 'body', FIELD_LIMITS.commentBody),
       isInternal: readOptionalBoolean(body.isInternal ?? body.is_internal, 'isInternal') ?? false,
-      commentType: readOptionalString(body.commentType ?? body.comment_type) ?? 'comment',
+      commentType:
+        readOptionalString(
+          body.commentType ?? body.comment_type,
+          'commentType',
+          FIELD_LIMITS.commentType,
+        ) ?? 'comment',
     });
     if (!comment) {
       throw new NotFoundError('CARD_NOT_FOUND', 'The card was not found.');
@@ -266,11 +282,12 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
 
   routes.post('/:cardId/labels', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const cardId = requireId(c.req.param('cardId'), 'cardId');
-    authorize(auth, 'work.card_labels.create', 'work.card_label', organizationId, cardId);
+    await authorizeMutation(c, auth, 'work.card_labels.create', 'work.card_label', organizationId, cardId);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
     await requireCardInOrganization(dependencies.store, organizationId, cardId);
     const labelId = requireUuidValue(body.labelId ?? body.label_id, 'labelId');
     const assigned = resultOrConflict(
@@ -292,7 +309,7 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
     const organizationId = requireOrganizationId(auth);
     const cardId = requireId(c.req.param('cardId'), 'cardId');
     const labelId = requireId(c.req.param('labelId'), 'labelId');
-    authorize(auth, 'work.card_labels.delete', 'work.card_label', organizationId, cardId);
+    await authorizeMutation(c, auth, 'work.card_labels.delete', 'work.card_label', organizationId, cardId);
     await requireCardInOrganization(dependencies.store, organizationId, cardId);
     const removed = await dependencies.store.removeCardLabel(
       organizationId,
@@ -319,11 +336,12 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
 
   routes.post('/:cardId/watchers', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const cardId = requireId(c.req.param('cardId'), 'cardId');
-    authorize(auth, 'work.card_watchers.create', 'work.card_watcher', organizationId, cardId);
+    await authorizeMutation(c, auth, 'work.card_watchers.create', 'work.card_watcher', organizationId, cardId);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
     await requireCardInOrganization(dependencies.store, organizationId, cardId);
     const userId = requireUuidValue(body.userId ?? body.user_id, 'userId');
     await requireOrganizationMember(dependencies.store, organizationId, userId);
@@ -346,7 +364,7 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
     const organizationId = requireOrganizationId(auth);
     const cardId = requireId(c.req.param('cardId'), 'cardId');
     const userId = requireId(c.req.param('userId'), 'userId');
-    authorize(auth, 'work.card_watchers.delete', 'work.card_watcher', organizationId, cardId);
+    await authorizeMutation(c, auth, 'work.card_watchers.delete', 'work.card_watcher', organizationId, cardId);
     await requireCardInOrganization(dependencies.store, organizationId, cardId);
     const removed = await dependencies.store.removeWatcher(
       organizationId,
@@ -373,11 +391,12 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
 
   routes.post('/:cardId/assignees', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const cardId = requireId(c.req.param('cardId'), 'cardId');
-    authorize(auth, 'work.card_assignees.create', 'work.card_assignee', organizationId, cardId);
+    await authorizeMutation(c, auth, 'work.card_assignees.create', 'work.card_assignee', organizationId, cardId);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
     await requireCardInOrganization(dependencies.store, organizationId, cardId);
     const userId = requireUuidValue(body.userId ?? body.user_id, 'userId');
     await requireOrganizationMember(dependencies.store, organizationId, userId);
@@ -400,7 +419,7 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
     const organizationId = requireOrganizationId(auth);
     const cardId = requireId(c.req.param('cardId'), 'cardId');
     const userId = requireId(c.req.param('userId'), 'userId');
-    authorize(auth, 'work.card_assignees.delete', 'work.card_assignee', organizationId, cardId);
+    await authorizeMutation(c, auth, 'work.card_assignees.delete', 'work.card_assignee', organizationId, cardId);
     await requireCardInOrganization(dependencies.store, organizationId, cardId);
     const removed = await dependencies.store.removeAssignee(
       organizationId,
@@ -438,22 +457,33 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
 
   routes.post('/:cardId/submissions', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const cardId = requireId(c.req.param('cardId'), 'cardId');
-    authorize(auth, 'work.submissions.create', 'work.submission', organizationId, cardId);
+    await authorizeMutation(c, auth, 'work.submissions.create', 'work.submission', organizationId, cardId);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
     await requireCardInOrganization(dependencies.store, organizationId, cardId);
     const submission = await dependencies.store.createSubmission({
       organizationId,
       cardId,
       submittedBy: auth.actor.userId,
-      submissionType: readOptionalString(body.submissionType ?? body.submission_type) ?? undefined,
-      title: readRequiredText(body.title, 'title'),
-      notes: readOptionalString(body.notes) ?? null,
-      linkUrl: readOptionalString(body.linkUrl ?? body.link_url) ?? null,
-      fileName: readOptionalString(body.fileName ?? body.file_name) ?? null,
-      mimeType: readOptionalString(body.mimeType ?? body.mime_type) ?? null,
+      submissionType: readOptionalString(
+        body.submissionType ?? body.submission_type,
+        'submissionType',
+        FIELD_LIMITS.submissionType,
+      ) ?? undefined,
+      title: readRequiredText(body.title, 'title', FIELD_LIMITS.submissionTitle),
+      notes: readOptionalString(body.notes, 'notes', FIELD_LIMITS.submissionNotes) ?? null,
+      linkUrl:
+        readOptionalString(body.linkUrl ?? body.link_url, 'linkUrl', FIELD_LIMITS.submissionUrl) ??
+        null,
+      fileName:
+        readOptionalString(body.fileName ?? body.file_name, 'fileName', FIELD_LIMITS.filename) ??
+        null,
+      mimeType:
+        readOptionalString(body.mimeType ?? body.mime_type, 'mimeType', FIELD_LIMITS.contentType) ??
+        null,
       fileSize: readOptionalInteger(body.fileSize ?? body.file_size, 'fileSize'),
     });
     if (!submission) {
@@ -490,15 +520,27 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
 
   routes.post('/:cardId/attachments', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const cardId = requireId(c.req.param('cardId'), 'cardId');
-    authorize(auth, 'work.attachments.create', 'work.attachment', organizationId, cardId);
+    await authorizeMutation(c, auth, 'work.attachments.create', 'work.attachment', organizationId, cardId, 'attachment');
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
     await requireCardInOrganization(dependencies.store, organizationId, cardId);
-    const filename = safeFilename(readRequiredText(body.filename ?? body.originalFilename, 'filename'));
-    const contentType = readOptionalString(body.contentType ?? body.content_type) ?? 'application/octet-stream';
-    const content = decodeBase64(body.contentBase64 ?? body.content, 'contentBase64');
+    const filename = safeFilename(
+      readRequiredText(body.filename ?? body.originalFilename, 'filename', FIELD_LIMITS.filename),
+    );
+    const contentType =
+      readOptionalString(
+        body.contentType ?? body.content_type,
+        'contentType',
+        FIELD_LIMITS.contentType,
+      ) ?? 'application/octet-stream';
+    const content = decodeStrictBase64(
+      body.contentBase64 ?? body.content,
+      'contentBase64',
+      c.get('limits').maxAttachmentBytes,
+    );
     const attachmentId = randomUUID();
     const objectKey = `${organizationId}/cards/${cardId}/attachments/${attachmentId}/${filename}`;
     await dependencies.files.putObject({
@@ -554,11 +596,12 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
 
   routes.post('/:cardId/time-entries', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const cardId = requireId(c.req.param('cardId'), 'cardId');
-    authorize(auth, 'work.time_entries.create', 'work.time_entry', organizationId, cardId);
+    await authorizeMutation(c, auth, 'work.time_entries.create', 'work.time_entry', organizationId, cardId);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
     await requireCardInOrganization(dependencies.store, organizationId, cardId);
     const requestedUserId = body.userId ?? body.user_id;
     const userId =
@@ -578,7 +621,7 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
       userId,
       createdBy: auth.actor.userId,
       seconds,
-      note: readOptionalString(body.note) ?? null,
+      note: readOptionalString(body.note, 'note', FIELD_LIMITS.timeEntryNote) ?? null,
       startedAt: readOptionalTimestamp(body.startedAt ?? body.started_at, 'startedAt') ?? null,
       endedAt: readOptionalTimestamp(body.endedAt ?? body.ended_at, 'endedAt') ?? null,
       isBillable: readOptionalBoolean(body.isBillable ?? body.is_billable, 'isBillable'),
@@ -612,18 +655,19 @@ export function createCommentRoutes(dependencies: CardEcosystemDependencies) {
 
   routes.patch('/:commentId', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const commentId = requireId(c.req.param('commentId'), 'commentId');
+    await authorizeMutation(c, auth, 'work.card_comments.update', 'work.card_comment', organizationId, commentId);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
     const existing = await dependencies.store.getCommentById(organizationId, commentId);
     if (!existing) {
       throw new NotFoundError('COMMENT_NOT_FOUND', 'The comment was not found.');
     }
-    authorize(auth, 'work.card_comments.update', 'work.card_comment', organizationId, commentId);
     assertCommentOwner(auth, existing.userId);
     const patch: UpdateCommentInput = {};
-    if (body.body !== undefined) patch.body = readRequiredText(body.body, 'body');
+    if (body.body !== undefined) patch.body = readRequiredText(body.body, 'body', FIELD_LIMITS.commentBody);
     if (body.isInternal !== undefined || body.is_internal !== undefined) {
       patch.isInternal = readOptionalBoolean(
         body.isInternal ?? body.is_internal,
@@ -657,28 +701,30 @@ export function createLabelRoutes(dependencies: CardEcosystemDependencies) {
 
   routes.post('/', async (c) => {
     const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    await authorizeMutation(c, auth, 'work.labels.create', 'work.label', organizationId);
     const body = await readJson(c);
     rejectIdentityOverrides(auth, c, body);
-    const organizationId = requireOrganizationId(auth);
-    authorize(auth, 'work.labels.create', 'work.label', organizationId);
     const label = await dependencies.store.createLabel({
       organizationId,
-      name: readRequiredText(body.name, 'name'),
-      color: readRequiredText(body.color, 'color'),
+      name: readRequiredText(body.name, 'name', FIELD_LIMITS.labelName),
+      color: readRequiredText(body.color, 'color', FIELD_LIMITS.labelColor),
     });
     return c.json({ label: serializeLabel(label) }, 201);
   });
 
   routes.patch('/:labelId', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const labelId = requireId(c.req.param('labelId'), 'labelId');
-    authorize(auth, 'work.labels.update', 'work.label', organizationId, labelId);
+    await authorizeMutation(c, auth, 'work.labels.update', 'work.label', organizationId, labelId);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
     const patch: UpdateLabelInput = {};
-    if (body.name !== undefined) patch.name = readRequiredText(body.name, 'name');
-    if (body.color !== undefined) patch.color = readRequiredText(body.color, 'color');
+    if (body.name !== undefined) patch.name = readRequiredText(body.name, 'name', FIELD_LIMITS.labelName);
+    if (body.color !== undefined) patch.color = readRequiredText(body.color, 'color', FIELD_LIMITS.labelColor);
     if (Object.keys(patch).length === 0) {
       throw new ValidationError('No label fields were provided to update.');
     }
@@ -710,31 +756,41 @@ export function createSubmissionRoutes(dependencies: CardEcosystemDependencies) 
 
   routes.patch('/:submissionId', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const submissionId = requireId(c.req.param('submissionId'), 'submissionId');
-    authorize(auth, 'work.submissions.update', 'work.submission', organizationId, submissionId);
+    await authorizeMutation(c, auth, 'work.submissions.update', 'work.submission', organizationId, submissionId);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
     const existing = await dependencies.store.getSubmissionById(organizationId, submissionId);
     if (!existing) {
       throw new NotFoundError('SUBMISSION_NOT_FOUND', 'The submission was not found.');
     }
     const patch: UpdateSubmissionInput = {};
-    if (body.title !== undefined) patch.title = readRequiredText(body.title, 'title');
-    if (body.notes !== undefined) patch.notes = readOptionalString(body.notes) ?? null;
+    if (body.title !== undefined) {
+      patch.title = readRequiredText(body.title, 'title', FIELD_LIMITS.submissionTitle);
+    }
+    if (body.notes !== undefined) {
+      patch.notes = readOptionalString(body.notes, 'notes', FIELD_LIMITS.submissionNotes) ?? null;
+    }
     if (body.linkUrl !== undefined || body.link_url !== undefined) {
-      patch.linkUrl = readOptionalString(body.linkUrl ?? body.link_url) ?? null;
+      patch.linkUrl =
+        readOptionalString(body.linkUrl ?? body.link_url, 'linkUrl', FIELD_LIMITS.submissionUrl) ??
+        null;
     }
     if (body.approvalStatus !== undefined || body.approval_status !== undefined) {
       patch.approvalStatus = readRequiredText(
         body.approvalStatus ?? body.approval_status,
         'approvalStatus',
+        32,
       );
       patch.reviewedBy = auth.actor.userId;
       patch.reviewedAt = new Date();
     }
     if (body.reviewNote !== undefined || body.review_note !== undefined) {
-      patch.reviewNote = readOptionalString(body.reviewNote ?? body.review_note) ?? null;
+      patch.reviewNote =
+        readOptionalString(body.reviewNote ?? body.review_note, 'reviewNote', FIELD_LIMITS.submissionNotes) ??
+        null;
       patch.reviewedBy = auth.actor.userId;
       patch.reviewedAt = patch.reviewedAt ?? new Date();
     }
@@ -800,7 +856,7 @@ export function createAttachmentRoutes(dependencies: CardEcosystemDependencies) 
     rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const attachmentId = requireId(c.req.param('attachmentId'), 'attachmentId');
-    authorize(auth, 'work.attachments.delete', 'work.attachment', organizationId, attachmentId);
+    await authorizeMutation(c, auth, 'work.attachments.delete', 'work.attachment', organizationId, attachmentId);
     const attachment = await dependencies.store.deleteAttachment(organizationId, attachmentId);
     if (!attachment) {
       throw new NotFoundError('ATTACHMENT_NOT_FOUND', 'The attachment was not found.');
@@ -830,11 +886,12 @@ export function createTimeEntryRoutes(dependencies: CardEcosystemDependencies) {
 
   routes.patch('/:timeEntryId', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const timeEntryId = requireId(c.req.param('timeEntryId'), 'timeEntryId');
-    authorize(auth, 'work.time_entries.update', 'work.time_entry', organizationId, timeEntryId);
+    await authorizeMutation(c, auth, 'work.time_entries.update', 'work.time_entry', organizationId, timeEntryId);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
     const existing = await dependencies.store.getTimeEntryById(organizationId, timeEntryId);
     if (!existing) {
       throw new NotFoundError('TIME_ENTRY_NOT_FOUND', 'The time entry was not found.');
@@ -849,7 +906,9 @@ export function createTimeEntryRoutes(dependencies: CardEcosystemDependencies) {
       }
       patch.seconds = seconds;
     }
-    if (body.note !== undefined) patch.note = readOptionalString(body.note) ?? null;
+    if (body.note !== undefined) {
+      patch.note = readOptionalString(body.note, 'note', FIELD_LIMITS.timeEntryNote) ?? null;
+    }
     if (body.startedAt !== undefined || body.started_at !== undefined) {
       patch.startedAt =
         readOptionalTimestamp(body.startedAt ?? body.started_at, 'startedAt') ?? null;

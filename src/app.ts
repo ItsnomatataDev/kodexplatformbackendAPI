@@ -9,11 +9,14 @@ import {
 import { createAuthMiddleware } from './auth/middleware.js';
 import type { AuthDependencies } from './auth/middleware.js';
 import { createAuthRoutes, type AuthRouteDependencies } from './auth/routes.js';
+import type { RateLimiter } from './auth/rate-limit.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { requestContext } from './middleware/request-context.js';
 import { corsMiddleware } from './middleware/cors.js';
 import { csrfMiddleware } from './middleware/csrf.js';
 import { securityHeadersMiddleware } from './middleware/security-headers.js';
+import { bodyLimitMiddleware } from './middleware/body-limit.js';
+import { clientIpMiddleware } from './middleware/client-ip.js';
 import health from './routes/health.js';
 import { createMeRoutes, type MeRouteDependencies } from './routes/me.js';
 import { createBoardRoutes } from './routes/boards.js';
@@ -35,6 +38,7 @@ import { MinioFileStorage } from './files/minio-storage.js';
 import type { FileStorage } from './files/storage.js';
 import { PostgresBoardStore } from './work/postgres-store.js';
 import type { WorkStore } from './work/store.js';
+import type { HttpLimits, WorkRateLimitPolicies } from './http/limits.js';
 
 export type CreateAppOptions = {
   auth?: AuthDependencies;
@@ -43,6 +47,10 @@ export type CreateAppOptions = {
   corsOrigins?: string[];
   boards?: WorkStore;
   files?: FileStorage;
+  trustedProxyIps?: string[];
+  limits?: Partial<HttpLimits>;
+  rateLimiter?: RateLimiter;
+  rateLimitPolicies?: Partial<WorkRateLimitPolicies>;
 };
 
 export function createApp(options: CreateAppOptions = {}) {
@@ -58,11 +66,31 @@ export function createApp(options: CreateAppOptions = {}) {
     (env.minio.accessKey && env.minio.secretKey
       ? new MinioFileStorage()
       : new MemoryFileStorage());
+  const trustedProxyIps = options.trustedProxyIps ?? env.trustedProxyIps;
+  const limits: HttpLimits = {
+    maxRequestBodyBytes:
+      options.limits?.maxRequestBodyBytes ?? env.limits.maxRequestBodyBytes,
+    maxAttachmentBytes:
+      options.limits?.maxAttachmentBytes ?? env.limits.maxAttachmentBytes,
+  };
+  const rateLimiter = options.rateLimiter ?? authLifecycle.rateLimiter;
+  const rateLimitPolicies: WorkRateLimitPolicies = {
+    ...env.rateLimits,
+    ...options.rateLimitPolicies,
+  };
 
   app.use('*', securityHeadersMiddleware(env.appEnv));
   app.use('*', corsMiddleware(corsOrigins));
   app.use('*', requestContext);
+  app.use('*', clientIpMiddleware(trustedProxyIps));
+  app.use('*', bodyLimitMiddleware(limits.maxRequestBodyBytes));
   app.use('*', csrfMiddleware(corsOrigins));
+  app.use('*', async (c, next) => {
+    c.set('rateLimiter', rateLimiter);
+    c.set('rateLimitPolicies', rateLimitPolicies);
+    c.set('limits', limits);
+    await next();
+  });
   app.onError(errorHandler);
 
   app.get('/', (c) => {

@@ -7,5 +7,10 @@ declare module 'hono' {
     logger: Logger;
     auth: AuthContext;
     sessionId: string;
+    limitedBodyText: string;
+    clientIp: string | null;
+    rateLimiter: import('../auth/rate-limit.js').RateLimiter;
+    rateLimitPolicies: import('../http/limits.js').WorkRateLimitPolicies;
+    limits: import('../http/limits.js').HttpLimits;
   }
 }

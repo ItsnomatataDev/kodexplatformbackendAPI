@@ -75,6 +75,9 @@ test('health remains unauthenticated and receives security headers', async () =>
       resolveAuthContext: async () => {
         throw new Error('auth should not run for health');
       },
+      requireActiveSession: async () => {
+        throw new Error('auth should not run for health');
+      },
     },
   });
 

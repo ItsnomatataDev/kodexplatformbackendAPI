@@ -5,6 +5,7 @@ import { AccessTokenService } from '../src/auth/access-token.js';
 import { extractBearerToken } from '../src/auth/credential.js';
 import { UnauthorizedError } from '../src/http/errors.js';
 import type { AuthContext } from '../src/authorization/types.js';
+import { createSessionAuth } from './session-auth.js';
 
 const userA = '11111111-1111-1111-1111-111111111111';
 const userB = '22222222-2222-2222-2222-222222222222';
@@ -18,6 +19,7 @@ const tokenService = new AccessTokenService({
   ttlSeconds: 900,
   clockToleranceSeconds: 0,
 });
+const sessionAuth = createSessionAuth(tokenService);
 
 function authContext(
   overrides: {
@@ -63,6 +65,8 @@ function createTestApp(
     auth: {
       verifier: tokenService,
       resolveAuthContext: resolve,
+      requireActiveSession: (sessionId, userId) =>
+        sessionAuth.requireActiveSession(sessionId, userId),
     },
     me: {
       loadPublicProfile: async () => ({
@@ -166,7 +170,7 @@ test('expired credential is denied', async () => {
 });
 
 test('valid credential authenticates the token subject, not a client user id', async () => {
-  const token = await tokenService.issue(userA);
+  const issued = await sessionAuth.issueBearer(userA);
   let resolvedUserId: string | undefined;
 
   const app = createTestApp(async (userId) => {
@@ -176,7 +180,7 @@ test('valid credential authenticates the token subject, not a client user id', a
 
   const response = await app.request('/api/me', {
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: issued.authorization,
       'X-User-Id': userB,
     },
   });
@@ -188,14 +192,14 @@ test('valid credential authenticates the token subject, not a client user id', a
 });
 
 test('authenticated user maps to the correct user id and organization context', async () => {
-  const token = await tokenService.issue(userA);
+  const issued = await sessionAuth.issueBearer(userA);
   const app = createTestApp(async (userId) => {
     assert.equal(userId, userA);
     return authContext();
   });
 
   const response = await app.request('/api/me', {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: issued.authorization },
   });
   const body = await json(response);
 
@@ -206,12 +210,12 @@ test('authenticated user maps to the correct user id and organization context', 
 });
 
 test('suspended user is denied', async () => {
-  const token = await tokenService.issue(userA);
+  const issued = await sessionAuth.issueBearer(userA);
   const app = createTestApp(async () =>
     authContext({ actor: { accountStatus: 'suspended' } }),
   );
   const response = await app.request('/api/me', {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: issued.authorization },
   });
   const body = await json(response);
 
@@ -220,12 +224,12 @@ test('suspended user is denied', async () => {
 });
 
 test('inactive user is denied', async () => {
-  const token = await tokenService.issue(userA);
+  const issued = await sessionAuth.issueBearer(userA);
   const app = createTestApp(async () =>
     authContext({ actor: { isActive: false } }),
   );
   const response = await app.request('/api/me', {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: issued.authorization },
   });
   const body = await json(response);
 
@@ -234,7 +238,7 @@ test('inactive user is denied', async () => {
 });
 
 test('authenticated identity that no longer exists is denied', async () => {
-  const token = await tokenService.issue(userA);
+  const issued = await sessionAuth.issueBearer(userA);
   const app = createTestApp(async () => {
     throw new UnauthorizedError(
       'IDENTITY_NOT_FOUND',
@@ -242,7 +246,7 @@ test('authenticated identity that no longer exists is denied', async () => {
     );
   });
   const response = await app.request('/api/me', {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: issued.authorization },
   });
   const body = await json(response);
 
@@ -251,12 +255,12 @@ test('authenticated identity that no longer exists is denied', async () => {
 });
 
 test('client organization id cannot override membership', async () => {
-  const token = await tokenService.issue(userA);
+  const issued = await sessionAuth.issueBearer(userA);
   const app = createTestApp(async () => authContext());
   const response = await app.request(
     `/api/me?organization_id=${orgB}`,
     {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: issued.authorization },
     },
   );
   const body = await json(response);

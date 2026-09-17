@@ -62,6 +62,14 @@ export class ValidationError extends AppError {
   }
 }
 
+export class PayloadTooLargeError extends AppError {
+  constructor(
+    message = 'The request payload is too large.',
+  ) {
+    super('PAYLOAD_TOO_LARGE', message, 413);
+  }
+}
+
 export class TooManyRequestsError extends AppError {
   readonly retryAfterSeconds: number;
 

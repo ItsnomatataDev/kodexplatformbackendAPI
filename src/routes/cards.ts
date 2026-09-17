@@ -8,7 +8,19 @@ import {
   requireOrganizationId,
 } from '../authorization/organization.js';
 import { NotFoundError, ValidationError } from '../http/errors.js';
+import { optionalMetadata } from '../http/fields.js';
+import { FIELD_LIMITS } from '../http/limits.js';
+import { rateLimitWork } from '../http/work-rate-limit.js';
 import type { CardRecord, UpdateCardInput, WorkStore } from '../work/store.js';
+import {
+  readJson,
+  readOptionalBoolean,
+  readOptionalInteger,
+  readOptionalString,
+  readOptionalTimestamp,
+  readRequiredText,
+  requireId,
+} from '../work/http.js';
 
 export type CardRouteDependencies = {
   store: WorkStore;
@@ -39,107 +51,6 @@ function serializeCard(card: CardRecord) {
     createdAt: card.createdAt.toISOString(),
     updatedAt: card.updatedAt.toISOString(),
   };
-}
-
-async function readJson(c: { req: { json: () => Promise<unknown> } }) {
-  try {
-    const body = await c.req.json();
-    return body && typeof body === 'object' && !Array.isArray(body)
-      ? (body as Record<string, unknown>)
-      : {};
-  } catch {
-    throw new ValidationError('Request body must be valid JSON.');
-  }
-}
-
-function readOptionalString(value: unknown): string | null | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (value === null) {
-    return null;
-  }
-
-  if (typeof value !== 'string') {
-    throw new ValidationError('Invalid string field.');
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length === 0 ? null : trimmed;
-}
-
-function readRequiredText(value: unknown, field: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new ValidationError(`${field} is required.`, { field });
-  }
-
-  return value.trim();
-}
-
-function readOptionalInteger(value: unknown, field: string): number | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (typeof value !== 'number' || !Number.isInteger(value)) {
-    throw new ValidationError(`${field} must be an integer.`);
-  }
-
-  return value;
-}
-
-function readOptionalBoolean(value: unknown, field: string): boolean | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (typeof value !== 'boolean') {
-    throw new ValidationError(`${field} must be a boolean.`);
-  }
-
-  return value;
-}
-
-function readOptionalTimestamp(
-  value: unknown,
-  field: string,
-): Date | null | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (value === null) {
-    return null;
-  }
-
-  if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) {
-    throw new ValidationError(`${field} must be an ISO 8601 timestamp.`);
-  }
-
-  return new Date(value);
-}
-
-function readOptionalMetadata(
-  value: unknown,
-): Record<string, unknown> | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new ValidationError('Metadata must be a JSON object.');
-  }
-
-  return value as Record<string, unknown>;
-}
-
-function requireId(value: string | undefined, field: string): string {
-  if (!value || !isUuid(value)) {
-    throw new ValidationError(`${field} must be a UUID.`);
-  }
-
-  return value;
 }
 
 function requireColumnId(value: unknown): string {
@@ -258,8 +169,7 @@ export function createBoardCardRoutes(dependencies: CardRouteDependencies) {
 
   routes.post('/:boardId/cards', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const boardId = requireId(c.req.param('boardId'), 'boardId');
 
@@ -272,6 +182,10 @@ export function createBoardCardRoutes(dependencies: CardRouteDependencies) {
         id: boardId,
       },
     });
+    await rateLimitWork(c, 'mutation');
+
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
 
     if (body.boardId !== undefined || body.board_id !== undefined) {
       const requestedBoardId = body.boardId ?? body.board_id;
@@ -280,10 +194,14 @@ export function createBoardCardRoutes(dependencies: CardRouteDependencies) {
       }
     }
 
-    const title = readRequiredText(body.title, 'title');
+    const title = readRequiredText(body.title, 'title', FIELD_LIMITS.cardTitle);
     const columnId = requireColumnId(body.columnId ?? body.column_id);
-    const statusKey = readOptionalString(body.statusKey ?? body.status_key);
-    const priority = readOptionalString(body.priority);
+    const statusKey = readOptionalString(
+      body.statusKey ?? body.status_key,
+      'statusKey',
+      FIELD_LIMITS.cardStatusKey,
+    );
+    const priority = readOptionalString(body.priority, 'priority', FIELD_LIMITS.cardPriority);
 
     if (body.statusKey !== undefined || body.status_key !== undefined) {
       if (!statusKey) {
@@ -311,10 +229,13 @@ export function createBoardCardRoutes(dependencies: CardRouteDependencies) {
       columnId,
       createdBy: auth.actor.userId,
       title,
-      description: readOptionalString(body.description) ?? null,
+      description:
+        readOptionalString(body.description, 'description', FIELD_LIMITS.cardDescription) ??
+        null,
       statusKey: statusKey ?? undefined,
       priority: priority ?? undefined,
-      department: readOptionalString(body.department) ?? null,
+      department:
+        readOptionalString(body.department, 'department', FIELD_LIMITS.cardDepartment) ?? null,
       dueAt: readOptionalTimestamp(body.dueAt ?? body.due_at, 'dueAt') ?? null,
       startAt:
         readOptionalTimestamp(body.startAt ?? body.start_at, 'startAt') ?? null,
@@ -327,7 +248,7 @@ export function createBoardCardRoutes(dependencies: CardRouteDependencies) {
         body.estimatedSeconds ?? body.estimated_seconds,
         'estimatedSeconds',
       ),
-      metadata: readOptionalMetadata(body.metadata) ?? {},
+      metadata: optionalMetadata(body.metadata) ?? {},
     });
 
     if (!card) {
@@ -397,15 +318,18 @@ export function createCardRoutes(dependencies: CardRouteDependencies) {
         organizationId,
       },
     });
+    await rateLimitWork(c, 'mutation');
 
     const patch: UpdateCardInput = {};
 
     if (body.title !== undefined) {
-      patch.title = readRequiredText(body.title, 'title');
+      patch.title = readRequiredText(body.title, 'title', FIELD_LIMITS.cardTitle);
     }
 
     if (body.description !== undefined) {
-      patch.description = readOptionalString(body.description) ?? null;
+      patch.description =
+        readOptionalString(body.description, 'description', FIELD_LIMITS.cardDescription) ??
+        null;
     }
 
     if (body.columnId !== undefined || body.column_id !== undefined) {
@@ -420,7 +344,11 @@ export function createCardRoutes(dependencies: CardRouteDependencies) {
     }
 
     if (body.statusKey !== undefined || body.status_key !== undefined) {
-      const statusKey = readOptionalString(body.statusKey ?? body.status_key);
+      const statusKey = readOptionalString(
+        body.statusKey ?? body.status_key,
+        'statusKey',
+        FIELD_LIMITS.cardStatusKey,
+      );
       if (!statusKey) {
         throw new ValidationError('statusKey is required.', {
           field: 'statusKey',
@@ -430,7 +358,11 @@ export function createCardRoutes(dependencies: CardRouteDependencies) {
     }
 
     if (body.priority !== undefined) {
-      const priority = readOptionalString(body.priority);
+      const priority = readOptionalString(
+        body.priority,
+        'priority',
+        FIELD_LIMITS.cardPriority,
+      );
       if (!priority) {
         throw new ValidationError('priority is required.', { field: 'priority' });
       }
@@ -438,7 +370,9 @@ export function createCardRoutes(dependencies: CardRouteDependencies) {
     }
 
     if (body.department !== undefined) {
-      patch.department = readOptionalString(body.department) ?? null;
+      patch.department =
+        readOptionalString(body.department, 'department', FIELD_LIMITS.cardDepartment) ??
+        null;
     }
 
     if (body.dueAt !== undefined || body.due_at !== undefined) {
@@ -461,7 +395,11 @@ export function createCardRoutes(dependencies: CardRouteDependencies) {
 
     if (body.blockedReason !== undefined || body.blocked_reason !== undefined) {
       patch.blockedReason =
-        readOptionalString(body.blockedReason ?? body.blocked_reason) ?? null;
+        readOptionalString(
+          body.blockedReason ?? body.blocked_reason,
+          'blockedReason',
+          FIELD_LIMITS.cardBlockedReason,
+        ) ?? null;
     }
 
     if (body.position !== undefined) {
@@ -486,7 +424,7 @@ export function createCardRoutes(dependencies: CardRouteDependencies) {
     }
 
     if (body.metadata !== undefined) {
-      patch.metadata = readOptionalMetadata(body.metadata);
+      patch.metadata = optionalMetadata(body.metadata);
     }
 
     if (Object.keys(patch).length === 0) {

@@ -36,5 +36,13 @@ console.log('=== CORS ===');
 console.log(`Allowed origins: ${env.cors.allowedOrigins.join(', ')}`);
 
 console.log('');
+console.log('=== REQUEST LIMITS ===');
+console.log(`Max request body bytes: ${env.limits.maxRequestBodyBytes}`);
+console.log(`Max attachment bytes: ${env.limits.maxAttachmentBytes}`);
+console.log(
+  `Trusted proxy IPs: ${env.trustedProxyIps.length > 0 ? env.trustedProxyIps.join(', ') : '(none)'}`,
+);
+
+console.log('');
 console.log('Isolation guards passed. Secrets are not printed.');
 console.log('Environment configuration loaded successfully.');

@@ -4,6 +4,7 @@ import { createApp } from '../src/app.js';
 import { AccessTokenService } from '../src/auth/access-token.js';
 import type { AuthContext } from '../src/authorization/types.js';
 import { MemoryBoardStore } from '../src/work/memory-store.js';
+import { createSessionAuth } from './session-auth.js';
 
 const userA = '11111111-1111-1111-1111-111111111111';
 const userB = '22222222-2222-2222-2222-222222222222';
@@ -18,6 +19,7 @@ const tokenService = new AccessTokenService({
   ttlSeconds: 900,
   clockToleranceSeconds: 0,
 });
+const sessionAuth = createSessionAuth(tokenService);
 
 function authContext(
   overrides: {
@@ -86,6 +88,8 @@ function createWorkApp(
     auth: {
       verifier: tokenService,
       resolveAuthContext: resolve,
+      requireActiveSession: (sessionId, userId) =>
+        sessionAuth.requireActiveSession(sessionId, userId),
     },
     me: {
       loadPublicProfile: async () => null,
@@ -120,7 +124,7 @@ async function json(response: Response) {
 }
 
 async function bearer(userId: string) {
-  return `Bearer ${await tokenService.issue(userId)}`;
+  return (await sessionAuth.issueBearer(userId)).authorization;
 }
 
 async function createBoard(

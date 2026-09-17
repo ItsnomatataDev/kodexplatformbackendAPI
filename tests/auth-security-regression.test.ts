@@ -111,7 +111,12 @@ async function createHarness() {
   });
 
   const email = new CapturingEmailSender();
-  const auth = { verifier: accessTokens, resolveAuthContext: resolve };
+  const auth = {
+    verifier: accessTokens,
+    resolveAuthContext: resolve,
+    requireActiveSession: (sessionId: string, userId: string) =>
+      sessions.requireActiveSession(sessionId, userId),
+  };
   const app = createApp({
     auth,
     me: {

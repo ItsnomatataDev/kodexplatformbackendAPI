@@ -24,9 +24,22 @@ export function createDefaultAccessTokenService() {
 }
 
 export function createDefaultAuthDependencies(): AuthDependencies {
+  const store = new PostgresAuthStore();
+  const sessions = new SessionService({
+    store,
+    tokenSecret: env.auth.tokenSecret,
+    accessTokens: createDefaultAccessTokenService(),
+    accessTokenTtlSeconds: env.auth.accessTokenTtlSeconds,
+    refreshTokenTtlSeconds: env.auth.refreshTokenTtlSeconds,
+    resolveAuthContext,
+    withTransaction,
+  });
+
   return {
     verifier: createDefaultAccessTokenService(),
     resolveAuthContext,
+    requireActiveSession: (sessionId, userId) =>
+      sessions.requireActiveSession(sessionId, userId),
   };
 }
 

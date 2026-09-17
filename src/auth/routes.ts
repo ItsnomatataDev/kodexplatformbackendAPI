@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { getLimitedBodyText } from '../middleware/body-limit.js';
 import { ValidationError } from '../http/errors.js';
 import { createAuthMiddleware, getAuth, getSessionId } from './middleware.js';
 import type { AuthDependencies } from './middleware.js';
@@ -33,10 +34,21 @@ function readString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-async function readJson(c: { req: { json: () => Promise<unknown> } }) {
+async function readJson(c: {
+  req: { json: () => Promise<unknown> };
+  get: (key: 'limitedBodyText') => string | undefined;
+}) {
   try {
-    const body = await c.req.json();
-    return body && typeof body === 'object' ? (body as Record<string, unknown>) : {};
+    const raw = getLimitedBodyText(c);
+    const parsed =
+      raw === undefined
+        ? await c.req.json()
+        : raw.length === 0
+          ? {}
+          : JSON.parse(raw);
+    return parsed && typeof parsed === 'object'
+      ? (parsed as Record<string, unknown>)
+      : {};
   } catch {
     return {};
   }

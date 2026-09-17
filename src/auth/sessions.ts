@@ -164,11 +164,19 @@ export class SessionService {
     return count;
   }
 
-  async requireActiveSession(sessionId: string): Promise<SessionRecord> {
+  async requireActiveSession(
+    sessionId: string,
+    userId?: string,
+  ): Promise<SessionRecord> {
     const session = await this.config.store.getSession(sessionId);
     const now = this.now();
 
-    if (!session || session.revokedAt || session.expiresAt <= now) {
+    if (
+      !session ||
+      session.revokedAt ||
+      session.expiresAt <= now ||
+      (userId != null && session.userId !== userId)
+    ) {
       throw new UnauthorizedError(
         'SESSION_REVOKED',
         'The session is no longer valid.',

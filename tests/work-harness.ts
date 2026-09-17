@@ -1,8 +1,9 @@
-import { createApp } from '../src/app.js';
+import { createApp, type CreateAppOptions } from '../src/app.js';
 import { AccessTokenService } from '../src/auth/access-token.js';
 import type { AuthContext } from '../src/authorization/types.js';
 import { MemoryFileStorage } from '../src/files/memory-storage.js';
 import { MemoryBoardStore } from '../src/work/memory-store.js';
+import { createSessionAuth } from './session-auth.js';
 
 export const userA = '11111111-1111-1111-1111-111111111111';
 export const userB = '22222222-2222-2222-2222-222222222222';
@@ -78,6 +79,8 @@ export function orgBContext(): AuthContext {
   });
 }
 
+export const sessionAuth = createSessionAuth(tokenService);
+
 export function createWorkApp(
   store: MemoryBoardStore,
   resolve: (userId: string) => Promise<AuthContext> = async (userId) => {
@@ -88,6 +91,10 @@ export function createWorkApp(
     return authContext();
   },
   files = new MemoryFileStorage(),
+  appOptions: Pick<
+    CreateAppOptions,
+    'limits' | 'rateLimiter' | 'rateLimitPolicies' | 'trustedProxyIps'
+  > = {},
 ) {
   store.seedOrganizationMember({
     userId: userA,
@@ -115,12 +122,15 @@ export function createWorkApp(
     auth: {
       verifier: tokenService,
       resolveAuthContext: resolve,
+      requireActiveSession: (sessionId, userId) =>
+        sessionAuth.requireActiveSession(sessionId, userId),
     },
     me: {
       loadPublicProfile: async () => null,
     },
     boards: store,
     files,
+    ...appOptions,
   });
 }
 
@@ -132,7 +142,7 @@ export async function json(response: Response) {
 }
 
 export async function bearer(userId: string) {
-  return `Bearer ${await tokenService.issue(userId)}`;
+  return (await sessionAuth.issueBearer(userId)).authorization;
 }
 
 export function tamperJwt(token: string) {

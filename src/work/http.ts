@@ -4,45 +4,48 @@ import { isUuid } from '../auth/uuid.js';
 import {
   rejectClientOrganizationOverride,
 } from '../authorization/organization.js';
+import { getLimitedBodyText } from '../middleware/body-limit.js';
+import { optionalText, requiredText } from '../http/fields.js';
 import { ForbiddenError, NotFoundError, ValidationError } from '../http/errors.js';
 import type { WorkStore } from './store.js';
 
 export async function readJson(c: {
   req: { json: () => Promise<unknown> };
+  get: (key: 'limitedBodyText') => string | undefined;
 }) {
   try {
-    const body = await c.req.json();
-    return body && typeof body === 'object' && !Array.isArray(body)
-      ? (body as Record<string, unknown>)
+    const raw = getLimitedBodyText(c);
+    const parsed =
+      raw === undefined
+        ? await c.req.json()
+        : raw.length === 0
+          ? {}
+          : JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
       : {};
-  } catch {
-    throw new ValidationError('Request body must be valid JSON.');
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new ValidationError('Request body must be valid JSON.');
+    }
+    throw error;
   }
 }
 
-export function readOptionalString(value: unknown): string | null | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (value === null) {
-    return null;
-  }
-
-  if (typeof value !== 'string') {
-    throw new ValidationError('Invalid string field.');
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length === 0 ? null : trimmed;
+export function readOptionalString(
+  value: unknown,
+  field = 'value',
+  maxLength = 4_000,
+): string | null | undefined {
+  return optionalText(value, field, maxLength);
 }
 
-export function readRequiredText(value: unknown, field: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) {
-    throw new ValidationError(`${field} is required.`, { field });
-  }
-
-  return value.trim();
+export function readRequiredText(
+  value: unknown,
+  field: string,
+  maxLength = 4_000,
+): string {
+  return requiredText(value, field, maxLength);
 }
 
 export function readOptionalInteger(value: unknown, field: string): number | undefined {

@@ -1,18 +1,26 @@
 import { Hono } from 'hono';
 import { getAuth } from '../auth/middleware.js';
 import { rejectClientUserOverride } from '../auth/account.js';
-import { isUuid } from '../auth/uuid.js';
 import { assertAuthorized } from '../authorization/authorize.js';
 import {
   rejectClientOrganizationOverride,
   requireOrganizationId,
 } from '../authorization/organization.js';
 import { NotFoundError, ValidationError } from '../http/errors.js';
+import { FIELD_LIMITS } from '../http/limits.js';
+import { rateLimitWork } from '../http/work-rate-limit.js';
 import type {
   ColumnRecord,
   UpdateColumnInput,
   WorkStore,
 } from '../work/store.js';
+import {
+  readJson,
+  readOptionalInteger,
+  readOptionalString,
+  readRequiredText,
+  requireId,
+} from '../work/http.js';
 
 export type ColumnRouteDependencies = {
   store: WorkStore;
@@ -30,54 +38,6 @@ function serializeColumn(column: ColumnRecord) {
     createdAt: column.createdAt.toISOString(),
     updatedAt: column.updatedAt.toISOString(),
   };
-}
-
-async function readJson(c: { req: { json: () => Promise<unknown> } }) {
-  try {
-    const body = await c.req.json();
-    return body && typeof body === 'object' && !Array.isArray(body)
-      ? (body as Record<string, unknown>)
-      : {};
-  } catch {
-    throw new ValidationError('Request body must be valid JSON.');
-  }
-}
-
-function readOptionalString(value: unknown): string | null | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (value === null) {
-    return null;
-  }
-
-  if (typeof value !== 'string') {
-    throw new ValidationError('Invalid string field.');
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length === 0 ? null : trimmed;
-}
-
-function readOptionalInteger(value: unknown): number | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (typeof value !== 'number' || !Number.isInteger(value)) {
-    throw new ValidationError('Position must be an integer.');
-  }
-
-  return value;
-}
-
-function requireId(value: string | undefined, field: string): string {
-  if (!value || !isUuid(value)) {
-    throw new ValidationError(`${field} must be a UUID.`);
-  }
-
-  return value;
 }
 
 function rejectIdentityOverrides(
@@ -152,8 +112,7 @@ export function createBoardColumnRoutes(dependencies: ColumnRouteDependencies) {
 
   routes.post('/:boardId/columns', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const boardId = requireId(c.req.param('boardId'), 'boardId');
 
@@ -166,10 +125,10 @@ export function createBoardColumnRoutes(dependencies: ColumnRouteDependencies) {
         id: boardId,
       },
     });
+    await rateLimitWork(c, 'mutation');
 
-    if (typeof body.name !== 'string' || body.name.trim().length === 0) {
-      throw new ValidationError('Column name is required.', { field: 'name' });
-    }
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
 
     if (body.boardId !== undefined || body.board_id !== undefined) {
       const requestedBoardId = body.boardId ?? body.board_id;
@@ -183,10 +142,15 @@ export function createBoardColumnRoutes(dependencies: ColumnRouteDependencies) {
     const column = await dependencies.store.createColumn({
       organizationId,
       boardId,
-      name: body.name.trim(),
-      color: readOptionalString(body.color) ?? null,
-      statusKey: readOptionalString(body.statusKey ?? body.status_key) ?? null,
-      position: readOptionalInteger(body.position) ?? 0,
+      name: readRequiredText(body.name, 'name', FIELD_LIMITS.columnName),
+      color: readOptionalString(body.color, 'color', FIELD_LIMITS.columnColor) ?? null,
+      statusKey:
+        readOptionalString(
+          body.statusKey ?? body.status_key,
+          'statusKey',
+          FIELD_LIMITS.columnStatusKey,
+        ) ?? null,
+      position: readOptionalInteger(body.position, 'position') ?? 0,
     });
 
     if (!column) {
@@ -204,10 +168,11 @@ export function createColumnRoutes(dependencies: ColumnRouteDependencies) {
 
   routes.patch('/:columnId', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const columnId = requireId(c.req.param('columnId'), 'columnId');
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
 
     if (body.boardId !== undefined || body.board_id !== undefined) {
       throw new ValidationError('boardId cannot be changed.');
@@ -231,23 +196,27 @@ export function createColumnRoutes(dependencies: ColumnRouteDependencies) {
         organizationId,
       },
     });
+    await rateLimitWork(c, 'mutation');
 
     const patch: UpdateColumnInput = {};
 
     if (body.name !== undefined) {
-      if (typeof body.name !== 'string' || body.name.trim().length === 0) {
-        throw new ValidationError('Column name is required.', { field: 'name' });
-      }
-      patch.name = body.name.trim();
+      patch.name = readRequiredText(body.name, 'name', FIELD_LIMITS.columnName);
     }
 
-    if (body.color !== undefined) patch.color = readOptionalString(body.color) ?? null;
+    if (body.color !== undefined) {
+      patch.color = readOptionalString(body.color, 'color', FIELD_LIMITS.columnColor) ?? null;
+    }
     if (body.statusKey !== undefined || body.status_key !== undefined) {
       patch.statusKey =
-        readOptionalString(body.statusKey ?? body.status_key) ?? null;
+        readOptionalString(
+          body.statusKey ?? body.status_key,
+          'statusKey',
+          FIELD_LIMITS.columnStatusKey,
+        ) ?? null;
     }
     if (body.position !== undefined) {
-      patch.position = readOptionalInteger(body.position);
+      patch.position = readOptionalInteger(body.position, 'position');
     }
 
     if (Object.keys(patch).length === 0) {

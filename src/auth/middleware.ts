@@ -9,6 +9,7 @@ import type { CredentialVerifier } from './verifier.js';
 export type AuthDependencies = {
   verifier: CredentialVerifier;
   resolveAuthContext: (userId: string) => Promise<AuthContext>;
+  requireActiveSession: (sessionId: string, userId: string) => Promise<unknown>;
 };
 
 export function createAuthMiddleware(dependencies: AuthDependencies) {
@@ -20,15 +21,22 @@ export function createAuthMiddleware(dependencies: AuthDependencies) {
     }
 
     const verified = await dependencies.verifier.verify(extracted.token);
+
+    if (!verified.sessionId) {
+      throw new UnauthorizedError(
+        'SESSION_REQUIRED',
+        'A valid session is required.',
+      );
+    }
+
+    await dependencies.requireActiveSession(verified.sessionId, verified.userId);
     const context = await dependencies.resolveAuthContext(verified.userId);
 
     assertAuthenticatedAccount(context);
     rejectClientUserOverride(context, c.req.header('x-user-id'));
 
     c.set('auth', context);
-    if (verified.sessionId) {
-      c.set('sessionId', verified.sessionId);
-    }
+    c.set('sessionId', verified.sessionId);
 
     const requestLogger = c.get('logger');
     requestLogger.info(

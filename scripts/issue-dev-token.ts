@@ -1,5 +1,5 @@
 import { env } from '../src/config/env.js';
-import { createDefaultAccessTokenService } from '../src/auth/defaults.js';
+import { createDefaultAuthLifecycle } from '../src/auth/defaults.js';
 import { isUuid } from '../src/auth/uuid.js';
 import { db } from '../src/db/pool.js';
 
@@ -42,9 +42,10 @@ async function run() {
     fail('No identity.users row exists for that id in this development database.');
   }
 
-  const token = await createDefaultAccessTokenService().issue(userId);
-
-  console.log(token);
+  const issued = await createDefaultAuthLifecycle().sessions.createAuthenticatedSession(
+    userId,
+  );
+  console.log(issued.accessToken);
 }
 
 run()

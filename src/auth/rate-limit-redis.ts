@@ -39,7 +39,7 @@ export class RedisRateLimiter implements RateLimiter {
     } catch {
       throw new ServiceUnavailableError(
         'RATE_LIMIT_UNAVAILABLE',
-        'Authentication rate limiting is temporarily unavailable.',
+        'Rate limiting is temporarily unavailable.',
       );
     }
   }

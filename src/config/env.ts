@@ -2,6 +2,11 @@ import 'dotenv/config';
 import { parseAppEnvironment } from './environments.js';
 import { assertEnvironmentIsolation } from './environment-guards.js';
 import { parseCorsOrigins } from './cors-origins.js';
+import { parseTrustedProxyIps } from '../http/client-ip.js';
+import {
+  minRequestBodyBytesForAttachment,
+  type WorkRateLimitPolicies,
+} from '../http/limits.js';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -65,6 +70,26 @@ function durationFromEnv(
     throw new Error(
       `${name} must be an integer between ${min} and ${max} seconds.`,
     );
+  }
+
+  return value;
+}
+
+function bytesFromEnv(name: string, fallback: number, min: number, max: number): number {
+  const value = Number(process.env[name] ?? fallback);
+
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max} bytes.`);
+  }
+
+  return value;
+}
+
+function countFromEnv(name: string, fallback: number, min: number, max: number): number {
+  const value = Number(process.env[name] ?? fallback);
+
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new Error(`${name} must be an integer between ${min} and ${max}.`);
   }
 
   return value;
@@ -177,4 +202,54 @@ export const env = {
   cors: {
     allowedOrigins: parseCorsOrigins(appEnv, process.env.CORS_ALLOWED_ORIGINS),
   },
+
+  trustedProxyIps: parseTrustedProxyIps(process.env.TRUSTED_PROXY_IPS),
+
+  limits: (() => {
+    const maxAttachmentBytes = bytesFromEnv(
+      'MAX_ATTACHMENT_BYTES',
+      10 * 1024 * 1024,
+      1,
+      50 * 1024 * 1024,
+    );
+    const minRequestBodyBytes = minRequestBodyBytesForAttachment(maxAttachmentBytes);
+    const maxRequestBodyBytes = bytesFromEnv(
+      'MAX_REQUEST_BODY_BYTES',
+      Math.max(16 * 1024 * 1024, minRequestBodyBytes),
+      minRequestBodyBytes,
+      64 * 1024 * 1024,
+    );
+
+    return {
+      maxAttachmentBytes,
+      maxRequestBodyBytes,
+    };
+  })(),
+
+  rateLimits: {
+    mutation: {
+      limit: countFromEnv('WORK_MUTATION_RATE_LIMIT', 60, 1, 10_000),
+      windowSeconds: durationFromEnv('WORK_MUTATION_RATE_WINDOW_SECONDS', 60, 1, 3_600),
+    },
+    mutationOrg: {
+      limit: countFromEnv('WORK_ORG_MUTATION_RATE_LIMIT', 180, 1, 50_000),
+      windowSeconds: durationFromEnv('WORK_MUTATION_RATE_WINDOW_SECONDS', 60, 1, 3_600),
+    },
+    mutationIp: {
+      limit: countFromEnv('WORK_IP_MUTATION_RATE_LIMIT', 120, 1, 20_000),
+      windowSeconds: durationFromEnv('WORK_MUTATION_RATE_WINDOW_SECONDS', 60, 1, 3_600),
+    },
+    attachment: {
+      limit: countFromEnv('WORK_ATTACHMENT_RATE_LIMIT', 10, 1, 1_000),
+      windowSeconds: durationFromEnv('WORK_ATTACHMENT_RATE_WINDOW_SECONDS', 60, 1, 3_600),
+    },
+    attachmentOrg: {
+      limit: countFromEnv('WORK_ORG_ATTACHMENT_RATE_LIMIT', 30, 1, 5_000),
+      windowSeconds: durationFromEnv('WORK_ATTACHMENT_RATE_WINDOW_SECONDS', 60, 1, 3_600),
+    },
+    attachmentIp: {
+      limit: countFromEnv('WORK_IP_ATTACHMENT_RATE_LIMIT', 20, 1, 2_000),
+      windowSeconds: durationFromEnv('WORK_ATTACHMENT_RATE_WINDOW_SECONDS', 60, 1, 3_600),
+    },
+  } satisfies WorkRateLimitPolicies,
 } as const;

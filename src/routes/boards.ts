@@ -8,7 +8,11 @@ import {
   requireOrganizationId,
 } from '../authorization/organization.js';
 import { NotFoundError, ValidationError } from '../http/errors.js';
+import { optionalMetadata } from '../http/fields.js';
+import { FIELD_LIMITS } from '../http/limits.js';
+import { rateLimitWork } from '../http/work-rate-limit.js';
 import type { BoardRecord, BoardStore, UpdateBoardInput } from '../work/store.js';
+import { readJson, readOptionalInteger, readOptionalString, readRequiredText } from '../work/http.js';
 
 export type BoardRouteDependencies = {
   store: BoardStore;
@@ -31,60 +35,6 @@ function serializeBoard(board: BoardRecord) {
     createdAt: board.createdAt.toISOString(),
     updatedAt: board.updatedAt.toISOString(),
   };
-}
-
-async function readJson(c: { req: { json: () => Promise<unknown> } }) {
-  try {
-    const body = await c.req.json();
-    return body && typeof body === 'object' && !Array.isArray(body)
-      ? (body as Record<string, unknown>)
-      : {};
-  } catch {
-    throw new ValidationError('Request body must be valid JSON.');
-  }
-}
-
-function readOptionalString(value: unknown): string | null | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (value === null) {
-    return null;
-  }
-
-  if (typeof value !== 'string') {
-    throw new ValidationError('Invalid string field.');
-  }
-
-  const trimmed = value.trim();
-  return trimmed.length === 0 ? null : trimmed;
-}
-
-function readOptionalInteger(value: unknown): number | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (typeof value !== 'number' || !Number.isInteger(value)) {
-    throw new ValidationError('Position must be an integer.');
-  }
-
-  return value;
-}
-
-function readOptionalMetadata(
-  value: unknown,
-): Record<string, unknown> | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new ValidationError('Metadata must be a JSON object.');
-  }
-
-  return value as Record<string, unknown>;
 }
 
 function requireBoardId(boardId: string | undefined): string {
@@ -141,8 +91,7 @@ export function createBoardRoutes(dependencies: BoardRouteDependencies) {
 
   boards.post('/', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
 
     assertAuthorized({
@@ -153,12 +102,12 @@ export function createBoardRoutes(dependencies: BoardRouteDependencies) {
         organizationId,
       },
     });
+    await rateLimitWork(c, 'mutation');
 
-    if (typeof body.name !== 'string' || body.name.trim().length === 0) {
-      throw new ValidationError('Board name is required.', { field: 'name' });
-    }
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
 
-    const ownerId = readOptionalString(body.ownerId ?? body.owner_id);
+    const ownerId = readOptionalString(body.ownerId ?? body.owner_id, 'ownerId', 36);
     if (ownerId && !isUuid(ownerId)) {
       throw new ValidationError('ownerId must be a UUID.');
     }
@@ -167,13 +116,15 @@ export function createBoardRoutes(dependencies: BoardRouteDependencies) {
       organizationId,
       createdBy: auth.actor.userId,
       ownerId: ownerId ?? null,
-      name: body.name.trim(),
-      slug: readOptionalString(body.slug) ?? null,
-      description: readOptionalString(body.description) ?? null,
-      status: readOptionalString(body.status) ?? 'active',
-      color: readOptionalString(body.color) ?? null,
-      position: readOptionalInteger(body.position) ?? 0,
-      metadata: readOptionalMetadata(body.metadata) ?? {},
+      name: readRequiredText(body.name, 'name', FIELD_LIMITS.boardName),
+      slug: readOptionalString(body.slug, 'slug', FIELD_LIMITS.boardSlug) ?? null,
+      description:
+        readOptionalString(body.description, 'description', FIELD_LIMITS.boardDescription) ??
+        null,
+      status: readOptionalString(body.status, 'status', FIELD_LIMITS.boardStatus) ?? 'active',
+      color: readOptionalString(body.color, 'color', FIELD_LIMITS.boardColor) ?? null,
+      position: readOptionalInteger(body.position, 'position') ?? 0,
+      metadata: optionalMetadata(body.metadata) ?? {},
     });
 
     return c.json({ board: serializeBoard(board) }, 201);
@@ -206,8 +157,7 @@ export function createBoardRoutes(dependencies: BoardRouteDependencies) {
 
   boards.patch('/:boardId', async (c) => {
     const auth = getAuth(c);
-    const body = await readJson(c);
-    rejectIdentityOverrides(auth, c, body);
+    rejectIdentityOverrides(auth, c);
     const organizationId = requireOrganizationId(auth);
     const boardId = requireBoardId(c.req.param('boardId'));
 
@@ -220,28 +170,38 @@ export function createBoardRoutes(dependencies: BoardRouteDependencies) {
         organizationId,
       },
     });
+    await rateLimitWork(c, 'mutation');
+
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
 
     const patch: UpdateBoardInput = {};
 
     if (body.name !== undefined) {
-      if (typeof body.name !== 'string' || body.name.trim().length === 0) {
-        throw new ValidationError('Board name is required.', { field: 'name' });
-      }
-      patch.name = body.name.trim();
+      patch.name = readRequiredText(body.name, 'name', FIELD_LIMITS.boardName);
     }
 
-    if (body.slug !== undefined) patch.slug = readOptionalString(body.slug) ?? null;
+    if (body.slug !== undefined) {
+      patch.slug = readOptionalString(body.slug, 'slug', FIELD_LIMITS.boardSlug) ?? null;
+    }
     if (body.description !== undefined) {
-      patch.description = readOptionalString(body.description) ?? null;
+      patch.description =
+        readOptionalString(body.description, 'description', FIELD_LIMITS.boardDescription) ??
+        null;
     }
     if (body.status !== undefined) {
-      patch.status = readOptionalString(body.status) ?? 'active';
+      patch.status =
+        readOptionalString(body.status, 'status', FIELD_LIMITS.boardStatus) ?? 'active';
     }
-    if (body.color !== undefined) patch.color = readOptionalString(body.color) ?? null;
-    if (body.position !== undefined) patch.position = readOptionalInteger(body.position);
-    if (body.metadata !== undefined) patch.metadata = readOptionalMetadata(body.metadata);
+    if (body.color !== undefined) {
+      patch.color = readOptionalString(body.color, 'color', FIELD_LIMITS.boardColor) ?? null;
+    }
+    if (body.position !== undefined) {
+      patch.position = readOptionalInteger(body.position, 'position');
+    }
+    if (body.metadata !== undefined) patch.metadata = optionalMetadata(body.metadata);
     if (body.ownerId !== undefined || body.owner_id !== undefined) {
-      const ownerId = readOptionalString(body.ownerId ?? body.owner_id);
+      const ownerId = readOptionalString(body.ownerId ?? body.owner_id, 'ownerId', 36);
       if (ownerId && !isUuid(ownerId)) {
         throw new ValidationError('ownerId must be a UUID.');
       }
