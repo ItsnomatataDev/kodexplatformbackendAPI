@@ -17,15 +17,19 @@ import { securityHeadersMiddleware } from './middleware/security-headers.js';
 import health from './routes/health.js';
 import { createMeRoutes, type MeRouteDependencies } from './routes/me.js';
 import { createBoardRoutes } from './routes/boards.js';
+import {
+  createBoardColumnRoutes,
+  createColumnRoutes,
+} from './routes/columns.js';
 import { PostgresBoardStore } from './work/postgres-store.js';
-import type { BoardStore } from './work/store.js';
+import type { WorkStore } from './work/store.js';
 
 export type CreateAppOptions = {
   auth?: AuthDependencies;
   me?: MeRouteDependencies;
   authLifecycle?: AuthRouteDependencies;
   corsOrigins?: string[];
-  boards?: BoardStore;
+  boards?: WorkStore;
 };
 
 export function createApp(options: CreateAppOptions = {}) {
@@ -57,7 +61,9 @@ export function createApp(options: CreateAppOptions = {}) {
   const api = new Hono();
   api.use('*', createAuthMiddleware(authDependencies));
   api.route('/me', createMeRoutes(meDependencies));
+  api.route('/boards', createBoardColumnRoutes({ store: boards }));
   api.route('/boards', createBoardRoutes({ store: boards }));
+  api.route('/columns', createColumnRoutes({ store: boards }));
   app.route('/api', api);
 
   return app;
