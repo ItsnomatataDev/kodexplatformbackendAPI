@@ -98,4 +98,81 @@ export interface ColumnStore {
   ): Promise<ColumnRecord | null>;
 }
 
-export type WorkStore = BoardStore & ColumnStore;
+export type CardRecord = {
+  id: string;
+  organizationId: string;
+  boardId: string;
+  columnId: string | null;
+  title: string;
+  description: string | null;
+  statusKey: string;
+  priority: string;
+  department: string | null;
+  dueAt: Date | null;
+  startAt: Date | null;
+  completedAt: Date | null;
+  blockedReason: string | null;
+  aiGenerated: boolean;
+  position: number;
+  metadata: unknown;
+  trackedSecondsCache: number;
+  isBillable: boolean;
+  estimatedSeconds: number;
+  archivedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type CreateCardInput = {
+  organizationId: string;
+  boardId: string;
+  columnId: string;
+  createdBy: string;
+  title: string;
+  description?: string | null;
+  statusKey?: string;
+  priority?: string;
+  department?: string | null;
+  dueAt?: Date | null;
+  startAt?: Date | null;
+  position?: number;
+  isBillable?: boolean;
+  estimatedSeconds?: number;
+  metadata?: Record<string, unknown>;
+};
+
+export type UpdateCardInput = {
+  title?: string;
+  description?: string | null;
+  columnId?: string;
+  statusKey?: string;
+  priority?: string;
+  department?: string | null;
+  dueAt?: Date | null;
+  startAt?: Date | null;
+  completedAt?: Date | null;
+  blockedReason?: string | null;
+  position?: number;
+  isBillable?: boolean;
+  estimatedSeconds?: number;
+  metadata?: Record<string, unknown>;
+};
+
+export interface CardStore {
+  listCardsByBoard(
+    organizationId: string,
+    boardId: string,
+  ): Promise<CardRecord[]>;
+  getCardById(
+    organizationId: string,
+    cardId: string,
+  ): Promise<CardRecord | null>;
+  createCard(input: CreateCardInput): Promise<CardRecord | null>;
+  updateCard(
+    organizationId: string,
+    cardId: string,
+    input: UpdateCardInput,
+  ): Promise<CardRecord | null>;
+}
+
+export type WorkStore = BoardStore & ColumnStore & CardStore;

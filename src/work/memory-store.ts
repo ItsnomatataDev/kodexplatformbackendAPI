@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type {
   BoardRecord,
+  CardRecord,
   CreateBoardInput,
+  CreateCardInput,
   CreateColumnInput,
   ColumnRecord,
   UpdateBoardInput,
+  UpdateCardInput,
   UpdateColumnInput,
   WorkStore,
 } from './store.js';
@@ -12,6 +15,7 @@ import type {
 export class MemoryBoardStore implements WorkStore {
   private readonly boards = new Map<string, BoardRecord>();
   private readonly columns = new Map<string, ColumnRecord>();
+  private readonly cards = new Map<string, CardRecord>();
 
   async listByOrganization(organizationId: string) {
     return [...this.boards.values()]
@@ -163,5 +167,172 @@ export class MemoryBoardStore implements WorkStore {
     );
 
     return { ...column };
+  }
+
+  async listCardsByBoard(organizationId: string, boardId: string) {
+    return [...this.cards.values()]
+      .filter(
+        (card) =>
+          card.organizationId === organizationId && card.boardId === boardId,
+      )
+      .sort((left, right) => {
+        if (left.position !== right.position) {
+          return left.position - right.position;
+        }
+
+        const createdDelta = left.createdAt.getTime() - right.createdAt.getTime();
+        if (createdDelta !== 0) {
+          return createdDelta;
+        }
+
+        return left.id.localeCompare(right.id);
+      })
+      .map((card) => this.cloneCard(card));
+  }
+
+  async getCardById(organizationId: string, cardId: string) {
+    const card = this.cards.get(cardId);
+
+    if (!card || card.organizationId !== organizationId) {
+      return null;
+    }
+
+    const board = this.boards.get(card.boardId);
+    if (!board || board.organizationId !== organizationId) {
+      return null;
+    }
+
+    return this.cloneCard(card);
+  }
+
+  async createCard(input: CreateCardInput) {
+    const board = this.boards.get(input.boardId);
+
+    if (!board || board.organizationId !== input.organizationId) {
+      return null;
+    }
+
+    const column = this.columns.get(input.columnId);
+
+    if (
+      !column ||
+      column.organizationId !== input.organizationId ||
+      column.boardId !== input.boardId
+    ) {
+      return null;
+    }
+
+    const now = new Date();
+    const card: CardRecord = {
+      id: randomUUID(),
+      organizationId: input.organizationId,
+      boardId: input.boardId,
+      columnId: input.columnId,
+      title: input.title,
+      description: input.description ?? null,
+      statusKey: input.statusKey ?? column.statusKey ?? 'todo',
+      priority: input.priority ?? 'normal',
+      department: input.department ?? null,
+      dueAt: input.dueAt ?? null,
+      startAt: input.startAt ?? null,
+      completedAt: null,
+      blockedReason: null,
+      aiGenerated: false,
+      position:
+        input.position ??
+        this.nextCardPosition(
+          input.organizationId,
+          input.boardId,
+          input.columnId,
+        ),
+      metadata: input.metadata ? { ...input.metadata } : {},
+      trackedSecondsCache: 0,
+      isBillable: input.isBillable ?? false,
+      estimatedSeconds: input.estimatedSeconds ?? 0,
+      archivedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    this.cards.set(card.id, card);
+    return this.cloneCard(card);
+  }
+
+  async updateCard(
+    organizationId: string,
+    cardId: string,
+    input: UpdateCardInput,
+  ) {
+    const current = await this.getCardById(organizationId, cardId);
+
+    if (!current) {
+      return null;
+    }
+
+    if (input.columnId !== undefined) {
+      const column = this.columns.get(input.columnId);
+
+      if (
+        !column ||
+        column.organizationId !== organizationId ||
+        column.boardId !== current.boardId
+      ) {
+        return null;
+      }
+    }
+
+    const card = this.cards.get(cardId)!;
+    if (input.title !== undefined) card.title = input.title;
+    if (input.description !== undefined) card.description = input.description;
+    if (input.columnId !== undefined) card.columnId = input.columnId;
+    if (input.statusKey !== undefined) card.statusKey = input.statusKey;
+    if (input.priority !== undefined) card.priority = input.priority;
+    if (input.department !== undefined) card.department = input.department;
+    if (input.dueAt !== undefined) card.dueAt = input.dueAt;
+    if (input.startAt !== undefined) card.startAt = input.startAt;
+    if (input.completedAt !== undefined) card.completedAt = input.completedAt;
+    if (input.blockedReason !== undefined) card.blockedReason = input.blockedReason;
+    if (input.position !== undefined) card.position = input.position;
+    if (input.isBillable !== undefined) card.isBillable = input.isBillable;
+    if (input.estimatedSeconds !== undefined) {
+      card.estimatedSeconds = input.estimatedSeconds;
+    }
+    if (input.metadata !== undefined) card.metadata = { ...input.metadata };
+    card.updatedAt = new Date(
+      Math.max(Date.now(), card.updatedAt.getTime() + 1),
+    );
+
+    return this.cloneCard(card);
+  }
+
+  private nextCardPosition(
+    organizationId: string,
+    boardId: string,
+    columnId: string,
+  ) {
+    const positions = [...this.cards.values()]
+      .filter(
+        (card) =>
+          card.organizationId === organizationId &&
+          card.boardId === boardId &&
+          card.columnId === columnId,
+      )
+      .map((card) => card.position);
+
+    if (positions.length === 0) {
+      return 0;
+    }
+
+    return Math.max(...positions) + 1;
+  }
+
+  private cloneCard(card: CardRecord): CardRecord {
+    return {
+      ...card,
+      metadata:
+        card.metadata && typeof card.metadata === 'object'
+          ? { ...(card.metadata as Record<string, unknown>) }
+          : card.metadata,
+    };
   }
 }

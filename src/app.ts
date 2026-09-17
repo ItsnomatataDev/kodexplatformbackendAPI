@@ -21,6 +21,7 @@ import {
   createBoardColumnRoutes,
   createColumnRoutes,
 } from './routes/columns.js';
+import { createBoardCardRoutes, createCardRoutes } from './routes/cards.js';
 import { PostgresBoardStore } from './work/postgres-store.js';
 import type { WorkStore } from './work/store.js';
 
@@ -61,9 +62,11 @@ export function createApp(options: CreateAppOptions = {}) {
   const api = new Hono();
   api.use('*', createAuthMiddleware(authDependencies));
   api.route('/me', createMeRoutes(meDependencies));
+  api.route('/boards', createBoardCardRoutes({ store: boards }));
   api.route('/boards', createBoardColumnRoutes({ store: boards }));
   api.route('/boards', createBoardRoutes({ store: boards }));
   api.route('/columns', createColumnRoutes({ store: boards }));
+  api.route('/cards', createCardRoutes({ store: boards }));
   app.route('/api', api);
 
   return app;

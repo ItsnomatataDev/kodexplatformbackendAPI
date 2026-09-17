@@ -227,9 +227,11 @@ function tamperJwtSignature(token: string): string {
   assert.equal(parts.length, 3);
 
   const signature = parts[2];
-  const last = signature.at(-1);
-  const replacement = last === 'A' ? 'B' : 'A';
-  return `${parts[0]}.${parts[1]}.${signature.slice(0, -1)}${replacement}`;
+  const tamperedSignature = [...signature]
+    .map((char) => (char === 'A' ? 'B' : 'A'))
+    .join('');
+
+  return `${parts[0]}.${parts[1]}.${tamperedSignature}`;
 }
 
 test('valid login succeeds', async () => {
