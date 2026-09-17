@@ -39,7 +39,7 @@ services:
       retries: 10
 
   minio:
-    image: minio/minio:latest
+    image: pgsty/minio:latest
     container_name: kode-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
