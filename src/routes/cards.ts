@@ -171,6 +171,8 @@ function rejectIdentityOverrides(
     body.assigned_by,
     body.archivedBy,
     body.archived_by,
+    body.actorId,
+    body.actor_id,
   ];
 
   for (const candidate of identityCandidates) {
@@ -495,6 +497,7 @@ export function createCardRoutes(dependencies: CardRouteDependencies) {
       organizationId,
       cardId,
       patch,
+      auth.actor.userId,
     );
 
     if (!card) {

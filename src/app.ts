@@ -22,6 +22,17 @@ import {
   createColumnRoutes,
 } from './routes/columns.js';
 import { createBoardCardRoutes, createCardRoutes } from './routes/cards.js';
+import {
+  createAttachmentRoutes,
+  createCardNestedRoutes,
+  createCommentRoutes,
+  createLabelRoutes,
+  createSubmissionRoutes,
+  createTimeEntryRoutes,
+} from './routes/card-ecosystem.js';
+import { MemoryFileStorage } from './files/memory-storage.js';
+import { MinioFileStorage } from './files/minio-storage.js';
+import type { FileStorage } from './files/storage.js';
 import { PostgresBoardStore } from './work/postgres-store.js';
 import type { WorkStore } from './work/store.js';
 
@@ -31,6 +42,7 @@ export type CreateAppOptions = {
   authLifecycle?: AuthRouteDependencies;
   corsOrigins?: string[];
   boards?: WorkStore;
+  files?: FileStorage;
 };
 
 export function createApp(options: CreateAppOptions = {}) {
@@ -41,6 +53,11 @@ export function createApp(options: CreateAppOptions = {}) {
     options.authLifecycle ?? createDefaultAuthLifecycle(authDependencies);
   const corsOrigins = options.corsOrigins ?? env.cors.allowedOrigins;
   const boards = options.boards ?? new PostgresBoardStore();
+  const files =
+    options.files ??
+    (env.minio.accessKey && env.minio.secretKey
+      ? new MinioFileStorage()
+      : new MemoryFileStorage());
 
   app.use('*', securityHeadersMiddleware(env.appEnv));
   app.use('*', corsMiddleware(corsOrigins));
@@ -66,7 +83,13 @@ export function createApp(options: CreateAppOptions = {}) {
   api.route('/boards', createBoardColumnRoutes({ store: boards }));
   api.route('/boards', createBoardRoutes({ store: boards }));
   api.route('/columns', createColumnRoutes({ store: boards }));
+  api.route('/cards', createCardNestedRoutes({ store: boards, files }));
   api.route('/cards', createCardRoutes({ store: boards }));
+  api.route('/comments', createCommentRoutes({ store: boards, files }));
+  api.route('/labels', createLabelRoutes({ store: boards, files }));
+  api.route('/submissions', createSubmissionRoutes({ store: boards, files }));
+  api.route('/attachments', createAttachmentRoutes({ store: boards, files }));
+  api.route('/time-entries', createTimeEntryRoutes({ store: boards, files }));
   app.route('/api', api);
 
   return app;
