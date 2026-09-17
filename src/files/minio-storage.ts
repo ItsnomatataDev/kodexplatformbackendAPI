@@ -1,4 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
+import https from 'node:https';
 import { env } from '../config/env.js';
 import { ServiceUnavailableError } from '../http/errors.js';
 import type { FileStorage, PutObjectInput, StoredObject } from './storage.js';
@@ -25,10 +26,12 @@ export class MinioFileStorage implements FileStorage {
       accessKey: string;
       secretKey: string;
       region?: string;
+      ca?: string;
     } = {
       endpoint: env.minio.endpoint,
       accessKey: env.minio.accessKey,
       secretKey: env.minio.secretKey,
+      ca: env.minio.ca,
     },
   ) {}
 
@@ -139,10 +142,10 @@ export class MinioFileStorage implements FileStorage {
     headers.authorization = `AWS4-HMAC-SHA256 Credential=${this.options.accessKey}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
     try {
-      return await fetch(`${url.origin}${canonicalUri}`, {
+      return await this.dispatch(`${url.origin}${canonicalUri}`, {
         method,
         headers,
-        body: method === 'PUT' ? new Uint8Array(payload) : undefined,
+        body: method === 'PUT' ? payload : undefined,
       });
     } catch {
       throw new ServiceUnavailableError(
@@ -150,5 +153,74 @@ export class MinioFileStorage implements FileStorage {
         'Object storage is unavailable.',
       );
     }
+  }
+
+  private async dispatch(
+    url: string,
+    init: {
+      method: string;
+      headers: Record<string, string>;
+      body?: Buffer;
+    },
+  ): Promise<Response> {
+    if (!this.options.ca) {
+      return fetch(url, {
+        method: init.method,
+        headers: init.headers,
+        body: init.body ? new Uint8Array(init.body) : undefined,
+      });
+    }
+
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') {
+      throw new ServiceUnavailableError(
+        'OBJECT_STORAGE_UNAVAILABLE',
+        'Object storage is unavailable.',
+      );
+    }
+
+    return new Promise((resolve, reject) => {
+      const request = https.request(
+        {
+          protocol: parsed.protocol,
+          hostname: parsed.hostname,
+          port: parsed.port || 443,
+          path: `${parsed.pathname}${parsed.search}`,
+          method: init.method,
+          headers: init.headers,
+          ca: this.options.ca,
+          rejectUnauthorized: true,
+        },
+        (response) => {
+          const chunks: Buffer[] = [];
+          response.on('data', (chunk) => {
+            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+          });
+          response.on('end', () => {
+            const headers = new Headers();
+            for (const [name, value] of Object.entries(response.headers)) {
+              if (typeof value === 'string') {
+                headers.set(name, value);
+              } else if (Array.isArray(value)) {
+                headers.set(name, value.join(', '));
+              }
+            }
+
+            resolve(
+              new Response(Buffer.concat(chunks), {
+                status: response.statusCode ?? 500,
+                headers,
+              }),
+            );
+          });
+        },
+      );
+
+      request.on('error', reject);
+      if (init.body) {
+        request.write(init.body);
+      }
+      request.end();
+    });
   }
 }

@@ -33,8 +33,10 @@ export const logRedactPaths = [
   'MINIO_SECRET_KEY',
   'MINIO_ACCESS_KEY',
   'DATABASE_PASSWORD',
+  'REDIS_PASSWORD',
   'AUTH_TOKEN_SECRET',
   'auth.tokenSecret',
+  'redis.password',
 ] as const;
 
 export const logRedactCensor = '[Redacted]';

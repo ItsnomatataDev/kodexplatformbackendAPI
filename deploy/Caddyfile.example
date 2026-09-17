@@ -1,0 +1,25 @@
+# Example reverse-proxy configuration. This file does not enable live HTTPS
+# by itself. Replace the domain via KODE_API_DOMAIN.
+#
+# Internet
+#   → this proxy (HTTPS)
+#     → kode API on the private network
+#
+# The proxy address must be listed in TRUSTED_PROXY_IPS.
+# Do not trust X-Forwarded-For from arbitrary internet clients.
+
+{$KODE_API_DOMAIN:api.example.invalid} {
+	encode gzip
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+	}
+
+	reverse_proxy api:3000 {
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+	}
+}

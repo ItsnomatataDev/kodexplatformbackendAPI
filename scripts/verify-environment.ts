@@ -12,16 +12,21 @@ console.log(`Host: ${env.database.host}`);
 console.log(`Port: ${env.database.port}`);
 console.log(`Database: ${env.database.name}`);
 console.log(`User: ${env.database.user}`);
+console.log(`TLS: ${env.database.ssl ? 'enabled' : 'disabled'}`);
 
 console.log('');
 console.log('=== REDIS ===');
 console.log(`Host: ${env.redis.host}`);
 console.log(`Port: ${env.redis.port}`);
+console.log(`TLS: ${env.redis.tls ? 'enabled' : 'disabled'}`);
+console.log(`Authentication: ${env.redis.password ? 'configured' : 'not configured'}`);
+console.log(`Rate-limit namespace: kode:${env.appEnv}:ratelimit:`);
 
 console.log('');
 console.log('=== MINIO ===');
 console.log(`Endpoint: ${env.minio.endpoint}`);
 console.log(`Bucket: ${env.minio.bucket}`);
+console.log(`Credentials: ${env.minio.accessKey && env.minio.secretKey ? 'configured' : 'not configured'}`);
 
 console.log('');
 console.log('=== AUTH ===');

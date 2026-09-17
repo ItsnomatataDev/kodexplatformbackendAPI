@@ -289,4 +289,16 @@ test('production requires an explicit allow flag and non-local production names'
     }),
     /must contain "production"/,
   );
+  assertRejects(
+    productionConfig({
+      redis: { host: 'dev-redis' },
+    }),
+    /looks like a development host/,
+  );
+  assertRejects(
+    productionConfig({
+      redis: { host: 'staging-redis' },
+    }),
+    /looks like a staging host/,
+  );
 });

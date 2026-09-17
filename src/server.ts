@@ -3,6 +3,7 @@ import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { logger } from './config/logger.js';
 import { db } from './db/pool.js';
+import { closeAllRedisRateLimiters } from './auth/rate-limit-redis.js';
 
 const app = createApp();
 
@@ -21,12 +22,38 @@ logger.info(
   'Kode Platform API started',
 );
 
+function closeHttpServer() {
+  return new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve();
+    });
+  });
+}
+
+let shuttingDown = false;
+
 async function shutdown(signal: string) {
+  if (shuttingDown) {
+    return;
+  }
+
+  shuttingDown = true;
   logger.info({ signal }, 'Shutting down Kode Platform API');
 
-  server.close();
-  await db.end();
-  process.exit(0);
+  try {
+    await closeHttpServer();
+    await closeAllRedisRateLimiters();
+    await db.end();
+    process.exit(0);
+  } catch (error) {
+    logger.error({ err: error }, 'Graceful shutdown failed');
+    process.exit(1);
+  }
 }
 
 process.on('SIGTERM', () => {

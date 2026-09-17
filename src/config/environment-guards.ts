@@ -93,6 +93,24 @@ function assertNoProductionHost(label: string, value: string): void {
   }
 }
 
+function assertNoDevelopmentHost(label: string, value: string): void {
+  const hostname = hostnameOf(value);
+
+  if (
+    includesToken(hostname, 'development') ||
+    hostname === 'dev' ||
+    hostname.startsWith('dev-')
+  ) {
+    throw new Error(`${label} looks like a development host.`);
+  }
+}
+
+function assertNoStagingHost(label: string, value: string): void {
+  if (includesToken(hostnameOf(value), 'staging')) {
+    throw new Error(`${label} looks like a staging host.`);
+  }
+}
+
 function assertDevelopment(config: EnvironmentIsolationInput): void {
   if (config.allowProduction) {
     throw new Error(
@@ -164,6 +182,12 @@ function assertProduction(config: EnvironmentIsolationInput): void {
   assertNotLoopback('Production PostgreSQL host', config.database.host);
   assertNotLoopback('Production Redis host', config.redis.host);
   assertNotLoopback('Production MinIO endpoint', config.minio.endpoint);
+  assertNoDevelopmentHost('Production PostgreSQL host', config.database.host);
+  assertNoDevelopmentHost('Production Redis host', config.redis.host);
+  assertNoDevelopmentHost('Production MinIO endpoint', config.minio.endpoint);
+  assertNoStagingHost('Production PostgreSQL host', config.database.host);
+  assertNoStagingHost('Production Redis host', config.redis.host);
+  assertNoStagingHost('Production MinIO endpoint', config.minio.endpoint);
 }
 
 export function assertEnvironmentIsolation(

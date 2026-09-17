@@ -7,6 +7,11 @@ import {
   minRequestBodyBytesForAttachment,
   type WorkRateLimitPolicies,
 } from '../http/limits.js';
+import {
+  assertInfrastructureSecurity,
+  isLocalInfrastructure,
+} from './infrastructure-security.js';
+import { readTlsCaFile } from './tls.js';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -20,6 +25,32 @@ function required(name: string): string {
 
 function optional(name: string, fallback: string): string {
   return process.env[name] ?? fallback;
+}
+
+function booleanFromEnv(name: string, fallback: boolean): boolean {
+  const value = process.env[name];
+
+  if (value == null || value === '') {
+    return fallback;
+  }
+
+  if (value === 'true') {
+    return true;
+  }
+
+  if (value === 'false') {
+    return false;
+  }
+
+  throw new Error(`${name} must be true or false.`);
+}
+
+function requiredEnabled(name: string): true {
+  if (process.env[name] !== 'true') {
+    throw new Error(`${name}=true is required in this environment.`);
+  }
+
+  return true;
 }
 
 function portFromEnv(name: string, fallback: number): number {
@@ -45,7 +76,7 @@ function authSecretFromEnv(appEnvironment: ReturnType<typeof parseAppEnvironment
     );
   }
 
-  if (appEnvironment === 'production' && /change_me/i.test(secret)) {
+  if (appEnvironment === 'production' && /change_me|replace_with_runtime_secret/i.test(secret)) {
     throw new Error(
       'Production AUTH_TOKEN_SECRET cannot use the example placeholder.',
     );
@@ -101,6 +132,7 @@ const allowProduction = process.env.ALLOW_PRODUCTION === 'true';
 
 const databaseHost = required('DATABASE_HOST');
 const databaseName = required('DATABASE_NAME');
+const databasePassword = required('DATABASE_PASSWORD');
 
 const redisHost =
   appEnv === 'development'
@@ -132,6 +164,8 @@ const host =
     ? optional('HOST', '127.0.0.1')
     : optional('HOST', '0.0.0.0');
 
+const trustedProxyIps = parseTrustedProxyIps(process.env.TRUSTED_PROXY_IPS);
+
 assertEnvironmentIsolation({
   appEnv,
   nodeEnv,
@@ -150,6 +184,42 @@ assertEnvironmentIsolation({
   },
 });
 
+const localInfrastructure = isLocalInfrastructure({
+  databaseHost,
+  redisHost,
+  minioEndpoint,
+});
+
+const remoteTlsDefault = appEnv === 'staging' && !localInfrastructure;
+const databaseSsl =
+  appEnv === 'production' ? requiredEnabled('DATABASE_SSL') : booleanFromEnv('DATABASE_SSL', remoteTlsDefault);
+const redisTls =
+  appEnv === 'production' ? requiredEnabled('REDIS_TLS') : booleanFromEnv('REDIS_TLS', remoteTlsDefault);
+const redisPassword = optional('REDIS_PASSWORD', '');
+const redisUsername = optional('REDIS_USERNAME', '');
+
+assertInfrastructureSecurity({
+  appEnv,
+  database: {
+    host: databaseHost,
+    ssl: databaseSsl,
+    rejectUnauthorized: true,
+    password: databasePassword,
+  },
+  redis: {
+    host: redisHost,
+    tls: redisTls,
+    rejectUnauthorized: true,
+    password: redisPassword,
+  },
+  minio: {
+    endpoint: minioEndpoint,
+    accessKey: minioAccessKey,
+    secretKey: minioSecretKey,
+  },
+  trustedProxyIps,
+});
+
 export const env = {
   appEnv,
   nodeEnv,
@@ -164,12 +234,20 @@ export const env = {
     port: portFromEnv('DATABASE_PORT', 5432),
     name: databaseName,
     user: required('DATABASE_USER'),
-    password: required('DATABASE_PASSWORD'),
+    password: databasePassword,
+    ssl: databaseSsl,
+    rejectUnauthorized: true as const,
+    ca: readTlsCaFile(process.env.DATABASE_SSL_CA_FILE, 'DATABASE_SSL_CA_FILE'),
   },
 
   redis: {
     host: redisHost,
     port: portFromEnv('REDIS_PORT', 6379),
+    username: redisUsername || undefined,
+    password: redisPassword || undefined,
+    tls: redisTls,
+    rejectUnauthorized: true as const,
+    ca: readTlsCaFile(process.env.REDIS_TLS_CA_FILE, 'REDIS_TLS_CA_FILE'),
   },
 
   minio: {
@@ -177,6 +255,7 @@ export const env = {
     accessKey: minioAccessKey,
     secretKey: minioSecretKey,
     bucket: minioBucket,
+    ca: readTlsCaFile(process.env.MINIO_TLS_CA_FILE, 'MINIO_TLS_CA_FILE'),
   },
 
   auth: {
@@ -203,7 +282,7 @@ export const env = {
     allowedOrigins: parseCorsOrigins(appEnv, process.env.CORS_ALLOWED_ORIGINS),
   },
 
-  trustedProxyIps: parseTrustedProxyIps(process.env.TRUSTED_PROXY_IPS),
+  trustedProxyIps,
 
   limits: (() => {
     const maxAttachmentBytes = bytesFromEnv(

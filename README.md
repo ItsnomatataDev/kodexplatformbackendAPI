@@ -34,3 +34,5 @@ npm run verify:env
 ```
 
 Architecture notes live in `docs/architecture/`.
+Production container and reverse-proxy examples live in `deploy/README.md`.
+Do not use `docker-compose.yml` for production.

@@ -1,5 +1,6 @@
 # Development stack only.
 # Do not use these services, ports, or volumes for staging or production.
+# Production topology example: docker-compose.production.example.yml
 # Compose project name keeps volume names isolated from any future staging file.
 
 name: kode-platform-dev

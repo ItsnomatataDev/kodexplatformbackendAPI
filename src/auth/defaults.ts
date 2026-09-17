@@ -79,9 +79,16 @@ export function createDefaultAuthLifecycle(
     rateLimiter:
       env.appEnv === 'development'
         ? new MemoryRateLimiter(['development'])
-        : new RedisRateLimiter(
-            `redis://${env.redis.host}:${env.redis.port}`,
-          ),
+        : new RedisRateLimiter({
+            appEnv: env.appEnv,
+            host: env.redis.host,
+            port: env.redis.port,
+            username: env.redis.username,
+            password: env.redis.password,
+            tls: env.redis.tls,
+            rejectUnauthorized: env.redis.rejectUnauthorized,
+            ca: env.redis.ca,
+          }),
     cookies: {
       secure: env.auth.cookieSecure,
       refreshMaxAgeSeconds: env.auth.refreshTokenTtlSeconds,
