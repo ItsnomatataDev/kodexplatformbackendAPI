@@ -122,6 +122,20 @@ type CardBody = {
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  createdByProfile: {
+    userId: string;
+    fullName: string | null;
+    username: string | null;
+    email: string | null;
+    avatarUrl: string | null;
+  } | null;
+  assignedToProfile: {
+    userId: string;
+    fullName: string | null;
+    username: string | null;
+    email: string | null;
+    avatarUrl: string | null;
+  } | null;
 };
 
 async function json(response: Response) {
@@ -291,6 +305,8 @@ test('cards can be created, listed, read, and updated in the authenticated organ
   assert.equal(created.card?.isBillable, false);
   assert.equal(created.card?.estimatedSeconds, 0);
   assert.equal(created.card?.trackedSecondsCache, 0);
+  assert.equal(created.card?.createdByProfile, null);
+  assert.equal(created.card?.assignedToProfile, null);
   assert.deepEqual(created.card?.metadata, {});
 
   const stored = await store.getCardById(orgA, created.card!.id);

@@ -134,6 +134,8 @@ export function rejectIdentityOverrides(
     body.reviewed_by,
     body.archivedBy,
     body.archived_by,
+    body.completedBy,
+    body.completed_by,
   ];
 
   for (const candidate of identityCandidates) {

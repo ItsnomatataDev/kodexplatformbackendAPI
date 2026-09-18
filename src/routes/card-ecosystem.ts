@@ -28,10 +28,14 @@ import type {
   AttachmentRecord,
   CardLabelRecord,
   CardUpdateRecord,
+  ChecklistItemRecord,
+  ChecklistRecord,
   CommentRecord,
   LabelRecord,
   SubmissionRecord,
   TimeEntryRecord,
+  UpdateChecklistInput,
+  UpdateChecklistItemInput,
   UpdateCommentInput,
   UpdateLabelInput,
   UpdateSubmissionInput,
@@ -166,6 +170,45 @@ function serializeTimeEntry(entry: TimeEntryRecord) {
     createdAt: entry.createdAt.toISOString(),
     updatedAt: entry.updatedAt.toISOString(),
   };
+}
+
+function serializeChecklistItem(item: ChecklistItemRecord) {
+  return {
+    id: item.id,
+    checklistId: item.checklistId,
+    cardId: item.cardId,
+    organizationId: item.organizationId,
+    createdBy: item.createdBy,
+    completedBy: item.completedBy,
+    content: item.content,
+    isCompleted: item.isCompleted,
+    completedAt: item.completedAt?.toISOString() ?? null,
+    position: item.position,
+    createdAt: item.createdAt.toISOString(),
+    updatedAt: item.updatedAt.toISOString(),
+  };
+}
+
+function serializeChecklist(checklist: ChecklistRecord) {
+  return {
+    id: checklist.id,
+    cardId: checklist.cardId,
+    organizationId: checklist.organizationId,
+    createdBy: checklist.createdBy,
+    title: checklist.title,
+    position: checklist.position,
+    createdAt: checklist.createdAt.toISOString(),
+    updatedAt: checklist.updatedAt.toISOString(),
+    items: checklist.items.map(serializeChecklistItem),
+  };
+}
+
+function readOptionalPosition(value: unknown): number | undefined {
+  const position = readOptionalInteger(value, 'position');
+  if (position !== undefined && position < 0) {
+    throw new ValidationError('position must be at least 0.', { field: 'position' });
+  }
+  return position;
 }
 
 function authorize(
@@ -647,6 +690,39 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
     return c.json({ timeEntry: serializeTimeEntry(entry) });
   });
 
+  routes.get('/:cardId/checklists', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    const cardId = requireId(c.req.param('cardId'), 'cardId');
+    authorize(auth, 'work.checklists.read', 'work.checklist', organizationId, cardId);
+    await requireCardInOrganization(dependencies.store, organizationId, cardId);
+    const checklists = await dependencies.store.listChecklistsByCard(organizationId, cardId);
+    return c.json({ checklists: checklists.map(serializeChecklist) });
+  });
+
+  routes.post('/:cardId/checklists', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    const cardId = requireId(c.req.param('cardId'), 'cardId');
+    await authorizeMutation(c, auth, 'work.checklists.create', 'work.checklist', organizationId, cardId);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
+    await requireCardInOrganization(dependencies.store, organizationId, cardId);
+    const checklist = await dependencies.store.createChecklist({
+      organizationId,
+      cardId,
+      createdBy: auth.actor.userId,
+      title: readRequiredText(body.title, 'title', FIELD_LIMITS.checklistTitle),
+      position: readOptionalPosition(body.position),
+    });
+    if (!checklist) {
+      throw new NotFoundError('CARD_NOT_FOUND', 'The card was not found.');
+    }
+    return c.json({ checklist: serializeChecklist(checklist) }, 201);
+  });
+
   return routes;
 }
 
@@ -930,6 +1006,146 @@ export function createTimeEntryRoutes(dependencies: CardEcosystemDependencies) {
       throw new NotFoundError('TIME_ENTRY_NOT_FOUND', 'The time entry was not found.');
     }
     return c.json({ timeEntry: serializeTimeEntry(entry) });
+  });
+
+  return routes;
+}
+
+export function createChecklistRoutes(dependencies: CardEcosystemDependencies) {
+  const routes = new Hono();
+
+  routes.patch('/:checklistId', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    const checklistId = requireId(c.req.param('checklistId'), 'checklistId');
+    await authorizeMutation(c, auth, 'work.checklists.update', 'work.checklist', organizationId, checklistId);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
+    const existing = await dependencies.store.getChecklistById(organizationId, checklistId);
+    if (!existing) {
+      throw new NotFoundError('CHECKLIST_NOT_FOUND', 'The checklist was not found.');
+    }
+    const patch: UpdateChecklistInput = {};
+    if (body.title !== undefined) {
+      patch.title = readRequiredText(body.title, 'title', FIELD_LIMITS.checklistTitle);
+    }
+    if (body.position !== undefined) {
+      patch.position = readOptionalPosition(body.position);
+    }
+    if (Object.keys(patch).length === 0) {
+      throw new ValidationError('No checklist fields were provided to update.');
+    }
+    const checklist = await dependencies.store.updateChecklist(organizationId, checklistId, patch);
+    if (!checklist) {
+      throw new NotFoundError('CHECKLIST_NOT_FOUND', 'The checklist was not found.');
+    }
+    return c.json({ checklist: serializeChecklist(checklist) });
+  });
+
+  routes.delete('/:checklistId', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    const checklistId = requireId(c.req.param('checklistId'), 'checklistId');
+    await authorizeMutation(c, auth, 'work.checklists.delete', 'work.checklist', organizationId, checklistId);
+    const existing = await dependencies.store.getChecklistById(organizationId, checklistId);
+    if (!existing) {
+      throw new NotFoundError('CHECKLIST_NOT_FOUND', 'The checklist was not found.');
+    }
+    const removed = await dependencies.store.deleteChecklist(organizationId, checklistId);
+    if (!removed) {
+      throw new NotFoundError('CHECKLIST_NOT_FOUND', 'The checklist was not found.');
+    }
+    return c.body(null, 204);
+  });
+
+  routes.post('/:checklistId/items', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    const checklistId = requireId(c.req.param('checklistId'), 'checklistId');
+    await authorizeMutation(c, auth, 'work.checklists.create', 'work.checklist', organizationId, checklistId);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
+    const existing = await dependencies.store.getChecklistById(organizationId, checklistId);
+    if (!existing) {
+      throw new NotFoundError('CHECKLIST_NOT_FOUND', 'The checklist was not found.');
+    }
+    const item = await dependencies.store.createChecklistItem({
+      organizationId,
+      checklistId,
+      createdBy: auth.actor.userId,
+      content: readRequiredText(body.content, 'content', FIELD_LIMITS.checklistItemContent),
+      position: readOptionalPosition(body.position),
+    });
+    if (!item) {
+      throw new NotFoundError('CHECKLIST_NOT_FOUND', 'The checklist was not found.');
+    }
+    return c.json({ item: serializeChecklistItem(item) }, 201);
+  });
+
+  return routes;
+}
+
+export function createChecklistItemRoutes(dependencies: CardEcosystemDependencies) {
+  const routes = new Hono();
+
+  routes.patch('/:itemId', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    const itemId = requireId(c.req.param('itemId'), 'itemId');
+    await authorizeMutation(c, auth, 'work.checklists.update', 'work.checklist', organizationId, itemId);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
+    const existing = await dependencies.store.getChecklistItemById(organizationId, itemId);
+    if (!existing) {
+      throw new NotFoundError('CHECKLIST_ITEM_NOT_FOUND', 'The checklist item was not found.');
+    }
+    const patch: UpdateChecklistItemInput = {};
+    if (body.content !== undefined) {
+      patch.content = readRequiredText(body.content, 'content', FIELD_LIMITS.checklistItemContent);
+    }
+    if (body.position !== undefined) {
+      patch.position = readOptionalPosition(body.position);
+    }
+    if (body.isCompleted !== undefined || body.is_completed !== undefined) {
+      patch.isCompleted = readOptionalBoolean(
+        body.isCompleted ?? body.is_completed,
+        'isCompleted',
+      );
+    }
+    if (Object.keys(patch).length === 0) {
+      throw new ValidationError('No checklist item fields were provided to update.');
+    }
+    const item = await dependencies.store.updateChecklistItem(
+      organizationId,
+      itemId,
+      patch,
+      auth.actor.userId,
+    );
+    if (!item) {
+      throw new NotFoundError('CHECKLIST_ITEM_NOT_FOUND', 'The checklist item was not found.');
+    }
+    return c.json({ item: serializeChecklistItem(item) });
+  });
+
+  routes.delete('/:itemId', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    const itemId = requireId(c.req.param('itemId'), 'itemId');
+    await authorizeMutation(c, auth, 'work.checklists.delete', 'work.checklist', organizationId, itemId);
+    const existing = await dependencies.store.getChecklistItemById(organizationId, itemId);
+    if (!existing) {
+      throw new NotFoundError('CHECKLIST_ITEM_NOT_FOUND', 'The checklist item was not found.');
+    }
+    const removed = await dependencies.store.deleteChecklistItem(organizationId, itemId);
+    if (!removed) {
+      throw new NotFoundError('CHECKLIST_ITEM_NOT_FOUND', 'The checklist item was not found.');
+    }
+    return c.body(null, 204);
   });
 
   return routes;

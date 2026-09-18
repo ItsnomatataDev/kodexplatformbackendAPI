@@ -6,10 +6,14 @@ import type {
   CardLabelRecord,
   CardRecord,
   CardUpdateRecord,
+  ChecklistItemRecord,
+  ChecklistRecord,
   CommentRecord,
   CreateAttachmentInput,
   CreateBoardInput,
   CreateCardInput,
+  CreateChecklistInput,
+  CreateChecklistItemInput,
   CreateColumnInput,
   CreateCommentInput,
   CreateLabelInput,
@@ -22,6 +26,8 @@ import type {
   TimeEntryRecord,
   UpdateBoardInput,
   UpdateCardInput,
+  UpdateChecklistInput,
+  UpdateChecklistItemInput,
   UpdateColumnInput,
   UpdateCommentInput,
   UpdateLabelInput,
@@ -45,6 +51,8 @@ export class MemoryBoardStore implements WorkStore {
   private readonly submissions = new Map<string, SubmissionRecord>();
   private readonly attachments = new Map<string, AttachmentRecord>();
   private readonly timeEntries = new Map<string, TimeEntryRecord>();
+  private readonly checklists = new Map<string, ChecklistRecord>();
+  private readonly checklistItems = new Map<string, ChecklistItemRecord>();
 
   seedOrganizationMember(member: OrganizationMemberRecord) {
     this.members.set(`${member.organizationId}:${member.userId}`, { ...member });
@@ -968,6 +976,193 @@ export class MemoryBoardStore implements WorkStore {
     return { ...entry };
   }
 
+  async listChecklistsByCard(organizationId: string, cardId: string) {
+    const card = await this.getCardById(organizationId, cardId);
+    if (!card) {
+      return [];
+    }
+
+    return [...this.checklists.values()]
+      .filter(
+        (checklist) =>
+          checklist.organizationId === organizationId &&
+          checklist.cardId === cardId,
+      )
+      .sort((left, right) => {
+        if (left.position !== right.position) {
+          return left.position - right.position;
+        }
+        return left.createdAt.getTime() - right.createdAt.getTime();
+      })
+      .map((checklist) => this.cloneChecklist(checklist));
+  }
+
+  async getChecklistById(organizationId: string, checklistId: string) {
+    const checklist = this.checklists.get(checklistId);
+    if (!checklist || checklist.organizationId !== organizationId) {
+      return null;
+    }
+
+    const card = await this.getCardById(organizationId, checklist.cardId);
+    if (!card) {
+      return null;
+    }
+
+    return this.cloneChecklist(checklist);
+  }
+
+  async createChecklist(input: CreateChecklistInput) {
+    const card = await this.getCardById(input.organizationId, input.cardId);
+    if (!card) {
+      return null;
+    }
+
+    const now = new Date();
+    const checklist: ChecklistRecord = {
+      id: randomUUID(),
+      cardId: input.cardId,
+      organizationId: input.organizationId,
+      createdBy: input.createdBy,
+      title: input.title,
+      position:
+        input.position ??
+        this.nextChecklistPosition(input.organizationId, input.cardId),
+      createdAt: now,
+      updatedAt: now,
+      items: [],
+    };
+    this.checklists.set(checklist.id, checklist);
+    this.recordUpdate(
+      card,
+      input.createdBy,
+      'checklist_added',
+      `Added checklist "${checklist.title}"`,
+    );
+    return this.cloneChecklist(checklist);
+  }
+
+  async updateChecklist(
+    organizationId: string,
+    checklistId: string,
+    input: UpdateChecklistInput,
+  ) {
+    const current = await this.getChecklistById(organizationId, checklistId);
+    if (!current) {
+      return null;
+    }
+
+    const checklist = this.checklists.get(checklistId)!;
+    if (input.title !== undefined) checklist.title = input.title;
+    if (input.position !== undefined) checklist.position = input.position;
+    checklist.updatedAt = new Date(
+      Math.max(Date.now(), checklist.updatedAt.getTime() + 1),
+    );
+    return this.cloneChecklist(checklist);
+  }
+
+  async deleteChecklist(organizationId: string, checklistId: string) {
+    const current = await this.getChecklistById(organizationId, checklistId);
+    if (!current) {
+      return false;
+    }
+
+    for (const [itemId, item] of this.checklistItems) {
+      if (item.checklistId === checklistId && item.organizationId === organizationId) {
+        this.checklistItems.delete(itemId);
+      }
+    }
+    this.checklists.delete(checklistId);
+    return true;
+  }
+
+  async getChecklistItemById(organizationId: string, itemId: string) {
+    const item = this.checklistItems.get(itemId);
+    if (!item || item.organizationId !== organizationId) {
+      return null;
+    }
+
+    const checklist = await this.getChecklistById(organizationId, item.checklistId);
+    if (!checklist) {
+      return null;
+    }
+
+    return { ...item };
+  }
+
+  async createChecklistItem(input: CreateChecklistItemInput) {
+    const checklist = await this.getChecklistById(
+      input.organizationId,
+      input.checklistId,
+    );
+    if (!checklist) {
+      return null;
+    }
+
+    const card = await this.getCardById(input.organizationId, checklist.cardId);
+    if (!card) {
+      return null;
+    }
+
+    const now = new Date();
+    const item: ChecklistItemRecord = {
+      id: randomUUID(),
+      checklistId: checklist.id,
+      cardId: checklist.cardId,
+      organizationId: input.organizationId,
+      createdBy: input.createdBy,
+      completedBy: null,
+      content: input.content,
+      isCompleted: false,
+      completedAt: null,
+      position:
+        input.position ??
+        this.nextChecklistItemPosition(input.organizationId, checklist.id),
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.checklistItems.set(item.id, item);
+    this.recordUpdate(
+      card,
+      input.createdBy,
+      'checklist_item_added',
+      `Added checklist item "${item.content}"`,
+    );
+    return { ...item };
+  }
+
+  async updateChecklistItem(
+    organizationId: string,
+    itemId: string,
+    input: UpdateChecklistItemInput,
+    actorUserId: string,
+  ) {
+    const current = await this.getChecklistItemById(organizationId, itemId);
+    if (!current) {
+      return null;
+    }
+
+    const item = this.checklistItems.get(itemId)!;
+    if (input.content !== undefined) item.content = input.content;
+    if (input.position !== undefined) item.position = input.position;
+    if (input.isCompleted !== undefined) {
+      item.isCompleted = input.isCompleted;
+      item.completedAt = input.isCompleted ? new Date() : null;
+      item.completedBy = input.isCompleted ? actorUserId : null;
+    }
+    item.updatedAt = new Date(Math.max(Date.now(), item.updatedAt.getTime() + 1));
+    return { ...item };
+  }
+
+  async deleteChecklistItem(organizationId: string, itemId: string) {
+    const current = await this.getChecklistItemById(organizationId, itemId);
+    if (!current) {
+      return false;
+    }
+
+    this.checklistItems.delete(itemId);
+    return true;
+  }
+
   private nextCardPosition(
     organizationId: string,
     boardId: string,
@@ -1073,6 +1268,49 @@ export class MemoryBoardStore implements WorkStore {
         card.metadata && typeof card.metadata === 'object'
           ? { ...(card.metadata as Record<string, unknown>) }
           : card.metadata,
+    };
+  }
+
+  private nextChecklistPosition(organizationId: string, cardId: string) {
+    const positions = [...this.checklists.values()]
+      .filter(
+        (checklist) =>
+          checklist.organizationId === organizationId &&
+          checklist.cardId === cardId,
+      )
+      .map((checklist) => checklist.position);
+    return positions.length === 0 ? 0 : Math.max(...positions) + 1;
+  }
+
+  private nextChecklistItemPosition(organizationId: string, checklistId: string) {
+    const positions = [...this.checklistItems.values()]
+      .filter(
+        (item) =>
+          item.organizationId === organizationId &&
+          item.checklistId === checklistId,
+      )
+      .map((item) => item.position);
+    return positions.length === 0 ? 0 : Math.max(...positions) + 1;
+  }
+
+  private cloneChecklist(checklist: ChecklistRecord): ChecklistRecord {
+    const items = [...this.checklistItems.values()]
+      .filter(
+        (item) =>
+          item.organizationId === checklist.organizationId &&
+          item.checklistId === checklist.id,
+      )
+      .sort((left, right) => {
+        if (left.position !== right.position) {
+          return left.position - right.position;
+        }
+        return left.createdAt.getTime() - right.createdAt.getTime();
+      })
+      .map((item) => ({ ...item }));
+
+    return {
+      ...checklist,
+      items,
     };
   }
 }

@@ -442,3 +442,101 @@ test('inactive membership and organization cannot use the card ecosystem', async
   );
   assert.equal(orgDenied.error?.code, 'ORGANIZATION_INACTIVE');
 });
+
+test('checklists and items stay on the parent card', async () => {
+  const app = createWorkApp(new MemoryBoardStore());
+  const authorization = await bearer(userA);
+  const boardId = await createBoard(app, userA, 'Board');
+  const columnId = await createColumn(app, userA, boardId, 'To Do');
+  const card = await createCard(app, userA, boardId, columnId);
+
+  const forged = await json(
+    await app.request(`/api/cards/${card.id}/checklists`, {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ title: 'Checklist', createdBy: userB }),
+    }),
+  );
+  assert.equal(forged.error?.code, 'USER_OVERRIDE_REJECTED');
+
+  const created = await json(
+    await app.request(`/api/cards/${card.id}/checklists`, {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ title: 'Launch checklist' }),
+    }),
+  );
+  assert.equal(created.checklist.title, 'Launch checklist');
+  assert.equal(created.checklist.createdBy, userA);
+  assert.equal(created.checklist.cardId, card.id);
+  assert.deepEqual(created.checklist.items, []);
+
+  const item = await json(
+    await app.request(`/api/checklists/${created.checklist.id}/items`, {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ content: 'Write copy' }),
+    }),
+  );
+  assert.equal(item.item.content, 'Write copy');
+  assert.equal(item.item.isCompleted, false);
+  assert.equal(item.item.createdBy, userA);
+  assert.equal(item.item.checklistId, created.checklist.id);
+
+  const toggled = await json(
+    await app.request(`/api/checklist-items/${item.item.id}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ isCompleted: true, completedBy: userB }),
+    }),
+  );
+  assert.equal(toggled.error?.code, 'USER_OVERRIDE_REJECTED');
+
+  const completed = await json(
+    await app.request(`/api/checklist-items/${item.item.id}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ isCompleted: true }),
+    }),
+  );
+  assert.equal(completed.item.isCompleted, true);
+  assert.equal(completed.item.completedBy, userA);
+  assert.equal(typeof completed.item.completedAt, 'string');
+
+  const listed = await json(
+    await app.request(`/api/cards/${card.id}/checklists`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(listed.checklists.length, 1);
+  assert.equal(listed.checklists[0].items.length, 1);
+  assert.equal(listed.checklists[0].items[0].isCompleted, true);
+
+  const deleted = await app.request(`/api/checklist-items/${item.item.id}`, {
+    method: 'DELETE',
+    headers: { Authorization: authorization },
+  });
+  assert.equal(deleted.status, 204);
+
+  const afterDelete = await json(
+    await app.request(`/api/cards/${card.id}/checklists`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(afterDelete.checklists[0].items.length, 0);
+});

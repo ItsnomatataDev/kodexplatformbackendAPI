@@ -14,6 +14,7 @@
     "migrate:identity": "tsx scripts/migration/migrate-identity.ts",
     "migrate:work": "tsx scripts/migration/migrate-work.ts",
     "migrate:attachments": "tsx scripts/migration/migrate-attachments.ts",
+    "migrate:checklists": "tsx scripts/migration/migrate-checklists.ts",
     "verify:env": "tsx scripts/verify-environment.ts",
     "auth:issue-dev-token": "tsx scripts/issue-dev-token.ts",
     "auth:bootstrap-password": "tsx scripts/bootstrap-dev-password.ts"

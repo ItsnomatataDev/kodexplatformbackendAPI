@@ -6,8 +6,13 @@ import type {
   CardLabelRecord,
   CardRecord,
   CardUpdateRecord,
+  ChecklistItemRecord,
+  ChecklistRecord,
   CommentRecord,
+  WorkPersonProfile,
   CreateAttachmentInput,
+  CreateChecklistInput,
+  CreateChecklistItemInput,
   CreateBoardInput,
   CreateCardInput,
   CreateColumnInput,
@@ -26,6 +31,8 @@ import type {
   UpdateCommentInput,
   UpdateLabelInput,
   UpdateSubmissionInput,
+  UpdateChecklistInput,
+  UpdateChecklistItemInput,
   UpdateTimeEntryInput,
   WatcherRecord,
   WorkStore,
@@ -157,6 +164,14 @@ type CardRow = {
   legacy_office_id: string | null;
   created_at: Date;
   updated_at: Date;
+  created_by_full_name?: string | null;
+  created_by_username?: string | null;
+  created_by_email?: string | null;
+  created_by_avatar_url?: string | null;
+  assigned_to_full_name?: string | null;
+  assigned_to_username?: string | null;
+  assigned_to_email?: string | null;
+  assigned_to_avatar_url?: string | null;
 };
 
 const CARD_FIELDS = [
@@ -189,6 +204,51 @@ const CARD_FIELDS = [
 
 const CARD_RETURNING = CARD_FIELDS.join(', ');
 const CARD_COLUMNS = CARD_FIELDS.map((field) => `card.${field}`).join(', ');
+const CARD_PROFILE_COLUMNS = `
+  ${CARD_COLUMNS},
+  created_profile.full_name AS created_by_full_name,
+  created_profile.username AS created_by_username,
+  created_profile.avatar_url AS created_by_avatar_url,
+  created_user.email AS created_by_email,
+  assigned_profile.full_name AS assigned_to_full_name,
+  assigned_profile.username AS assigned_to_username,
+  assigned_profile.avatar_url AS assigned_to_avatar_url,
+  assigned_user.email AS assigned_to_email
+`;
+const CARD_PROFILE_FROM = `
+  work.cards card
+  JOIN work.boards b
+    ON b.id = card.board_id
+   AND b.organization_id = card.organization_id
+  LEFT JOIN identity.user_profiles created_profile
+    ON created_profile.user_id = card.created_by
+  LEFT JOIN identity.users created_user
+    ON created_user.id = card.created_by
+  LEFT JOIN identity.user_profiles assigned_profile
+    ON assigned_profile.user_id = card.assigned_to
+  LEFT JOIN identity.users assigned_user
+    ON assigned_user.id = card.assigned_to
+`;
+
+function mapPersonProfile(
+  userId: string | null,
+  fullName: string | null | undefined,
+  username: string | null | undefined,
+  email: string | null | undefined,
+  avatarUrl: string | null | undefined,
+): WorkPersonProfile | null {
+  if (!userId) {
+    return null;
+  }
+
+  return {
+    userId,
+    fullName: fullName ?? null,
+    username: username ?? null,
+    email: email ?? null,
+    avatarUrl: avatarUrl ?? null,
+  };
+}
 
 function mapCard(row: CardRow): CardRecord {
   return {
@@ -213,7 +273,21 @@ function mapCard(row: CardRow): CardRecord {
     estimatedSeconds: row.estimated_seconds,
     archivedAt: row.archived_at,
     assignedTo: row.assigned_to,
+    assignedToProfile: mapPersonProfile(
+      row.assigned_to,
+      row.assigned_to_full_name,
+      row.assigned_to_username,
+      row.assigned_to_email,
+      row.assigned_to_avatar_url,
+    ),
     createdBy: row.created_by,
+    createdByProfile: mapPersonProfile(
+      row.created_by,
+      row.created_by_full_name,
+      row.created_by_username,
+      row.created_by_email,
+      row.created_by_avatar_url,
+    ),
     legacyOfficeId: row.legacy_office_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -512,6 +586,83 @@ function mapTimeEntry(row: TimeEntryRow): TimeEntryRecord {
   };
 }
 
+type ChecklistRow = {
+  id: string;
+  card_id: string;
+  organization_id: string;
+  created_by: string | null;
+  title: string;
+  position: number;
+  created_at: Date;
+  updated_at: Date;
+};
+
+type ChecklistItemRow = {
+  id: string;
+  checklist_id: string;
+  card_id: string;
+  organization_id: string;
+  created_by: string | null;
+  completed_by: string | null;
+  content: string;
+  is_completed: boolean;
+  completed_at: Date | null;
+  position: number;
+  created_at: Date;
+  updated_at: Date;
+};
+
+const CHECKLIST_RETURNING = `
+  id, card_id, organization_id, created_by, title, position, created_at, updated_at
+`;
+const CHECKLIST_COLUMNS = `
+  checklist.id, checklist.card_id, checklist.organization_id, checklist.created_by,
+  checklist.title, checklist.position, checklist.created_at, checklist.updated_at
+`;
+const CHECKLIST_ITEM_RETURNING = `
+  id, checklist_id, card_id, organization_id, created_by, completed_by, content,
+  is_completed, completed_at, position, created_at, updated_at
+`;
+const CHECKLIST_ITEM_COLUMNS = `
+  item.id, item.checklist_id, item.card_id, item.organization_id, item.created_by,
+  item.completed_by, item.content, item.is_completed, item.completed_at, item.position,
+  item.created_at, item.updated_at
+`;
+
+function mapChecklistItem(row: ChecklistItemRow): ChecklistItemRecord {
+  return {
+    id: row.id,
+    checklistId: row.checklist_id,
+    cardId: row.card_id,
+    organizationId: row.organization_id,
+    createdBy: row.created_by,
+    completedBy: row.completed_by,
+    content: row.content,
+    isCompleted: row.is_completed,
+    completedAt: row.completed_at,
+    position: row.position,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function mapChecklist(
+  row: ChecklistRow,
+  items: ChecklistItemRecord[] = [],
+): ChecklistRecord {
+  return {
+    id: row.id,
+    cardId: row.card_id,
+    organizationId: row.organization_id,
+    createdBy: row.created_by,
+    title: row.title,
+    position: row.position,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    items,
+  };
+}
+
 export class PostgresBoardStore implements WorkStore {
   async listByOrganization(organizationId: string) {
     const result = await db.query<BoardRow>(
@@ -776,11 +927,8 @@ export class PostgresBoardStore implements WorkStore {
   async listCardsByBoard(organizationId: string, boardId: string) {
     const result = await db.query<CardRow>(
       `
-        SELECT ${CARD_COLUMNS}
-        FROM work.cards card
-        JOIN work.boards b
-          ON b.id = card.board_id
-         AND b.organization_id = card.organization_id
+        SELECT ${CARD_PROFILE_COLUMNS}
+        FROM ${CARD_PROFILE_FROM}
         WHERE card.organization_id = $1
           AND card.board_id = $2
         ORDER BY card.position ASC, card.created_at ASC, card.id ASC
@@ -794,11 +942,8 @@ export class PostgresBoardStore implements WorkStore {
   async getCardById(organizationId: string, cardId: string) {
     const result = await db.query<CardRow>(
       `
-        SELECT ${CARD_COLUMNS}
-        FROM work.cards card
-        JOIN work.boards b
-          ON b.id = card.board_id
-         AND b.organization_id = card.organization_id
+        SELECT ${CARD_PROFILE_COLUMNS}
+        FROM ${CARD_PROFILE_FROM}
         WHERE card.organization_id = $1
           AND card.id = $2
       `,
@@ -904,6 +1049,7 @@ export class PostgresBoardStore implements WorkStore {
         `Created card "${card.title}"`,
         { title: card.title },
       );
+      return (await this.getCardById(card.organizationId, card.id)) ?? card;
     }
     return card;
   }
@@ -981,10 +1127,13 @@ export class PostgresBoardStore implements WorkStore {
     );
 
     const card = result.rows[0] ? mapCard(result.rows[0]) : null;
-    if (card && before && actorUserId) {
-      await this.recordCardFieldUpdates(before, card, actorUserId);
+    const hydrated = card
+      ? ((await this.getCardById(card.organizationId, card.id)) ?? card)
+      : null;
+    if (hydrated && before && actorUserId) {
+      await this.recordCardFieldUpdates(before, hydrated, actorUserId);
     }
-    return card;
+    return hydrated;
   }
 
   async getOrganizationMember(organizationId: string, userId: string) {
@@ -1896,6 +2045,345 @@ export class PostgresBoardStore implements WorkStore {
       await this.refreshTrackedSeconds(organizationId, entry.cardId);
     }
     return entry;
+  }
+
+  async listChecklistsByCard(organizationId: string, cardId: string) {
+    const lists = await db.query<ChecklistRow>(
+      `
+        SELECT ${CHECKLIST_COLUMNS}
+        FROM work.card_checklists checklist
+        JOIN work.cards card
+          ON card.id = checklist.card_id
+         AND card.organization_id = checklist.organization_id
+        JOIN work.boards b
+          ON b.id = card.board_id
+         AND b.organization_id = card.organization_id
+        WHERE checklist.organization_id = $1
+          AND checklist.card_id = $2
+        ORDER BY checklist.position ASC, checklist.created_at ASC, checklist.id ASC
+      `,
+      [organizationId, cardId],
+    );
+    if (lists.rows.length === 0) {
+      return [];
+    }
+
+    const items = await db.query<ChecklistItemRow>(
+      `
+        SELECT ${CHECKLIST_ITEM_COLUMNS}
+        FROM work.card_checklist_items item
+        JOIN work.cards card
+          ON card.id = item.card_id
+         AND card.organization_id = item.organization_id
+        WHERE item.organization_id = $1
+          AND item.card_id = $2
+        ORDER BY item.position ASC, item.created_at ASC, item.id ASC
+      `,
+      [organizationId, cardId],
+    );
+    const itemsByChecklist = new Map<string, ChecklistItemRecord[]>();
+    for (const row of items.rows) {
+      const mapped = mapChecklistItem(row);
+      const current = itemsByChecklist.get(mapped.checklistId) ?? [];
+      current.push(mapped);
+      itemsByChecklist.set(mapped.checklistId, current);
+    }
+
+    return lists.rows.map((row) =>
+      mapChecklist(row, itemsByChecklist.get(row.id) ?? []),
+    );
+  }
+
+  async getChecklistById(organizationId: string, checklistId: string) {
+    const result = await db.query<ChecklistRow>(
+      `
+        SELECT ${CHECKLIST_COLUMNS}
+        FROM work.card_checklists checklist
+        JOIN work.cards card
+          ON card.id = checklist.card_id
+         AND card.organization_id = checklist.organization_id
+        JOIN work.boards b
+          ON b.id = card.board_id
+         AND b.organization_id = card.organization_id
+        WHERE checklist.organization_id = $1
+          AND checklist.id = $2
+      `,
+      [organizationId, checklistId],
+    );
+    const row = result.rows[0];
+    if (!row) {
+      return null;
+    }
+
+    const items = await db.query<ChecklistItemRow>(
+      `
+        SELECT ${CHECKLIST_ITEM_RETURNING}
+        FROM work.card_checklist_items
+        WHERE organization_id = $1
+          AND checklist_id = $2
+        ORDER BY position ASC, created_at ASC, id ASC
+      `,
+      [organizationId, checklistId],
+    );
+    return mapChecklist(row, items.rows.map(mapChecklistItem));
+  }
+
+  async createChecklist(input: CreateChecklistInput) {
+    const result = await db.query<ChecklistRow>(
+      `
+        INSERT INTO work.card_checklists (
+          id, card_id, organization_id, created_by, title, position,
+          created_at, updated_at, legacy_source, legacy_id
+        )
+        SELECT
+          gen_random_uuid(),
+          card.id,
+          card.organization_id,
+          $3,
+          $4,
+          COALESCE(
+            $5,
+            (
+              SELECT COALESCE(MAX(existing.position) + 1, 0)
+              FROM work.card_checklists existing
+              WHERE existing.organization_id = card.organization_id
+                AND existing.card_id = card.id
+            )
+          ),
+          NOW(),
+          NOW(),
+          'kode-platform',
+          gen_random_uuid()
+        FROM work.cards card
+        JOIN work.boards b
+          ON b.id = card.board_id
+         AND b.organization_id = card.organization_id
+        WHERE card.organization_id = $1
+          AND card.id = $2
+        RETURNING ${CHECKLIST_RETURNING}
+      `,
+      [
+        input.organizationId,
+        input.cardId,
+        input.createdBy,
+        input.title,
+        input.position ?? null,
+      ],
+    );
+    const checklist = result.rows[0] ? mapChecklist(result.rows[0], []) : null;
+    if (checklist) {
+      const card = await this.getCardById(input.organizationId, input.cardId);
+      if (card) {
+        await this.insertCardUpdate(
+          card,
+          input.createdBy,
+          'checklist_added',
+          `Added checklist "${checklist.title}"`,
+        );
+      }
+    }
+    return checklist;
+  }
+
+  async updateChecklist(
+    organizationId: string,
+    checklistId: string,
+    input: UpdateChecklistInput,
+  ) {
+    const sets: string[] = ['updated_at = NOW()'];
+    const values: unknown[] = [];
+    let index = 1;
+    if (input.title !== undefined) {
+      sets.push(`title = $${index}`);
+      values.push(input.title);
+      index += 1;
+    }
+    if (input.position !== undefined) {
+      sets.push(`position = $${index}`);
+      values.push(input.position);
+      index += 1;
+    }
+    values.push(organizationId, checklistId);
+    const result = await db.query<ChecklistRow>(
+      `
+        UPDATE work.card_checklists checklist
+        SET ${sets.join(', ')}
+        FROM work.cards card
+        WHERE checklist.organization_id = $${index}
+          AND checklist.id = $${index + 1}
+          AND card.id = checklist.card_id
+          AND card.organization_id = checklist.organization_id
+        RETURNING ${CHECKLIST_COLUMNS}
+      `,
+      values,
+    );
+    const row = result.rows[0];
+    if (!row) {
+      return null;
+    }
+    return this.getChecklistById(organizationId, row.id);
+  }
+
+  async deleteChecklist(organizationId: string, checklistId: string) {
+    const result = await db.query(
+      `
+        DELETE FROM work.card_checklists checklist
+        USING work.cards card
+        WHERE checklist.organization_id = $1
+          AND checklist.id = $2
+          AND card.id = checklist.card_id
+          AND card.organization_id = checklist.organization_id
+      `,
+      [organizationId, checklistId],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async getChecklistItemById(organizationId: string, itemId: string) {
+    const result = await db.query<ChecklistItemRow>(
+      `
+        SELECT ${CHECKLIST_ITEM_COLUMNS}
+        FROM work.card_checklist_items item
+        JOIN work.cards card
+          ON card.id = item.card_id
+         AND card.organization_id = item.organization_id
+        WHERE item.organization_id = $1
+          AND item.id = $2
+      `,
+      [organizationId, itemId],
+    );
+    return result.rows[0] ? mapChecklistItem(result.rows[0]) : null;
+  }
+
+  async createChecklistItem(input: CreateChecklistItemInput) {
+    const result = await db.query<ChecklistItemRow>(
+      `
+        INSERT INTO work.card_checklist_items (
+          id, checklist_id, card_id, organization_id, created_by, content, position,
+          created_at, updated_at, legacy_source, legacy_id
+        )
+        SELECT
+          gen_random_uuid(),
+          checklist.id,
+          checklist.card_id,
+          checklist.organization_id,
+          $3,
+          $4,
+          COALESCE(
+            $5,
+            (
+              SELECT COALESCE(MAX(existing.position) + 1, 0)
+              FROM work.card_checklist_items existing
+              WHERE existing.organization_id = checklist.organization_id
+                AND existing.checklist_id = checklist.id
+            )
+          ),
+          NOW(),
+          NOW(),
+          'kode-platform',
+          gen_random_uuid()
+        FROM work.card_checklists checklist
+        JOIN work.cards card
+          ON card.id = checklist.card_id
+         AND card.organization_id = checklist.organization_id
+        JOIN work.boards b
+          ON b.id = card.board_id
+         AND b.organization_id = card.organization_id
+        WHERE checklist.organization_id = $1
+          AND checklist.id = $2
+        RETURNING ${CHECKLIST_ITEM_RETURNING}
+      `,
+      [
+        input.organizationId,
+        input.checklistId,
+        input.createdBy,
+        input.content,
+        input.position ?? null,
+      ],
+    );
+    const item = result.rows[0] ? mapChecklistItem(result.rows[0]) : null;
+    if (item) {
+      const card = await this.getCardById(input.organizationId, item.cardId);
+      if (card) {
+        await this.insertCardUpdate(
+          card,
+          input.createdBy,
+          'checklist_item_added',
+          `Added checklist item "${item.content}"`,
+        );
+      }
+    }
+    return item;
+  }
+
+  async updateChecklistItem(
+    organizationId: string,
+    itemId: string,
+    input: UpdateChecklistItemInput,
+    actorUserId: string,
+  ) {
+    const current = await this.getChecklistItemById(organizationId, itemId);
+    if (!current) {
+      return null;
+    }
+
+    const sets: string[] = ['updated_at = NOW()'];
+    const values: unknown[] = [];
+    let index = 1;
+    if (input.content !== undefined) {
+      sets.push(`content = $${index}`);
+      values.push(input.content);
+      index += 1;
+    }
+    if (input.position !== undefined) {
+      sets.push(`position = $${index}`);
+      values.push(input.position);
+      index += 1;
+    }
+    if (input.isCompleted !== undefined) {
+      sets.push(`is_completed = $${index}`);
+      values.push(input.isCompleted);
+      index += 1;
+      if (input.isCompleted) {
+        sets.push(`completed_at = NOW()`);
+        sets.push(`completed_by = $${index}`);
+        values.push(actorUserId);
+        index += 1;
+      } else {
+        sets.push(`completed_at = NULL`);
+        sets.push(`completed_by = NULL`);
+      }
+    }
+    values.push(organizationId, itemId);
+    const result = await db.query<ChecklistItemRow>(
+      `
+        UPDATE work.card_checklist_items item
+        SET ${sets.join(', ')}
+        FROM work.cards card
+        WHERE item.organization_id = $${index}
+          AND item.id = $${index + 1}
+          AND card.id = item.card_id
+          AND card.organization_id = item.organization_id
+        RETURNING ${CHECKLIST_ITEM_COLUMNS}
+      `,
+      values,
+    );
+    return result.rows[0] ? mapChecklistItem(result.rows[0]) : null;
+  }
+
+  async deleteChecklistItem(organizationId: string, itemId: string) {
+    const result = await db.query(
+      `
+        DELETE FROM work.card_checklist_items item
+        USING work.cards card
+        WHERE item.organization_id = $1
+          AND item.id = $2
+          AND card.id = item.card_id
+          AND card.organization_id = item.organization_id
+      `,
+      [organizationId, itemId],
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   private async refreshTrackedSeconds(organizationId: string, cardId: string) {

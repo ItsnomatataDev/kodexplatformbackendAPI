@@ -26,6 +26,20 @@ export type CardRouteDependencies = {
   store: WorkStore;
 };
 
+function serializePersonProfile(profile: CardRecord['createdByProfile']) {
+  if (!profile) {
+    return null;
+  }
+
+  return {
+    userId: profile.userId,
+    fullName: profile.fullName,
+    username: profile.username,
+    email: profile.email,
+    avatarUrl: profile.avatarUrl,
+  };
+}
+
 function serializeCard(card: CardRecord) {
   return {
     id: card.id,
@@ -49,7 +63,9 @@ function serializeCard(card: CardRecord) {
     estimatedSeconds: card.estimatedSeconds,
     archivedAt: card.archivedAt?.toISOString() ?? null,
     assignedTo: card.assignedTo ?? null,
+    assignedToProfile: serializePersonProfile(card.assignedToProfile),
     createdBy: card.createdBy ?? null,
+    createdByProfile: serializePersonProfile(card.createdByProfile),
     officeId: card.legacyOfficeId ?? null,
     createdAt: card.createdAt.toISOString(),
     updatedAt: card.updatedAt.toISOString(),

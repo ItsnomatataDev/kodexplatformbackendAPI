@@ -95,6 +95,21 @@ test('attachment permission migration grants nested attachment and submission ke
   assert.doesNotMatch(sql, /work\.\*/);
 });
 
+test('checklist migration grants nested checklist keys without using all as a wildcard', () => {
+  const sql = fs.readFileSync(
+    path.resolve(process.cwd(), 'migrations/0012_work_checklists.sql'),
+    'utf8',
+  );
+
+  assert.match(sql, /work\.card_checklists/);
+  assert.match(sql, /work\.card_checklist_items/);
+  assert.match(sql, /"checklists"/);
+  assert.match(sql, /jsonb_set/);
+  assert.match(sql, /permissions->'work'/);
+  assert.doesNotMatch(sql, /"all": true/);
+  assert.doesNotMatch(sql, /work\.\*/);
+});
+
 test('applyKodeRoleModel only toggles activity flags for the two role classes', async () => {
   const statements: Array<{ sql: string; params: unknown[] }> = [];
 

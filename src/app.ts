@@ -33,6 +33,8 @@ import { createBoardCardRoutes, createCardRoutes } from './routes/cards.js';
 import {
   createAttachmentRoutes,
   createCardNestedRoutes,
+  createChecklistItemRoutes,
+  createChecklistRoutes,
   createCommentRoutes,
   createLabelRoutes,
   createSubmissionRoutes,
@@ -129,6 +131,8 @@ export function createApp(options: CreateAppOptions = {}) {
   api.route('/submissions', createSubmissionRoutes({ store: boards, files }));
   api.route('/attachments', createAttachmentRoutes({ store: boards, files }));
   api.route('/time-entries', createTimeEntryRoutes({ store: boards, files }));
+  api.route('/checklists', createChecklistRoutes({ store: boards, files }));
+  api.route('/checklist-items', createChecklistItemRoutes({ store: boards, files }));
   app.route('/api', api);
 
   return app;

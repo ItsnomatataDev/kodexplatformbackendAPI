@@ -27,6 +27,8 @@ export const FIELD_LIMITS = {
   cardBlockedReason: 2_000,
   commentBody: 10_000,
   commentType: 32,
+  checklistTitle: 200,
+  checklistItemContent: 4_000,
   labelName: 64,
   labelColor: 32,
   submissionTitle: 200,

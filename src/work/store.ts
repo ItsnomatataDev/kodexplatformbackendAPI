@@ -98,6 +98,14 @@ export interface ColumnStore {
   ): Promise<ColumnRecord | null>;
 }
 
+export type WorkPersonProfile = {
+  userId: string;
+  fullName: string | null;
+  username: string | null;
+  email: string | null;
+  avatarUrl: string | null;
+};
+
 export type CardRecord = {
   id: string;
   organizationId: string;
@@ -120,7 +128,9 @@ export type CardRecord = {
   estimatedSeconds: number;
   archivedAt: Date | null;
   assignedTo: string | null;
+  assignedToProfile?: WorkPersonProfile | null;
   createdBy: string | null;
+  createdByProfile?: WorkPersonProfile | null;
   legacyOfficeId: string | null;
   createdAt: Date;
   updatedAt: Date;
@@ -376,6 +386,60 @@ export type UpdateTimeEntryInput = {
   isBillable?: boolean;
 };
 
+export type ChecklistItemRecord = {
+  id: string;
+  checklistId: string;
+  cardId: string;
+  organizationId: string;
+  createdBy: string | null;
+  completedBy: string | null;
+  content: string;
+  isCompleted: boolean;
+  completedAt: Date | null;
+  position: number;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export type ChecklistRecord = {
+  id: string;
+  cardId: string;
+  organizationId: string;
+  createdBy: string | null;
+  title: string;
+  position: number;
+  createdAt: Date;
+  updatedAt: Date;
+  items: ChecklistItemRecord[];
+};
+
+export type CreateChecklistInput = {
+  organizationId: string;
+  cardId: string;
+  createdBy: string;
+  title: string;
+  position?: number;
+};
+
+export type UpdateChecklistInput = {
+  title?: string;
+  position?: number;
+};
+
+export type CreateChecklistItemInput = {
+  organizationId: string;
+  checklistId: string;
+  createdBy: string;
+  content: string;
+  position?: number;
+};
+
+export type UpdateChecklistItemInput = {
+  content?: string;
+  position?: number;
+  isCompleted?: boolean;
+};
+
 export type RelationResult<T> = T | 'duplicate' | null;
 
 export interface CardEcosystemStore {
@@ -515,6 +579,42 @@ export interface CardEcosystemStore {
     timeEntryId: string,
     input: UpdateTimeEntryInput,
   ): Promise<TimeEntryRecord | null>;
+
+  listChecklistsByCard(
+    organizationId: string,
+    cardId: string,
+  ): Promise<ChecklistRecord[]>;
+  getChecklistById(
+    organizationId: string,
+    checklistId: string,
+  ): Promise<ChecklistRecord | null>;
+  createChecklist(input: CreateChecklistInput): Promise<ChecklistRecord | null>;
+  updateChecklist(
+    organizationId: string,
+    checklistId: string,
+    input: UpdateChecklistInput,
+  ): Promise<ChecklistRecord | null>;
+  deleteChecklist(
+    organizationId: string,
+    checklistId: string,
+  ): Promise<boolean>;
+  getChecklistItemById(
+    organizationId: string,
+    itemId: string,
+  ): Promise<ChecklistItemRecord | null>;
+  createChecklistItem(
+    input: CreateChecklistItemInput,
+  ): Promise<ChecklistItemRecord | null>;
+  updateChecklistItem(
+    organizationId: string,
+    itemId: string,
+    input: UpdateChecklistItemInput,
+    actorUserId: string,
+  ): Promise<ChecklistItemRecord | null>;
+  deleteChecklistItem(
+    organizationId: string,
+    itemId: string,
+  ): Promise<boolean>;
 }
 
 export type WorkStore = BoardStore & ColumnStore & CardStore & CardEcosystemStore;
