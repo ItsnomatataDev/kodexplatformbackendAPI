@@ -70,6 +70,31 @@ test('role-model migration deprecates legacy keys without deleting role rows', (
   assert.doesNotMatch(sql, /work\.\*/);
 });
 
+test('work permission migration grants nested work keys without using all as a wildcard', () => {
+  const sql = fs.readFileSync(
+    path.resolve(process.cwd(), 'migrations/0010_work_operating_permissions.sql'),
+    'utf8',
+  );
+
+  assert.match(sql, /"work"/);
+  assert.match(sql, /"boards"/);
+  assert.match(sql, /"cards"/);
+  assert.doesNotMatch(sql, /"all": true/);
+  assert.doesNotMatch(sql, /work\.\*/);
+});
+
+test('attachment permission migration grants nested attachment and submission keys', () => {
+  const sql = fs.readFileSync(
+    path.resolve(process.cwd(), 'migrations/0011_work_attachment_permissions.sql'),
+    'utf8',
+  );
+
+  assert.match(sql, /"attachments"/);
+  assert.match(sql, /"submissions"/);
+  assert.doesNotMatch(sql, /"all": true/);
+  assert.doesNotMatch(sql, /work\.\*/);
+});
+
 test('applyKodeRoleModel only toggles activity flags for the two role classes', async () => {
   const statements: Array<{ sql: string; params: unknown[] }> = [];
 
@@ -96,4 +121,17 @@ test('role cleanup does not treat {all:true} as a Work wildcard', () => {
     ),
     false,
   );
+});
+
+test('nested work permissions grant board and card actions', () => {
+  const permissions = {
+    work: {
+      boards: { read: true, create: true, update: true },
+      cards: { read: true, create: true, update: true },
+    },
+  };
+
+  assert.equal(hasPermission(permissions, 'work.boards.read'), true);
+  assert.equal(hasPermission(permissions, 'work.cards.create'), true);
+  assert.equal(hasPermission(permissions, 'work.cards.delete'), false);
 });

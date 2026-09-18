@@ -61,6 +61,7 @@ export function createOrganizationRoutes(
     return c.json({
       members: members.map((member) => ({
         userId: member.userId,
+        email: member.email,
         fullName: member.fullName,
         avatarUrl: member.avatarUrl,
         jobTitle: member.jobTitle,

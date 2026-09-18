@@ -281,11 +281,14 @@ export class MemoryBoardStore implements WorkStore {
       metadata: input.metadata ? { ...input.metadata } : {},
       trackedSecondsCache: 0,
       isBillable: input.isBillable ?? false,
-      estimatedSeconds: input.estimatedSeconds ?? 0,
-      archivedAt: null,
-      createdAt: now,
-      updatedAt: now,
-    };
+    estimatedSeconds: input.estimatedSeconds ?? 0,
+    archivedAt: null,
+    assignedTo: null,
+    createdBy: input.createdBy,
+    legacyOfficeId: null,
+    createdAt: now,
+    updatedAt: now,
+  };
 
     this.cards.set(card.id, card);
     this.recordUpdate(card, input.createdBy, 'created', `Created card "${card.title}"`, {

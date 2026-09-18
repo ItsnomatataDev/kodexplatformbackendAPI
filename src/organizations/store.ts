@@ -11,6 +11,7 @@ export type OrganizationRecord = {
 
 export type OrganizationMemberRecord = {
   userId: string;
+  email: string | null;
   fullName: string | null;
   avatarUrl: string | null;
   jobTitle: string | null;
@@ -29,6 +30,7 @@ export type OfficeRecord = {
   slug: string;
   isPrimary: boolean;
   isActive: boolean;
+  settings: Record<string, unknown>;
 };
 
 export type OrganizationRoleRecord = {

@@ -9,26 +9,28 @@ export const ARGON2ID_PARAMETERS = {
   hashLength: 32,
 } as const;
 
-const MIN_PASSWORD_LENGTH = 12;
+const MIN_PASSWORD_LENGTH = 4;
 const MAX_PASSWORD_LENGTH = 128;
 
 export function validatePassword(
   password: string,
   email?: string | null,
 ): void {
-  if (password.length < MIN_PASSWORD_LENGTH) {
+  const trimmed = password.trim();
+
+  if (trimmed.length < MIN_PASSWORD_LENGTH) {
     throw new ValidationError(
-      'Password must be at least 12 characters.',
+      `Password must be at least ${MIN_PASSWORD_LENGTH} characters.`,
     );
   }
 
   if (password.length > MAX_PASSWORD_LENGTH) {
     throw new ValidationError(
-      'Password must be at most 128 characters.',
+      `Password must be at most ${MAX_PASSWORD_LENGTH} characters.`,
     );
   }
 
-  if (email && password.trim().toLowerCase() === email.trim().toLowerCase()) {
+  if (email && trimmed.toLowerCase() === email.trim().toLowerCase()) {
     throw new ValidationError('Password cannot match the account email.');
   }
 }

@@ -119,6 +119,9 @@ export type CardRecord = {
   isBillable: boolean;
   estimatedSeconds: number;
   archivedAt: Date | null;
+  assignedTo: string | null;
+  createdBy: string | null;
+  legacyOfficeId: string | null;
   createdAt: Date;
   updatedAt: Date;
 };

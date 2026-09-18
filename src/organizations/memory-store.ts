@@ -99,12 +99,14 @@ export function seedActiveMember(
     officeId?: string | null;
     status?: MembershipStatus;
     fullName?: string | null;
+    email?: string | null;
   },
 ) {
   store.seedMember({
     organizationId: input.organizationId,
     userId: input.userId,
     fullName: input.fullName ?? 'Test User',
+    email: input.email ?? null,
     avatarUrl: null,
     jobTitle: null,
     department: null,

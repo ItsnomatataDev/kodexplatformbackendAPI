@@ -187,6 +187,7 @@ function seedDirectory(store: MemoryOrganizationDirectoryStore) {
     slug: 'harare',
     isPrimary: true,
     isActive: true,
+    settings: { attendance_mode: 'time_tracked' },
   });
   store.seedOffice({
     id: inactiveOfficeA,
@@ -195,6 +196,7 @@ function seedDirectory(store: MemoryOrganizationDirectoryStore) {
     slug: 'closed',
     isPrimary: false,
     isActive: false,
+    settings: {},
   });
   store.seedOffice({
     id: officeB,
@@ -203,6 +205,7 @@ function seedDirectory(store: MemoryOrganizationDirectoryStore) {
     slug: 'other',
     isPrimary: true,
     isActive: true,
+    settings: {},
   });
 
   seedActiveMember(store, {
@@ -211,6 +214,7 @@ function seedDirectory(store: MemoryOrganizationDirectoryStore) {
     roleKey: 'admin',
     officeId: officeA,
     fullName: 'Ada Admin',
+    email: 'test@itsnomatata.com',
   });
   seedActiveMember(store, {
     organizationId: orgA,
@@ -353,6 +357,11 @@ test('GET organization, offices, and roles are scoped to the membership org', as
     offices.offices.some((office: { id: string }) => office.id === officeB),
     false,
   );
+  assert.equal(
+    offices.offices.find((office: { id: string }) => office.id === officeA)
+      ?.settings?.attendance_mode,
+    'time_tracked',
+  );
 
   const otherOffice = await json(
     await app.request(`/api/offices/${officeB}`, {
@@ -454,6 +463,11 @@ test('member directory is restricted to admin or manager flags', async () => {
   assert.equal(
     listed.members.some((member: { userId: string }) => member.userId === userB),
     false,
+  );
+  assert.equal(
+    listed.members.find((member: { userId: string }) => member.userId === userA)
+      ?.email,
+    'test@itsnomatata.com',
   );
 });
 

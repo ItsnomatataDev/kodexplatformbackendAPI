@@ -152,6 +152,9 @@ type CardRow = {
   is_billable: boolean;
   estimated_seconds: number;
   archived_at: Date | null;
+  assigned_to: string | null;
+  created_by: string | null;
+  legacy_office_id: string | null;
   created_at: Date;
   updated_at: Date;
 };
@@ -177,6 +180,9 @@ const CARD_FIELDS = [
   'is_billable',
   'estimated_seconds',
   'archived_at',
+  'assigned_to',
+  'created_by',
+  'legacy_office_id',
   'created_at',
   'updated_at',
 ] as const;
@@ -206,6 +212,9 @@ function mapCard(row: CardRow): CardRecord {
     isBillable: row.is_billable,
     estimatedSeconds: row.estimated_seconds,
     archivedAt: row.archived_at,
+    assignedTo: row.assigned_to,
+    createdBy: row.created_by,
+    legacyOfficeId: row.legacy_office_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

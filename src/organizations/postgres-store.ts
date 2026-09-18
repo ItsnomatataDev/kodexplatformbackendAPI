@@ -19,6 +19,7 @@ type OrganizationRow = {
 
 type MemberRow = {
   user_id: string;
+  email: string | null;
   full_name: string | null;
   avatar_url: string | null;
   job_title: string | null;
@@ -37,6 +38,7 @@ type OfficeRow = {
   slug: string;
   is_primary: boolean;
   is_active: boolean;
+  settings: Record<string, unknown> | null;
 };
 
 type RoleRow = {
@@ -63,6 +65,7 @@ function serializeOrganization(row: OrganizationRow): OrganizationRecord {
 function serializeMember(row: MemberRow): OrganizationMemberRecord {
   return {
     userId: row.user_id,
+    email: row.email,
     fullName: row.full_name,
     avatarUrl: row.avatar_url,
     jobTitle: row.job_title,
@@ -83,6 +86,10 @@ function serializeOffice(row: OfficeRow): OfficeRecord {
     slug: row.slug,
     isPrimary: row.is_primary,
     isActive: row.is_active,
+    settings:
+      row.settings && typeof row.settings === 'object' && !Array.isArray(row.settings)
+        ? row.settings
+        : {},
   };
 }
 
@@ -123,6 +130,7 @@ export class PostgresOrganizationDirectoryStore
       `
         SELECT
           m.user_id,
+          u.email,
           p.full_name,
           p.avatar_url,
           p.job_title,
@@ -133,6 +141,8 @@ export class PostgresOrganizationDirectoryStore
           m.office_id,
           m.status
         FROM organizations.memberships m
+        LEFT JOIN identity.users u
+          ON u.id = m.user_id
         LEFT JOIN identity.user_profiles p
           ON p.user_id = m.user_id
         WHERE m.organization_id = $1
@@ -151,7 +161,7 @@ export class PostgresOrganizationDirectoryStore
   ): Promise<OfficeRecord[]> {
     const result = await db.query<OfficeRow>(
       `
-        SELECT id, organization_id, name, slug, is_primary, is_active
+        SELECT id, organization_id, name, slug, is_primary, is_active, settings
         FROM organizations.offices
         WHERE organization_id = $1
           AND ($2::boolean OR is_active = TRUE)
@@ -169,7 +179,7 @@ export class PostgresOrganizationDirectoryStore
   ): Promise<OfficeRecord | null> {
     const result = await db.query<OfficeRow>(
       `
-        SELECT id, organization_id, name, slug, is_primary, is_active
+        SELECT id, organization_id, name, slug, is_primary, is_active, settings
         FROM organizations.offices
         WHERE id = $1
           AND organization_id = $2

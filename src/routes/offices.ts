@@ -38,6 +38,7 @@ export function createOfficeRoutes(dependencies: OfficeRouteDependencies) {
         slug: office.slug,
         isPrimary: office.isPrimary,
         isActive: office.isActive,
+        settings: office.settings,
       })),
     });
   });
@@ -62,6 +63,7 @@ export function createOfficeRoutes(dependencies: OfficeRouteDependencies) {
         slug: office.slug,
         isPrimary: office.isPrimary,
         isActive: office.isActive,
+        settings: office.settings,
       },
     });
   });

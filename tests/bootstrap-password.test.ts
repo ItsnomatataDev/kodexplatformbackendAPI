@@ -174,7 +174,7 @@ test('bootstrap reuses the shared password policy', async () => {
       bootstrapDevelopmentPassword({
         appEnv: 'development',
         userId,
-        password: 'short',
+        password: 'ab',
         store,
       }),
     (error: unknown) => error instanceof ValidationError,

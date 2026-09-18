@@ -48,6 +48,9 @@ function serializeCard(card: CardRecord) {
     isBillable: card.isBillable,
     estimatedSeconds: card.estimatedSeconds,
     archivedAt: card.archivedAt?.toISOString() ?? null,
+    assignedTo: card.assignedTo ?? null,
+    createdBy: card.createdBy ?? null,
+    officeId: card.legacyOfficeId ?? null,
     createdAt: card.createdAt.toISOString(),
     updatedAt: card.updatedAt.toISOString(),
   };

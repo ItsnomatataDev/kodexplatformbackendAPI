@@ -14,6 +14,7 @@ const DEFAULT_SOURCE = path.resolve(
 
 const args = new Set(process.argv.slice(2));
 const apply = args.has('--apply');
+const officesOnly = args.has('--offices-only');
 
 function log(message: string) {
   console.log(`[identity-migration] ${message}`);
@@ -638,6 +639,61 @@ async function insertRoles(
   }
 }
 
+async function insertOffices(
+  client: PoolClient,
+  rows: LegacyRow[],
+  organizationIds: Set<string>,
+) {
+  for (const row of rows) {
+    if (!row.id || !row.organization_id) {
+      continue;
+    }
+
+    if (!organizationIds.has(row.organization_id)) {
+      continue;
+    }
+
+    await client.query(
+      `
+        INSERT INTO organizations.offices (
+          id,
+          organization_id,
+          name,
+          slug,
+          is_primary,
+          is_active,
+          settings,
+          created_at,
+          updated_at,
+          legacy_source,
+          legacy_id
+        )
+        VALUES (
+          $1,$2,$3,$4,$5,TRUE,$6,$7,NOW(),'supabase',$1
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          organization_id = EXCLUDED.organization_id,
+          name = EXCLUDED.name,
+          slug = EXCLUDED.slug,
+          is_primary = EXCLUDED.is_primary,
+          settings = EXCLUDED.settings,
+          legacy_source = EXCLUDED.legacy_source,
+          legacy_id = EXCLUDED.legacy_id,
+          updated_at = NOW()
+      `,
+      [
+        row.id,
+        row.organization_id,
+        row.name ?? 'Office',
+        row.slug ?? row.id,
+        booleanValue(row.is_primary),
+        JSON.stringify(jsonOrDefault(row.settings)),
+        row.created_at,
+      ],
+    );
+  }
+}
+
 async function insertMemberships(
   client: PoolClient,
   rows: LegacyRow[],
@@ -830,6 +886,7 @@ async function main() {
     sql,
     'organization_roles',
   );
+  const offices = extractCopyRows(sql, 'company_offices');
 
   const orgIds = new Set(
     organizations
@@ -879,6 +936,10 @@ async function main() {
     (row) => !orgIds.has(row.organization_id ?? ''),
   );
 
+  const officeOrphans = offices.filter(
+    (row) => !orgIds.has(row.organization_id ?? ''),
+  );
+
   const statistics = {
     source_file: DEFAULT_SOURCE,
     mode: apply ? 'apply' : 'dry-run',
@@ -887,6 +948,7 @@ async function main() {
       profiles: profiles.length,
       organization_roles: roles.length,
       organization_members: members.length,
+      company_offices: offices.length,
     },
     validation: {
       duplicate_organizations: duplicateOrganizations.length,
@@ -896,6 +958,7 @@ async function main() {
       orphan_profiles: orphanProfiles.length,
       orphan_memberships: orphanMembers.length,
       orphan_roles: roleOrphans.length,
+      orphan_offices: officeOrphans.length,
     },
   };
 
@@ -932,6 +995,15 @@ async function main() {
       );
     }
 
+    for (const row of officeOrphans) {
+      await recordIssue(
+        jobId,
+        'orphan_office_organization',
+        'error',
+        `Office ${row.id} references missing organization ${row.organization_id}.`,
+      );
+    }
+
     console.log('\n========================================');
     console.log('IDENTITY MIGRATION');
     console.log('========================================');
@@ -939,6 +1011,7 @@ async function main() {
     console.log(`Profiles:            ${profiles.length}`);
     console.log(`Roles:               ${roles.length}`);
     console.log(`Memberships:         ${members.length}`);
+    console.log(`Offices:             ${offices.length}`);
     console.log('----------------------------------------');
     console.log(
       `Duplicate orgs:      ${duplicateOrganizations.length}`,
@@ -961,6 +1034,9 @@ async function main() {
     console.log(
       `Orphan roles:        ${roleOrphans.length}`,
     );
+    console.log(
+      `Orphan offices:      ${officeOrphans.length}`,
+    );
     console.log('========================================\n');
 
     if (!apply) {
@@ -970,6 +1046,33 @@ async function main() {
       });
 
       log('Dry run complete. No target data was written.');
+      return;
+    }
+
+    if (officesOnly) {
+      log('Beginning offices-only import...');
+
+      const client = await db.connect();
+
+      try {
+        await client.query('BEGIN');
+        await insertOffices(client, offices, orgIds);
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+
+      await finishJob(jobId, 'completed', {
+        ...statistics,
+        result: 'offices-imported',
+        offices: offices.filter((row) => orgIds.has(row.organization_id ?? ''))
+          .length,
+      });
+
+      log('Office labels imported from company_offices.');
       return;
     }
 
@@ -1007,6 +1110,9 @@ async function main() {
 
       await insertProfiles(client, profiles);
       log('User profiles imported.');
+
+      await insertOffices(client, offices, orgIds);
+      log('Offices imported.');
 
       await insertRoles(client, roles);
       log('Roles imported.');
