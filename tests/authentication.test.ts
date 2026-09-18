@@ -40,6 +40,7 @@ function authContext(
     membership: {
       membershipId: 'membership-1',
       organizationId: orgA,
+      officeId: null,
       roleId: 'role-1',
       roleKey: 'member',
       status: 'active',
@@ -84,7 +85,7 @@ function createTestApp(
 async function json(response: Response) {
   return response.json() as Promise<{
     user?: { id: string };
-    membership?: { organizationId: string };
+    membership?: { organizationId: string; officeId?: string | null };
     organization?: { id: string };
     error?: { code: string; message: string };
     status?: string;
@@ -206,6 +207,7 @@ test('authenticated user maps to the correct user id and organization context', 
   assert.equal(response.status, 200);
   assert.equal(body.user?.id, userA);
   assert.equal(body.membership?.organizationId, orgA);
+  assert.equal(body.membership?.officeId, null);
   assert.equal(body.organization?.id, orgA);
 });
 

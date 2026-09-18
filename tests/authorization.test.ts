@@ -33,6 +33,7 @@ function context(
     membership: {
       membershipId: 'membership-1',
       organizationId: orgA,
+      officeId: null,
       roleId: 'role-1',
       roleKey: 'member',
       status: 'active',
@@ -199,4 +200,21 @@ test('ownership checks only apply when requested', () => {
 
   assert.equal(otherOwner.code, 'NOT_OWNER');
   assert.equal(sameOwner.allowed, true);
+});
+
+test('authorize stays organization-scoped when membership officeId is set', () => {
+  const officeId = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+  const allowed = authorize({
+    context: context({ membership: { officeId } }),
+    action: 'work.cards.read',
+    resource: { type: 'work.card', organizationId: orgA },
+  });
+  const crossOrg = authorize({
+    context: context({ membership: { officeId } }),
+    action: 'work.cards.read',
+    resource: { type: 'work.card', organizationId: orgB },
+  });
+
+  assert.equal(allowed.allowed, true);
+  assert.equal(crossOrg.code, 'CROSS_ORGANIZATION_ACCESS');
 });

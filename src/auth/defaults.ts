@@ -2,7 +2,7 @@ import { env } from '../config/env.js';
 import { withTransaction } from '../db/transaction.js';
 import { AccessTokenService } from './access-token.js';
 import { resolveAuthContext } from './resolve-context.js';
-import { loadPublicProfile } from './public-profile.js';
+import { loadPublicProfile, updatePublicProfile } from './public-profile.js';
 import type { AuthDependencies } from './middleware.js';
 import type { MeRouteDependencies } from '../routes/me.js';
 import type { AuthRouteDependencies } from './routes.js';
@@ -46,6 +46,7 @@ export function createDefaultAuthDependencies(): AuthDependencies {
 export function createDefaultMeDependencies(): MeRouteDependencies {
   return {
     loadPublicProfile,
+    updatePublicProfile,
   };
 }
 

@@ -16,6 +16,7 @@ type AuthContextRow = {
   deleted_at: Date | null;
   membership_id: string | null;
   organization_id: string | null;
+  office_id: string | null;
   role_id: string | null;
   role_key: string | null;
   membership_status: MembershipStatus | null;
@@ -40,6 +41,7 @@ export async function resolveAuthContext(
         u.deleted_at,
         m.id AS membership_id,
         m.organization_id,
+        ofc.id AS office_id,
         m.role_id,
         m.role_key,
         m.status AS membership_status,
@@ -57,6 +59,10 @@ export async function resolveAuthContext(
         ON r.id = m.role_id
       LEFT JOIN organizations.organizations o
         ON o.id = m.organization_id
+      LEFT JOIN organizations.offices ofc
+        ON ofc.id = m.office_id
+       AND ofc.organization_id = m.organization_id
+       AND ofc.is_active = TRUE
       WHERE u.id = $1
     `,
     [userId],
@@ -107,6 +113,7 @@ export async function resolveAuthContext(
     membership: {
       membershipId: row.membership_id,
       organizationId: row.organization_id,
+      officeId: row.office_id,
       roleId: row.role_id,
       roleKey: row.role_key,
       status: row.membership_status,

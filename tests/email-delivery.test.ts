@@ -72,6 +72,7 @@ function authContext(userId: string, email: string): AuthContext {
     membership: {
       membershipId: `membership-${userId}`,
       organizationId: orgA,
+      officeId: null,
       roleId: 'role-1',
       roleKey: 'member',
       status: 'active',

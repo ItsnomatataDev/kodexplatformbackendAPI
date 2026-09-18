@@ -19,6 +19,11 @@ import { bodyLimitMiddleware } from './middleware/body-limit.js';
 import { clientIpMiddleware } from './middleware/client-ip.js';
 import health from './routes/health.js';
 import { createMeRoutes, type MeRouteDependencies } from './routes/me.js';
+import { createOrganizationRoutes } from './routes/organization.js';
+import { createOfficeRoutes } from './routes/offices.js';
+import { createRoleRoutes } from './routes/roles.js';
+import { PostgresOrganizationDirectoryStore } from './organizations/postgres-store.js';
+import type { OrganizationDirectoryStore } from './organizations/store.js';
 import { createBoardRoutes } from './routes/boards.js';
 import {
   createBoardColumnRoutes,
@@ -43,6 +48,7 @@ import type { HttpLimits, WorkRateLimitPolicies } from './http/limits.js';
 export type CreateAppOptions = {
   auth?: AuthDependencies;
   me?: MeRouteDependencies;
+  organizationDirectory?: OrganizationDirectoryStore;
   authLifecycle?: AuthRouteDependencies;
   corsOrigins?: string[];
   boards?: WorkStore;
@@ -57,6 +63,8 @@ export function createApp(options: CreateAppOptions = {}) {
   const app = new Hono();
   const authDependencies = options.auth ?? createDefaultAuthDependencies();
   const meDependencies = options.me ?? createDefaultMeDependencies();
+  const organizationDirectory =
+    options.organizationDirectory ?? new PostgresOrganizationDirectoryStore();
   const authLifecycle =
     options.authLifecycle ?? createDefaultAuthLifecycle(authDependencies);
   const corsOrigins = options.corsOrigins ?? env.cors.allowedOrigins;
@@ -107,6 +115,9 @@ export function createApp(options: CreateAppOptions = {}) {
   const api = new Hono();
   api.use('*', createAuthMiddleware(authDependencies));
   api.route('/me', createMeRoutes(meDependencies));
+  api.route('/organization', createOrganizationRoutes({ store: organizationDirectory }));
+  api.route('/offices', createOfficeRoutes({ store: organizationDirectory }));
+  api.route('/roles', createRoleRoutes({ store: organizationDirectory }));
   api.route('/boards', createBoardCardRoutes({ store: boards }));
   api.route('/boards', createBoardColumnRoutes({ store: boards }));
   api.route('/boards', createBoardRoutes({ store: boards }));

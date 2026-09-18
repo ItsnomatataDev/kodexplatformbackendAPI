@@ -38,6 +38,7 @@ export type OrganizationState = {
 export type OrganizationMembership = {
   membershipId: string;
   organizationId: string;
+  officeId: string | null;
   roleId: string | null;
   roleKey: string | null;
   status: MembershipStatus;

@@ -30,6 +30,7 @@ function authContext(): AuthContext {
     membership: {
       membershipId: 'membership-1',
       organizationId: orgA,
+      officeId: null,
       roleId: 'role-1',
       roleKey: 'member',
       status: 'active',
