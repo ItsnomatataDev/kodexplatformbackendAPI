@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { db } from '../../src/db/pool.js';
+import { applyKodeRoleModel } from '../../src/organizations/role-model.js';
 import type { PoolClient } from 'pg';
 
 
@@ -1009,6 +1010,9 @@ async function main() {
 
       await insertRoles(client, roles);
       log('Roles imported.');
+
+      await applyKodeRoleModel(client);
+      log('Kode operating role model applied.');
 
       await insertMemberships(client, members);
       log('Memberships imported.');
