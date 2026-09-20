@@ -2,6 +2,8 @@ import { createApp, type CreateAppOptions } from '../src/app.js';
 import { AccessTokenService } from '../src/auth/access-token.js';
 import type { AuthContext } from '../src/authorization/types.js';
 import { MemoryFileStorage } from '../src/files/memory-storage.js';
+import { MemoryNotificationStore } from '../src/notifications/memory-store.js';
+import { MemoryTicketStore } from '../src/tickets/memory-store.js';
 import { MemoryBoardStore } from '../src/work/memory-store.js';
 import { createSessionAuth } from './session-auth.js';
 
@@ -80,6 +82,20 @@ export function orgBContext(): AuthContext {
   });
 }
 
+export function orgAMemberContext(
+  userId: string,
+  overrides: Parameters<typeof authContext>[0] = {},
+): AuthContext {
+  return authContext({
+    ...overrides,
+    actor: {
+      userId,
+      email: `${userId.slice(0, 8)}@example.com`,
+      ...overrides.actor,
+    },
+  });
+}
+
 export const sessionAuth = createSessionAuth(tokenService);
 
 export function createWorkApp(
@@ -94,7 +110,12 @@ export function createWorkApp(
   files = new MemoryFileStorage(),
   appOptions: Pick<
     CreateAppOptions,
-    'limits' | 'rateLimiter' | 'rateLimitPolicies' | 'trustedProxyIps'
+    | 'limits'
+    | 'rateLimiter'
+    | 'rateLimitPolicies'
+    | 'trustedProxyIps'
+    | 'notifications'
+    | 'tickets'
   > = {},
 ) {
   store.seedOrganizationMember({
@@ -119,6 +140,13 @@ export function createWorkApp(
     isActive: true,
   });
 
+  const tickets = appOptions.tickets ?? new MemoryTicketStore();
+  if (tickets instanceof MemoryTicketStore) {
+    tickets.seedMember(orgA, userA);
+    tickets.seedMember(orgA, userC);
+    tickets.seedMember(orgB, userB);
+  }
+
   return createApp({
     auth: {
       verifier: tokenService,
@@ -132,6 +160,8 @@ export function createWorkApp(
     boards: store,
     files,
     ...appOptions,
+    notifications: appOptions.notifications ?? new MemoryNotificationStore(),
+    tickets,
   });
 }
 

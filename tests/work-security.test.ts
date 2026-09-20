@@ -49,6 +49,7 @@ test('unauthenticated, invalid, and tampered credentials are denied across Work 
     `/api/cards/${cardA.id}`,
     `/api/cards/${cardA.id}/comments`,
     `/api/labels`,
+    `/api/notifications`,
   ];
 
   for (const route of routes) {
@@ -272,6 +273,15 @@ test('cross-organization Work resources are not found and lists stay isolated', 
     }),
   );
   assert.equal(stolenTime.error?.code, 'TIME_ENTRY_NOT_FOUND');
+  const listedTime = await json(
+    await app.request('/api/time-entries', {
+      headers: { Authorization: authA },
+    }),
+  );
+  assert.equal(
+    listedTime.timeEntries.every((entry: { id: string }) => entry.id !== timeB.timeEntry.id),
+    true,
+  );
 
   const historyB = await json(
     await app.request(`/api/cards/${cardB.id}/updates`, {

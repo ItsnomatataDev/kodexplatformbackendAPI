@@ -110,6 +110,36 @@ test('checklist migration grants nested checklist keys without using all as a wi
   assert.doesNotMatch(sql, /work\.\*/);
 });
 
+test('card lifecycle migration grants nested time, watcher, and delete keys', () => {
+  const sql = fs.readFileSync(
+    path.resolve(process.cwd(), 'migrations/0013_work_card_lifecycle.sql'),
+    'utf8',
+  );
+
+  assert.match(sql, /"time_entries"/);
+  assert.match(sql, /"card_watchers"/);
+  assert.match(sql, /"cards"/);
+  assert.match(sql, /"delete": true/);
+  assert.match(sql, /jsonb_set/);
+  assert.doesNotMatch(sql, /"all": true/);
+  assert.doesNotMatch(sql, /work\.\*/);
+});
+
+test('board lifecycle migration grants nested board and column delete keys', () => {
+  const sql = fs.readFileSync(
+    path.resolve(process.cwd(), 'migrations/0014_work_board_lifecycle.sql'),
+    'utf8',
+  );
+
+  assert.match(sql, /"boards"/);
+  assert.match(sql, /"board_columns"/);
+  assert.match(sql, /"delete": true/);
+  assert.match(sql, /jsonb_set/);
+  assert.match(sql, /permissions->'work'/);
+  assert.doesNotMatch(sql, /"all": true/);
+  assert.doesNotMatch(sql, /work\.\*/);
+});
+
 test('applyKodeRoleModel only toggles activity flags for the two role classes', async () => {
   const statements: Array<{ sql: string; params: unknown[] }> = [];
 
@@ -136,6 +166,53 @@ test('role cleanup does not treat {all:true} as a Work wildcard', () => {
     ),
     false,
   );
+});
+
+test('notification migration grants nested read and update keys without using all as a wildcard', () => {
+  const sql = fs.readFileSync(
+    path.resolve(process.cwd(), 'migrations/0016_notifications.sql'),
+    'utf8',
+  );
+
+  assert.match(sql, /CREATE SCHEMA IF NOT EXISTS notifications/);
+  assert.match(sql, /"read": true/);
+  assert.match(sql, /"update": true/);
+  assert.match(sql, /jsonb_set/);
+  assert.match(sql, /permissions->'notifications'/);
+  assert.doesNotMatch(sql, /"all": true/);
+  assert.doesNotMatch(sql, /work\.\*/);
+});
+
+test('ticket migration grants nested ticket keys without using all as a wildcard', () => {
+  const sql = fs.readFileSync(
+    path.resolve(process.cwd(), 'migrations/0017_tickets.sql'),
+    'utf8',
+  );
+
+  assert.match(sql, /CREATE SCHEMA IF NOT EXISTS tickets/);
+  assert.match(sql, /"read": true/);
+  assert.match(sql, /"create": true/);
+  assert.match(sql, /"assign": true/);
+  assert.match(sql, /jsonb_set/);
+  assert.match(sql, /permissions->'tickets'/);
+  assert.doesNotMatch(sql, /"all": true/);
+  assert.doesNotMatch(sql, /work\.\*/);
+});
+
+test('ticket attachment migration grants nested attachment keys without using all as a wildcard', () => {
+  const sql = fs.readFileSync(
+    path.resolve(process.cwd(), 'migrations/0018_ticket_attachments.sql'),
+    'utf8',
+  );
+
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS tickets.ticket_attachments/);
+  assert.match(sql, /"read": true/);
+  assert.match(sql, /"create": true/);
+  assert.match(sql, /"delete": true/);
+  assert.match(sql, /jsonb_set/);
+  assert.match(sql, /\{tickets,attachments\}/);
+  assert.doesNotMatch(sql, /"all": true/);
+  assert.doesNotMatch(sql, /work\.\*/);
 });
 
 test('nested work permissions grant board and card actions', () => {

@@ -225,5 +225,35 @@ export function createBoardRoutes(dependencies: BoardRouteDependencies) {
     return c.json({ board: serializeBoard(board) });
   });
 
+  boards.delete('/:boardId', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    const boardId = requireBoardId(c.req.param('boardId'));
+    const existing = await dependencies.store.getById(organizationId, boardId);
+
+    if (!existing) {
+      throw new NotFoundError('BOARD_NOT_FOUND', 'The board was not found.');
+    }
+
+    assertAuthorized({
+      context: auth,
+      action: 'work.boards.delete',
+      resource: {
+        type: 'work.board',
+        id: boardId,
+        organizationId,
+      },
+    });
+    await rateLimitWork(c, 'mutation');
+
+    const board = await dependencies.store.archiveBoard(organizationId, boardId);
+    if (!board) {
+      throw new NotFoundError('BOARD_NOT_FOUND', 'The board was not found.');
+    }
+
+    return c.json({ board: serializeBoard(board) });
+  });
+
   return boards;
 }

@@ -21,6 +21,8 @@ import type {
   CreateTimeEntryInput,
   ColumnRecord,
   LabelRecord,
+  ListTimeEntriesInput,
+  MoveCardInput,
   OrganizationMemberRecord,
   SubmissionRecord,
   TimeEntryRecord,
@@ -131,6 +133,20 @@ export class MemoryBoardStore implements WorkStore {
     return { ...board };
   }
 
+  async archiveBoard(organizationId: string, boardId: string) {
+    const board = this.boards.get(boardId);
+
+    if (!board || board.organizationId !== organizationId) {
+      return null;
+    }
+
+    const now = new Date();
+    board.archivedAt = board.archivedAt ?? now;
+    board.status = 'archived';
+    board.updatedAt = now;
+    return { ...board };
+  }
+
   async listColumnsByBoard(organizationId: string, boardId: string) {
     return [...this.columns.values()]
       .filter(
@@ -210,11 +226,76 @@ export class MemoryBoardStore implements WorkStore {
     return { ...column };
   }
 
+  async deleteColumn(
+    organizationId: string,
+    columnId: string,
+    destinationColumnId: string,
+  ) {
+    const source = await this.getColumnById(organizationId, columnId);
+    if (!source) {
+      return { status: 'not_found' } as const;
+    }
+
+    const boardColumns = await this.listColumnsByBoard(
+      organizationId,
+      source.boardId,
+    );
+    if (boardColumns.length <= 1) {
+      return { status: 'last_column' } as const;
+    }
+
+    const destination = await this.getColumnById(
+      organizationId,
+      destinationColumnId,
+    );
+    if (!destination) {
+      return { status: 'not_found' } as const;
+    }
+
+    if (
+      source.id === destination.id ||
+      source.boardId !== destination.boardId
+    ) {
+      return { status: 'destination_invalid' } as const;
+    }
+
+    const now = new Date();
+    for (const card of this.cards.values()) {
+      if (
+        card.organizationId !== organizationId ||
+        card.boardId !== source.boardId ||
+        card.columnId !== source.id
+      ) {
+        continue;
+      }
+      card.columnId = destination.id;
+      card.statusKey = destination.statusKey ?? card.statusKey;
+      card.updatedAt = now;
+    }
+
+    this.columns.delete(source.id);
+
+    const remaining = await this.listColumnsByBoard(
+      organizationId,
+      source.boardId,
+    );
+    remaining.forEach((column, position) => {
+      const current = this.columns.get(column.id);
+      if (!current) return;
+      current.position = position;
+      current.updatedAt = now;
+    });
+
+    return { status: 'deleted' } as const;
+  }
+
   async listCardsByBoard(organizationId: string, boardId: string) {
     return [...this.cards.values()]
       .filter(
         (card) =>
-          card.organizationId === organizationId && card.boardId === boardId,
+          card.organizationId === organizationId &&
+          card.boardId === boardId &&
+          card.archivedAt == null,
       )
       .sort((left, right) => {
         if (left.position !== right.position) {
@@ -234,7 +315,7 @@ export class MemoryBoardStore implements WorkStore {
   async getCardById(organizationId: string, cardId: string) {
     const card = this.cards.get(cardId);
 
-    if (!card || card.organizationId !== organizationId) {
+    if (!card || card.organizationId !== organizationId || card.archivedAt) {
       return null;
     }
 
@@ -355,6 +436,63 @@ export class MemoryBoardStore implements WorkStore {
     }
 
     return this.cloneCard(card);
+  }
+
+  async moveCard(
+    organizationId: string,
+    cardId: string,
+    input: MoveCardInput,
+    actorUserId: string,
+  ) {
+    const current = await this.getCardById(organizationId, cardId);
+    if (!current) {
+      return null;
+    }
+
+    const board = this.boards.get(input.targetBoardId);
+    if (!board || board.organizationId !== organizationId) {
+      return null;
+    }
+
+    const column = this.columns.get(input.targetColumnId);
+    if (
+      !column ||
+      column.organizationId !== organizationId ||
+      column.boardId !== input.targetBoardId
+    ) {
+      return null;
+    }
+
+    const card = this.cards.get(cardId)!;
+    card.boardId = input.targetBoardId;
+    card.columnId = input.targetColumnId;
+    card.statusKey = input.statusKey ?? column.statusKey ?? card.statusKey;
+    card.position =
+      input.position ??
+      this.nextCardPosition(organizationId, input.targetBoardId, input.targetColumnId);
+    if (input.metadata !== undefined) {
+      card.metadata = { ...input.metadata };
+    }
+    card.updatedAt = new Date(Math.max(Date.now(), card.updatedAt.getTime() + 1));
+    this.recordCardFieldUpdates(current, card, actorUserId);
+    return this.cloneCard(card);
+  }
+
+  async deleteCard(
+    organizationId: string,
+    cardId: string,
+    _actorUserId: string,
+  ) {
+    const current = await this.getCardById(organizationId, cardId);
+    if (!current) {
+      return false;
+    }
+
+    const card = this.cards.get(cardId)!;
+    const now = new Date();
+    card.archivedAt = card.archivedAt ?? now;
+    card.updatedAt = now;
+    return true;
   }
 
   async getOrganizationMember(organizationId: string, userId: string) {
@@ -892,28 +1030,70 @@ export class MemoryBoardStore implements WorkStore {
   }
 
   async listTimeEntriesByCard(organizationId: string, cardId: string) {
-    const card = await this.getCardById(organizationId, cardId);
-    if (!card) {
+    const card = this.cards.get(cardId);
+    if (!card || card.organizationId !== organizationId) {
       return [];
     }
 
     return [...this.timeEntries.values()]
       .filter(
         (entry) =>
-          entry.organizationId === organizationId && entry.cardId === cardId,
+          entry.organizationId === organizationId &&
+          entry.cardId === cardId &&
+          entry.deletedAt == null,
       )
       .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
-      .map((entry) => ({ ...entry }));
+      .map((entry) => this.hydrateTimeEntry(entry));
+  }
+
+  async listTimeEntries(input: ListTimeEntriesInput) {
+    const limit = Math.min(Math.max(input.limit ?? 200, 1), 500);
+    return [...this.timeEntries.values()]
+      .filter((entry) => {
+        if (entry.organizationId !== input.organizationId || entry.deletedAt) {
+          return false;
+        }
+        if (input.userId && entry.userId !== input.userId) return false;
+        if (input.cardId && entry.cardId !== input.cardId) return false;
+        const card = this.cards.get(entry.cardId);
+        if (!card || card.organizationId !== input.organizationId) return false;
+        if (input.boardId && card.boardId !== input.boardId) return false;
+        if (input.running && (entry.endedAt !== null || card.archivedAt)) {
+          return false;
+        }
+        const started = entry.startedAt ?? entry.createdAt;
+        if (input.from && started < input.from) return false;
+        if (input.to && started > input.to) return false;
+        return true;
+      })
+      .sort((left, right) => {
+        const leftStarted = (left.startedAt ?? left.createdAt).getTime();
+        const rightStarted = (right.startedAt ?? right.createdAt).getTime();
+        return rightStarted - leftStarted;
+      })
+      .slice(0, limit)
+      .map((entry) => this.hydrateTimeEntry(entry));
+  }
+
+  private hydrateTimeEntry(entry: TimeEntryRecord): TimeEntryRecord {
+    const card = this.cards.get(entry.cardId);
+    const board = card ? this.boards.get(card.boardId) : undefined;
+    return {
+      ...entry,
+      cardTitle: card?.title ?? null,
+      boardId: card?.boardId ?? null,
+      boardName: board?.name ?? null,
+    };
   }
 
   async getTimeEntryById(organizationId: string, timeEntryId: string) {
     const entry = this.timeEntries.get(timeEntryId);
-    if (!entry || entry.organizationId !== organizationId) {
+    if (!entry || entry.organizationId !== organizationId || entry.deletedAt) {
       return null;
     }
 
-    const card = await this.getCardById(organizationId, entry.cardId);
-    if (!card) {
+    const card = this.cards.get(entry.cardId);
+    if (!card || card.organizationId !== organizationId) {
       return null;
     }
 
@@ -942,6 +1122,7 @@ export class MemoryBoardStore implements WorkStore {
       startedAt: input.startedAt ?? null,
       endedAt: input.endedAt ?? null,
       isBillable: input.isBillable ?? false,
+      deletedAt: null,
       createdAt: now,
       updatedAt: now,
     };
@@ -974,6 +1155,33 @@ export class MemoryBoardStore implements WorkStore {
     );
     await this.refreshTrackedSeconds(organizationId, entry.cardId);
     return { ...entry };
+  }
+
+  async deleteTimeEntry(
+    organizationId: string,
+    timeEntryId: string,
+    _actorUserId: string,
+  ) {
+    const current = await this.getTimeEntryById(organizationId, timeEntryId);
+    if (!current) {
+      return null;
+    }
+
+    const entry = this.timeEntries.get(timeEntryId)!;
+    const now = new Date();
+    entry.deletedAt = entry.deletedAt ?? now;
+    entry.updatedAt = now;
+    await this.refreshTrackedSeconds(organizationId, current.cardId);
+    return { ...entry };
+  }
+
+  async listRunningTimeEntries(organizationId: string, userId?: string | null) {
+    return this.listTimeEntries({
+      organizationId,
+      userId: userId ?? undefined,
+      running: true,
+      limit: 500,
+    });
   }
 
   async listChecklistsByCard(organizationId: string, cardId: string) {
@@ -1193,7 +1401,9 @@ export class MemoryBoardStore implements WorkStore {
     card.trackedSecondsCache = [...this.timeEntries.values()]
       .filter(
         (entry) =>
-          entry.organizationId === organizationId && entry.cardId === cardId,
+          entry.organizationId === organizationId &&
+          entry.cardId === cardId &&
+          entry.deletedAt == null,
       )
       .reduce((total, entry) => total + entry.seconds, 0);
   }

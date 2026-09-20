@@ -43,6 +43,12 @@ import {
 import { MemoryFileStorage } from './files/memory-storage.js';
 import { MinioFileStorage } from './files/minio-storage.js';
 import type { FileStorage } from './files/storage.js';
+import { PostgresNotificationStore } from './notifications/postgres-store.js';
+import type { NotificationStore } from './notifications/store.js';
+import { createNotificationRoutes } from './routes/notifications.js';
+import { PostgresTicketStore } from './tickets/postgres-store.js';
+import type { TicketStore } from './tickets/store.js';
+import { createTicketRoutes } from './routes/tickets.js';
 import { PostgresBoardStore } from './work/postgres-store.js';
 import type { WorkStore } from './work/store.js';
 import type { HttpLimits, WorkRateLimitPolicies } from './http/limits.js';
@@ -54,6 +60,8 @@ export type CreateAppOptions = {
   authLifecycle?: AuthRouteDependencies;
   corsOrigins?: string[];
   boards?: WorkStore;
+  notifications?: NotificationStore;
+  tickets?: TicketStore;
   files?: FileStorage;
   trustedProxyIps?: string[];
   limits?: Partial<HttpLimits>;
@@ -71,6 +79,9 @@ export function createApp(options: CreateAppOptions = {}) {
     options.authLifecycle ?? createDefaultAuthLifecycle(authDependencies);
   const corsOrigins = options.corsOrigins ?? env.cors.allowedOrigins;
   const boards = options.boards ?? new PostgresBoardStore();
+  const notifications =
+    options.notifications ?? new PostgresNotificationStore();
+  const tickets = options.tickets ?? new PostgresTicketStore();
   const files =
     options.files ??
     (env.minio.accessKey && env.minio.secretKey
@@ -120,19 +131,22 @@ export function createApp(options: CreateAppOptions = {}) {
   api.route('/organization', createOrganizationRoutes({ store: organizationDirectory }));
   api.route('/offices', createOfficeRoutes({ store: organizationDirectory }));
   api.route('/roles', createRoleRoutes({ store: organizationDirectory }));
+  const ecosystem = { store: boards, files, notifications };
   api.route('/boards', createBoardCardRoutes({ store: boards }));
   api.route('/boards', createBoardColumnRoutes({ store: boards }));
   api.route('/boards', createBoardRoutes({ store: boards }));
   api.route('/columns', createColumnRoutes({ store: boards }));
-  api.route('/cards', createCardNestedRoutes({ store: boards, files }));
+  api.route('/cards', createCardNestedRoutes(ecosystem));
   api.route('/cards', createCardRoutes({ store: boards }));
-  api.route('/comments', createCommentRoutes({ store: boards, files }));
-  api.route('/labels', createLabelRoutes({ store: boards, files }));
-  api.route('/submissions', createSubmissionRoutes({ store: boards, files }));
-  api.route('/attachments', createAttachmentRoutes({ store: boards, files }));
-  api.route('/time-entries', createTimeEntryRoutes({ store: boards, files }));
-  api.route('/checklists', createChecklistRoutes({ store: boards, files }));
-  api.route('/checklist-items', createChecklistItemRoutes({ store: boards, files }));
+  api.route('/comments', createCommentRoutes(ecosystem));
+  api.route('/labels', createLabelRoutes(ecosystem));
+  api.route('/submissions', createSubmissionRoutes(ecosystem));
+  api.route('/attachments', createAttachmentRoutes(ecosystem));
+  api.route('/time-entries', createTimeEntryRoutes(ecosystem));
+  api.route('/checklists', createChecklistRoutes(ecosystem));
+  api.route('/checklist-items', createChecklistItemRoutes(ecosystem));
+  api.route('/notifications', createNotificationRoutes({ store: notifications }));
+  api.route('/tickets', createTicketRoutes({ store: tickets, files }));
   app.route('/api', api);
 
   return app;

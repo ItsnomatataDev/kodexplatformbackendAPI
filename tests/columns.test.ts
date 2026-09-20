@@ -120,6 +120,8 @@ async function json(response: Response) {
       createdAt: string;
       updatedAt: string;
     };
+    card?: { id: string; columnId: string | null; statusKey: string };
+    cards?: Array<{ id: string; columnId: string | null; statusKey: string }>;
     error?: { code: string; message: string };
   }>;
 }
@@ -339,4 +341,89 @@ test('columns cannot be accessed across organizations', async () => {
     }),
   );
   assert.equal(patch.error?.code, 'COLUMN_NOT_FOUND');
+});
+
+test('deleting a column moves its cards to the destination and refuses the last column', async () => {
+  const app = createWorkApp(new MemoryBoardStore(), async () => authContext());
+  const authorization = await bearer(userA);
+  const boardId = await createBoard(app, userA, 'Delivery');
+
+  const todo = await json(
+    await app.request(`/api/boards/${boardId}/columns`, {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'To Do', statusKey: 'todo', position: 0 }),
+    }),
+  );
+  const doing = await json(
+    await app.request(`/api/boards/${boardId}/columns`, {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'In Progress',
+        statusKey: 'in_progress',
+        position: 1,
+      }),
+    }),
+  );
+
+  const createdCard = await json(
+    await app.request(`/api/boards/${boardId}/cards`, {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        title: 'Move me',
+        columnId: doing.column?.id,
+      }),
+    }),
+  );
+  assert.equal(createdCard.card?.columnId, doing.column?.id);
+
+  const deletedResponse = await app.request(`/api/columns/${doing.column?.id}`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: authorization,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ destinationColumnId: todo.column?.id }),
+  });
+  assert.equal(deletedResponse.status, 204);
+
+  const remaining = await json(
+    await app.request(`/api/boards/${boardId}/columns`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(remaining.columns?.length, 1);
+  assert.equal(remaining.columns?.[0]?.id, todo.column?.id);
+  assert.equal(remaining.columns?.[0]?.position, 0);
+
+  const moved = await json(
+    await app.request(`/api/cards/${createdCard.card?.id}`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(moved.card?.columnId, todo.column?.id);
+  assert.equal(moved.card?.statusKey, 'todo');
+
+  const refused = await json(
+    await app.request(`/api/columns/${todo.column?.id}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ destinationColumnId: todo.column?.id }),
+    }),
+  );
+  assert.equal(refused.error?.code, 'LAST_COLUMN');
 });

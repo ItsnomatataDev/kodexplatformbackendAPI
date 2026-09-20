@@ -22,6 +22,8 @@ import type {
   CreateTimeEntryInput,
   ColumnRecord,
   LabelRecord,
+  ListTimeEntriesInput,
+  MoveCardInput,
   OrganizationMemberRecord,
   SubmissionRecord,
   TimeEntryRecord,
@@ -36,6 +38,7 @@ import type {
   UpdateTimeEntryInput,
   WatcherRecord,
   WorkStore,
+  DeleteColumnResult,
 } from './store.js';
 
 function isUniqueViolation(error: unknown) {
@@ -557,6 +560,11 @@ type TimeEntryRow = {
   is_billable: boolean;
   created_at: Date;
   updated_at: Date;
+  card_title?: string | null;
+  board_id?: string | null;
+  board_name?: string | null;
+  user_name?: string | null;
+  user_email?: string | null;
 };
 
 const TIME_ENTRY_RETURNING = `
@@ -581,8 +589,14 @@ function mapTimeEntry(row: TimeEntryRow): TimeEntryRecord {
     startedAt: row.started_at,
     endedAt: row.ended_at,
     isBillable: row.is_billable,
+    deletedAt: null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    cardTitle: row.card_title ?? null,
+    boardId: row.board_id ?? null,
+    boardName: row.board_name ?? null,
+    userName: row.user_name ?? null,
+    userEmail: row.user_email ?? null,
   };
 }
 
@@ -789,6 +803,24 @@ export class PostgresBoardStore implements WorkStore {
     return result.rows[0] ? mapBoard(result.rows[0]) : null;
   }
 
+  async archiveBoard(organizationId: string, boardId: string) {
+    const result = await db.query<BoardRow>(
+      `
+        UPDATE work.boards
+        SET
+          archived_at = COALESCE(archived_at, NOW()),
+          status = 'archived',
+          updated_at = NOW()
+        WHERE organization_id = $1
+          AND id = $2
+        RETURNING ${BOARD_COLUMNS}
+      `,
+      [organizationId, boardId],
+    );
+
+    return result.rows[0] ? mapBoard(result.rows[0]) : null;
+  }
+
   async listColumnsByBoard(organizationId: string, boardId: string) {
     const result = await db.query<ColumnRow>(
       `
@@ -924,6 +956,127 @@ export class PostgresBoardStore implements WorkStore {
     return result.rows[0] ? mapColumn(result.rows[0]) : null;
   }
 
+  async deleteColumn(
+    organizationId: string,
+    columnId: string,
+    destinationColumnId: string,
+  ): Promise<DeleteColumnResult> {
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
+      const sourceResult = await client.query<ColumnRow>(
+        `
+          SELECT ${COLUMN_COLUMNS}
+          FROM work.board_columns
+          WHERE organization_id = $1
+            AND id = $2
+          FOR UPDATE
+        `,
+        [organizationId, columnId],
+      );
+      const destinationResult = await client.query<ColumnRow>(
+        `
+          SELECT ${COLUMN_COLUMNS}
+          FROM work.board_columns
+          WHERE organization_id = $1
+            AND id = $2
+          FOR UPDATE
+        `,
+        [organizationId, destinationColumnId],
+      );
+      const source = sourceResult.rows[0];
+      if (!source) {
+        await client.query('ROLLBACK');
+        return { status: 'not_found' };
+      }
+
+      const boardColumns = await client.query<{ id: string }>(
+        `
+          SELECT id
+          FROM work.board_columns
+          WHERE organization_id = $1
+            AND board_id = $2
+          FOR UPDATE
+        `,
+        [organizationId, source.board_id],
+      );
+      if (boardColumns.rows.length <= 1) {
+        await client.query('ROLLBACK');
+        return { status: 'last_column' };
+      }
+
+      const destination = destinationResult.rows[0];
+      if (!destination) {
+        await client.query('ROLLBACK');
+        return { status: 'not_found' };
+      }
+
+      if (source.id === destination.id || source.board_id !== destination.board_id) {
+        await client.query('ROLLBACK');
+        return { status: 'destination_invalid' };
+      }
+
+      await client.query(
+        `
+          UPDATE work.cards
+          SET
+            column_id = $3,
+            status_key = COALESCE($4, status_key),
+            updated_at = NOW()
+          WHERE organization_id = $1
+            AND board_id = $2
+            AND column_id = $5
+        `,
+        [
+          organizationId,
+          source.board_id,
+          destination.id,
+          destination.status_key,
+          source.id,
+        ],
+      );
+
+      await client.query(
+        `
+          DELETE FROM work.board_columns
+          WHERE organization_id = $1
+            AND id = $2
+        `,
+        [organizationId, source.id],
+      );
+
+      const remaining = await client.query<{ id: string }>(
+        `
+          SELECT id
+          FROM work.board_columns
+          WHERE organization_id = $1
+            AND board_id = $2
+          ORDER BY position ASC, created_at ASC, id ASC
+        `,
+        [organizationId, source.board_id],
+      );
+      for (const [position, row] of remaining.rows.entries()) {
+        await client.query(
+          `
+            UPDATE work.board_columns
+            SET position = $3, updated_at = NOW()
+            WHERE organization_id = $1
+              AND id = $2
+          `,
+          [organizationId, row.id, position],
+        );
+      }
+
+      await client.query('COMMIT');
+      return { status: 'deleted' };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async listCardsByBoard(organizationId: string, boardId: string) {
     const result = await db.query<CardRow>(
       `
@@ -931,6 +1084,7 @@ export class PostgresBoardStore implements WorkStore {
         FROM ${CARD_PROFILE_FROM}
         WHERE card.organization_id = $1
           AND card.board_id = $2
+          AND card.archived_at IS NULL
         ORDER BY card.position ASC, card.created_at ASC, card.id ASC
       `,
       [organizationId, boardId],
@@ -946,6 +1100,7 @@ export class PostgresBoardStore implements WorkStore {
         FROM ${CARD_PROFILE_FROM}
         WHERE card.organization_id = $1
           AND card.id = $2
+          AND card.archived_at IS NULL
       `,
       [organizationId, cardId],
     );
@@ -1134,6 +1289,93 @@ export class PostgresBoardStore implements WorkStore {
       await this.recordCardFieldUpdates(before, hydrated, actorUserId);
     }
     return hydrated;
+  }
+
+  async moveCard(
+    organizationId: string,
+    cardId: string,
+    input: MoveCardInput,
+    actorUserId: string,
+  ) {
+    const before = await this.getCardById(organizationId, cardId);
+    if (!before) {
+      return null;
+    }
+
+    const metadata =
+      input.metadata !== undefined ? JSON.stringify(input.metadata) : null;
+    const result = await db.query<CardRow>(
+      `
+        UPDATE work.cards card
+        SET
+          board_id = $3,
+          column_id = $4,
+          status_key = COALESCE($5, dest.status_key, card.status_key),
+          position = COALESCE(
+            $6,
+            (
+              SELECT COALESCE(MAX(existing.position) + 1, 0)
+              FROM work.cards existing
+              WHERE existing.organization_id = card.organization_id
+                AND existing.board_id = $3
+                AND existing.column_id = $4
+                AND existing.id <> card.id
+            )
+          ),
+          metadata = COALESCE($7::jsonb, card.metadata),
+          updated_at = NOW()
+        FROM work.boards dest_board, work.board_columns dest
+        WHERE card.organization_id = $1
+          AND card.id = $2
+          AND dest_board.id = $3
+          AND dest_board.organization_id = card.organization_id
+          AND dest.id = $4
+          AND dest.board_id = dest_board.id
+          AND dest.organization_id = card.organization_id
+        RETURNING ${CARD_COLUMNS}
+      `,
+      [
+        organizationId,
+        cardId,
+        input.targetBoardId,
+        input.targetColumnId,
+        input.statusKey ?? null,
+        input.position ?? null,
+        metadata,
+      ],
+    );
+    const card = result.rows[0] ? mapCard(result.rows[0]) : null;
+    const hydrated = card
+      ? ((await this.getCardById(card.organizationId, card.id)) ?? card)
+      : null;
+    if (hydrated) {
+      await this.recordCardFieldUpdates(before, hydrated, actorUserId);
+    }
+    return hydrated;
+  }
+
+  async deleteCard(
+    organizationId: string,
+    cardId: string,
+    actorUserId: string,
+  ) {
+    const result = await db.query(
+      `
+        UPDATE work.cards card
+        SET
+          archived_at = COALESCE(card.archived_at, NOW()),
+          archived_by = COALESCE(card.archived_by, $3),
+          updated_at = NOW()
+        FROM work.boards b
+        WHERE card.organization_id = $1
+          AND card.id = $2
+          AND card.archived_at IS NULL
+          AND b.id = card.board_id
+          AND b.organization_id = card.organization_id
+      `,
+      [organizationId, cardId, actorUserId],
+    );
+    return (result.rowCount ?? 0) > 0;
   }
 
   async getOrganizationMember(organizationId: string, userId: string) {
@@ -1935,9 +2177,66 @@ export class PostgresBoardStore implements WorkStore {
          AND card.organization_id = entry.organization_id
         WHERE entry.organization_id = $1
           AND entry.card_id = $2
+          AND entry.deleted_at IS NULL
         ORDER BY entry.created_at ASC, entry.id ASC
       `,
       [organizationId, cardId],
+    );
+    return result.rows.map(mapTimeEntry);
+  }
+
+  async listTimeEntries(input: ListTimeEntriesInput) {
+    const limit = Math.min(Math.max(input.limit ?? 200, 1), 500);
+    const result = await db.query<TimeEntryRow>(
+      `
+        SELECT
+          ${TIME_ENTRY_COLUMNS},
+          card.title AS card_title,
+          card.board_id,
+          board.name AS board_name,
+          profile.full_name AS user_name,
+          users.email AS user_email
+        FROM work.time_entries entry
+        JOIN work.cards card
+          ON card.id = entry.card_id
+         AND card.organization_id = entry.organization_id
+        JOIN work.boards board
+          ON board.id = card.board_id
+         AND board.organization_id = card.organization_id
+        LEFT JOIN identity.user_profiles profile
+          ON profile.user_id = entry.user_id
+        LEFT JOIN identity.users users
+          ON users.id = entry.user_id
+        WHERE entry.organization_id = $1
+          AND entry.deleted_at IS NULL
+          AND ($2::uuid IS NULL OR entry.user_id = $2)
+          AND ($3::uuid IS NULL OR entry.card_id = $3)
+          AND ($4::uuid IS NULL OR card.board_id = $4)
+          AND (
+            $5::timestamptz IS NULL
+            OR COALESCE(entry.started_at, entry.created_at) >= $5
+          )
+          AND (
+            $6::timestamptz IS NULL
+            OR COALESCE(entry.started_at, entry.created_at) <= $6
+          )
+          AND (
+            $7::boolean IS NOT TRUE
+            OR (entry.ended_at IS NULL AND card.archived_at IS NULL)
+          )
+        ORDER BY COALESCE(entry.started_at, entry.created_at) DESC, entry.id DESC
+        LIMIT $8
+      `,
+      [
+        input.organizationId,
+        input.userId ?? null,
+        input.cardId ?? null,
+        input.boardId ?? null,
+        input.from ?? null,
+        input.to ?? null,
+        input.running ?? false,
+        limit,
+      ],
     );
     return result.rows.map(mapTimeEntry);
   }
@@ -1952,6 +2251,7 @@ export class PostgresBoardStore implements WorkStore {
          AND card.organization_id = entry.organization_id
         WHERE entry.organization_id = $1
           AND entry.id = $2
+          AND entry.deleted_at IS NULL
       `,
       [organizationId, timeEntryId],
     );
@@ -1981,6 +2281,7 @@ export class PostgresBoardStore implements WorkStore {
          AND b.organization_id = card.organization_id
         WHERE card.organization_id = $1
           AND card.id = $2
+          AND card.archived_at IS NULL
         RETURNING ${TIME_ENTRY_RETURNING}
       `,
       [
@@ -2034,6 +2335,7 @@ export class PostgresBoardStore implements WorkStore {
         FROM work.cards card
         WHERE entry.organization_id = $${index}
           AND entry.id = $${index + 1}
+          AND entry.deleted_at IS NULL
           AND card.id = entry.card_id
           AND card.organization_id = entry.organization_id
         RETURNING ${TIME_ENTRY_COLUMNS}
@@ -2045,6 +2347,44 @@ export class PostgresBoardStore implements WorkStore {
       await this.refreshTrackedSeconds(organizationId, entry.cardId);
     }
     return entry;
+  }
+
+  async deleteTimeEntry(
+    organizationId: string,
+    timeEntryId: string,
+    actorUserId: string,
+  ) {
+    const result = await db.query<TimeEntryRow>(
+      `
+        UPDATE work.time_entries entry
+        SET
+          deleted_at = COALESCE(entry.deleted_at, NOW()),
+          deleted_by = COALESCE(entry.deleted_by, $3),
+          updated_at = NOW()
+        FROM work.cards card
+        WHERE entry.organization_id = $1
+          AND entry.id = $2
+          AND entry.deleted_at IS NULL
+          AND card.id = entry.card_id
+          AND card.organization_id = entry.organization_id
+        RETURNING ${TIME_ENTRY_COLUMNS}
+      `,
+      [organizationId, timeEntryId, actorUserId],
+    );
+    const entry = result.rows[0] ? mapTimeEntry(result.rows[0]) : null;
+    if (entry) {
+      await this.refreshTrackedSeconds(organizationId, entry.cardId);
+    }
+    return entry;
+  }
+
+  async listRunningTimeEntries(organizationId: string, userId?: string | null) {
+    return this.listTimeEntries({
+      organizationId,
+      userId: userId ?? undefined,
+      running: true,
+      limit: 500,
+    });
   }
 
   async listChecklistsByCard(organizationId: string, cardId: string) {
@@ -2395,6 +2735,7 @@ export class PostgresBoardStore implements WorkStore {
           FROM work.time_entries entry
           WHERE entry.organization_id = card.organization_id
             AND entry.card_id = card.id
+            AND entry.deleted_at IS NULL
         ), 0)
         WHERE card.organization_id = $1
           AND card.id = $2

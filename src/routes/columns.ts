@@ -6,7 +6,7 @@ import {
   rejectClientOrganizationOverride,
   requireOrganizationId,
 } from '../authorization/organization.js';
-import { NotFoundError, ValidationError } from '../http/errors.js';
+import { NotFoundError, ValidationError, ConflictError } from '../http/errors.js';
 import { FIELD_LIMITS } from '../http/limits.js';
 import { rateLimitWork } from '../http/work-rate-limit.js';
 import type {
@@ -20,6 +20,7 @@ import {
   readOptionalString,
   readRequiredText,
   requireId,
+  requireUuidValue,
 } from '../work/http.js';
 
 export type ColumnRouteDependencies = {
@@ -234,6 +235,63 @@ export function createColumnRoutes(dependencies: ColumnRouteDependencies) {
     }
 
     return c.json({ column: serializeColumn(column) });
+  });
+
+  routes.delete('/:columnId', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    const columnId = requireId(c.req.param('columnId'), 'columnId');
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
+
+    const existing = await dependencies.store.getColumnById(
+      organizationId,
+      columnId,
+    );
+    if (!existing) {
+      throw new NotFoundError('COLUMN_NOT_FOUND', 'The column was not found.');
+    }
+
+    assertAuthorized({
+      context: auth,
+      action: 'work.board_columns.delete',
+      resource: {
+        type: 'work.board_column',
+        id: columnId,
+        organizationId,
+      },
+    });
+    await rateLimitWork(c, 'mutation');
+
+    const destinationColumnId = requireUuidValue(
+      body.destinationColumnId ?? body.destination_column_id,
+      'destinationColumnId',
+    );
+
+    const result = await dependencies.store.deleteColumn(
+      organizationId,
+      columnId,
+      destinationColumnId,
+    );
+
+    if (result.status === 'not_found') {
+      throw new NotFoundError('COLUMN_NOT_FOUND', 'The column was not found.');
+    }
+    if (result.status === 'last_column') {
+      throw new ConflictError(
+        'LAST_COLUMN',
+        'A board must keep at least one column.',
+      );
+    }
+    if (result.status === 'destination_invalid') {
+      throw new ValidationError(
+        'destinationColumnId must be a different column on the same board.',
+        { field: 'destinationColumnId' },
+      );
+    }
+
+    return c.body(null, 204);
   });
 
   return routes;

@@ -86,6 +86,8 @@ async function json(response: Response) {
       createdBy: string;
       name: string;
       description: string | null;
+      status?: string;
+      archivedAt?: string | null;
     };
     error?: { code: string; message: string };
   }>;
@@ -306,4 +308,50 @@ test('members without permission cannot create boards', async () => {
   );
 
   assert.equal(denied.error?.code, 'INSUFFICIENT_PERMISSION');
+});
+
+test('deleting a board archives it and hides it from the organization list', async () => {
+  const store = new MemoryBoardStore();
+  const app = createBoardApp(store, async () => authContext());
+  const authorization = await bearer(userA);
+
+  const created = await json(
+    await app.request('/api/boards', {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'Temporary board' }),
+    }),
+  );
+  const boardId = created.board!.id;
+
+  const archivedResponse = await app.request(`/api/boards/${boardId}`, {
+    method: 'DELETE',
+    headers: { Authorization: authorization },
+  });
+  const archived = await json(archivedResponse);
+
+  assert.equal(archivedResponse.status, 200);
+  assert.equal(archived.board?.id, boardId);
+  assert.equal(archived.board?.status, 'archived');
+  assert.equal(typeof archived.board?.archivedAt, 'string');
+
+  const listed = await json(
+    await app.request('/api/boards', {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(
+    listed.boards?.some((board) => board.id === boardId),
+    false,
+  );
+
+  const stillReadable = await json(
+    await app.request(`/api/boards/${boardId}`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(stillReadable.board?.archivedAt != null, true);
 });

@@ -10,7 +10,9 @@ import {
   createWorkApp,
   json,
   orgA,
+  orgAMemberContext,
   orgB,
+  orgBContext,
   userA,
   userB,
   userC,
@@ -399,6 +401,163 @@ test('submissions, attachments, and time entries stay on the parent card', async
     }),
   );
   assert.equal(patchedTime.timeEntry.seconds, 1200);
+
+  const openAfterCreate = await json(
+    await app.request('/api/time-entries/running', {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(openAfterCreate.timeEntries.length, 1);
+  assert.equal(openAfterCreate.timeEntries[0].id, patchedTime.timeEntry.id);
+
+  const closed = await json(
+    await app.request(`/api/time-entries/${patchedTime.timeEntry.id}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ endedAt: new Date().toISOString() }),
+    }),
+  );
+  assert.equal(typeof closed.timeEntry.endedAt, 'string');
+
+  const timer = await json(
+    await app.request(`/api/cards/${card.id}/time-entries`, {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        seconds: 0,
+        startedAt: new Date().toISOString(),
+        note: 'Working',
+      }),
+    }),
+  );
+  assert.equal(timer.timeEntry.endedAt, null);
+
+  const listedRunning = await json(
+    await app.request('/api/time-entries/running', {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(listedRunning.timeEntries.length, 1);
+  assert.equal(listedRunning.timeEntries[0].id, timer.timeEntry.id);
+
+  const deletedTime = await app.request(`/api/time-entries/${timer.timeEntry.id}`, {
+    method: 'DELETE',
+    headers: { Authorization: authorization },
+  });
+  assert.equal(deletedTime.status, 204);
+});
+
+test('staff can list organization time entries while members only see their own', async () => {
+  const store = new MemoryBoardStore();
+  const app = createWorkApp(store, async (userId) => {
+    if (userId === userB) {
+      return orgBContext();
+    }
+    if (userId === userC) {
+      return orgAMemberContext(userC, {
+        membership: {
+          isAdminRole: false,
+          isManagerRole: false,
+          roleKey: 'media_team',
+          permissions: {
+            work: {
+              cards: { read: true, create: true },
+              time_entries: { read: true, create: true, update: true, delete: true },
+            },
+          },
+        },
+      });
+    }
+    return authContext();
+  });
+  const adminAuth = await bearer(userA);
+  const memberAuth = await bearer(userC);
+  const boardId = await createBoard(app, userA, 'Time board');
+  const columnId = await createColumn(app, userA, boardId, 'To Do');
+  const card = await createCard(app, userA, boardId, columnId);
+
+  const adminEntry = await json(
+    await app.request(`/api/cards/${card.id}/time-entries`, {
+      method: 'POST',
+      headers: {
+        Authorization: adminAuth,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        seconds: 300,
+        note: 'Admin hours',
+        startedAt: new Date(Date.now() - 600_000).toISOString(),
+        endedAt: new Date().toISOString(),
+      }),
+    }),
+  );
+  const memberEntry = await json(
+    await app.request(`/api/cards/${card.id}/time-entries`, {
+      method: 'POST',
+      headers: {
+        Authorization: adminAuth,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        seconds: 0,
+        startedAt: new Date().toISOString(),
+        note: 'Member timer',
+        userId: userC,
+      }),
+    }),
+  );
+  assert.equal(adminEntry.timeEntry.userId, userA);
+  assert.equal(memberEntry.timeEntry.userId, userC);
+
+  const orgList = await json(
+    await app.request('/api/time-entries', { headers: { Authorization: adminAuth } }),
+  );
+  assert.equal(orgList.timeEntries.length, 2);
+  assert.equal(
+    orgList.timeEntries.some((entry: { id: string }) => entry.id === adminEntry.timeEntry.id),
+    true,
+  );
+  assert.equal(
+    orgList.timeEntries.some((entry: { id: string }) => entry.id === memberEntry.timeEntry.id),
+    true,
+  );
+  assert.equal(orgList.timeEntries[0].cardTitle, 'Card');
+  assert.equal(orgList.timeEntries[0].boardId, boardId);
+
+  const memberList = await json(
+    await app.request('/api/time-entries', { headers: { Authorization: memberAuth } }),
+  );
+  assert.equal(memberList.timeEntries.length, 1);
+  assert.equal(memberList.timeEntries[0].id, memberEntry.timeEntry.id);
+  assert.equal(memberList.timeEntries[0].userId, userC);
+
+  const stolen = await json(
+    await app.request(`/api/time-entries?userId=${userA}`, {
+      headers: { Authorization: memberAuth },
+    }),
+  );
+  assert.equal(stolen.error?.code, 'USER_OVERRIDE_REJECTED');
+
+  const forbiddenRunning = await json(
+    await app.request('/api/time-entries/running?scope=organization', {
+      headers: { Authorization: memberAuth },
+    }),
+  );
+  assert.equal(forbiddenRunning.error?.code, 'INSUFFICIENT_PERMISSION');
+
+  const orgRunning = await json(
+    await app.request('/api/time-entries/running?scope=organization', {
+      headers: { Authorization: adminAuth },
+    }),
+  );
+  assert.equal(orgRunning.timeEntries.length, 1);
+  assert.equal(orgRunning.timeEntries[0].id, memberEntry.timeEntry.id);
 });
 
 test('inactive membership and organization cannot use the card ecosystem', async () => {

@@ -1,11 +1,19 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
+import { rejectClientUserOverride } from '../auth/account.js';
 import { getAuth } from '../auth/middleware.js';
 import { assertAuthorized } from '../authorization/authorize.js';
 import { requireOrganizationId } from '../authorization/organization.js';
 import { env } from '../config/env.js';
 import type { FileStorage } from '../files/storage.js';
-import { ConflictError, NotFoundError, ValidationError } from '../http/errors.js';
+import { notifyCardAssigned, notifyCardCommented } from '../notifications/events.js';
+import type { NotificationStore } from '../notifications/store.js';
+import {
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+} from '../http/errors.js';
 import { decodeStrictBase64 } from '../http/base64.js';
 import { FIELD_LIMITS } from '../http/limits.js';
 import { rateLimitWork, type WorkRateLimitKind } from '../http/work-rate-limit.js';
@@ -47,6 +55,7 @@ import type {
 export type CardEcosystemDependencies = {
   store: WorkStore;
   files: FileStorage;
+  notifications: NotificationStore;
 };
 
 function serializeComment(comment: CommentRecord) {
@@ -169,6 +178,11 @@ function serializeTimeEntry(entry: TimeEntryRecord) {
     isBillable: entry.isBillable,
     createdAt: entry.createdAt.toISOString(),
     updatedAt: entry.updatedAt.toISOString(),
+    cardTitle: entry.cardTitle ?? null,
+    boardId: entry.boardId ?? null,
+    boardName: entry.boardName ?? null,
+    userName: entry.userName ?? null,
+    userEmail: entry.userEmail ?? null,
   };
 }
 
@@ -309,6 +323,15 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
     if (!comment) {
       throw new NotFoundError('CARD_NOT_FOUND', 'The card was not found.');
     }
+    await notifyCardCommented({
+      notifications: dependencies.notifications,
+      work: dependencies.store,
+      organizationId,
+      cardId,
+      commentId: comment.id,
+      actorUserId: auth.actor.userId,
+      actorEmail: auth.actor.email,
+    });
     return c.json({ comment: serializeComment(comment) }, 201);
   });
 
@@ -386,7 +409,11 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
     const body = await readJson(c);
     rejectIdentityOverrides(auth, c, body);
     await requireCardInOrganization(dependencies.store, organizationId, cardId);
-    const userId = requireUuidValue(body.userId ?? body.user_id, 'userId');
+    const requestedUserId = body.userId ?? body.user_id;
+    const userId =
+      requestedUserId === undefined
+        ? auth.actor.userId
+        : requireUuidValue(requestedUserId, 'userId');
     await requireOrganizationMember(dependencies.store, organizationId, userId);
     const watcher = resultOrConflict(
       await dependencies.store.addWatcher(
@@ -453,6 +480,15 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
       { code: 'CARD_NOT_FOUND', message: 'The card was not found.' },
       { code: 'ASSIGNEE_EXISTS', message: 'The user is already assigned to this card.' },
     );
+    await notifyCardAssigned({
+      notifications: dependencies.notifications,
+      work: dependencies.store,
+      organizationId,
+      cardId,
+      recipientUserId: userId,
+      actorUserId: auth.actor.userId,
+      actorEmail: auth.actor.email,
+    });
     return c.json({ assignee: serializeAssignee(assignee) }, 201);
   });
 
@@ -944,8 +980,81 @@ export function createAttachmentRoutes(dependencies: CardEcosystemDependencies) 
   return routes;
 }
 
+function isTimeStaff(auth: ReturnType<typeof getAuth>) {
+  return (
+    auth.membership.isAdminRole ||
+    auth.membership.isManagerRole ||
+    auth.membership.roleKey === 'it'
+  );
+}
+
+function parseQueryTimestamp(value: string | undefined, field: string) {
+  if (!value?.trim()) {
+    return undefined;
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new ValidationError(`${field} must be an ISO timestamp.`, { field });
+  }
+  return parsed;
+}
+
 export function createTimeEntryRoutes(dependencies: CardEcosystemDependencies) {
   const routes = new Hono();
+
+  routes.get('/', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    authorize(auth, 'work.time_entries.read', 'work.time_entry', organizationId);
+    const requestedUserId = c.req.query('userId') ?? c.req.query('user_id');
+    if (requestedUserId && requestedUserId !== auth.actor.userId && !isTimeStaff(auth)) {
+      rejectClientUserOverride(auth, requestedUserId);
+    }
+    const staff = isTimeStaff(auth);
+    const userId = staff
+      ? requestedUserId
+        ? requireUuidValue(requestedUserId, 'userId')
+        : undefined
+      : auth.actor.userId;
+    const cardIdRaw = c.req.query('cardId') ?? c.req.query('card_id');
+    const boardIdRaw = c.req.query('boardId') ?? c.req.query('board_id');
+    const limitRaw = c.req.query('limit');
+    const parsedLimit = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
+    const timeEntries = await dependencies.store.listTimeEntries({
+      organizationId,
+      userId,
+      cardId: cardIdRaw ? requireUuidValue(cardIdRaw, 'cardId') : undefined,
+      boardId: boardIdRaw ? requireUuidValue(boardIdRaw, 'boardId') : undefined,
+      from: parseQueryTimestamp(c.req.query('from'), 'from'),
+      to: parseQueryTimestamp(c.req.query('to'), 'to'),
+      running: c.req.query('running') === 'true',
+      limit:
+        parsedLimit !== undefined && Number.isFinite(parsedLimit)
+          ? parsedLimit
+          : undefined,
+    });
+    return c.json({ timeEntries: timeEntries.map(serializeTimeEntry) });
+  });
+
+  routes.get('/running', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    authorize(auth, 'work.time_entries.read', 'work.time_entry', organizationId);
+    const orgScope = c.req.query('scope') === 'organization';
+    if (orgScope && !isTimeStaff(auth)) {
+      throw new ForbiddenError(
+        'INSUFFICIENT_PERMISSION',
+        'Organization-wide running timers are limited to admin, manager, and IT staff.',
+      );
+    }
+    const timeEntries = await dependencies.store.listRunningTimeEntries(
+      organizationId,
+      orgScope ? null : auth.actor.userId,
+    );
+    return c.json({ timeEntries: timeEntries.map(serializeTimeEntry) });
+  });
 
   routes.get('/:timeEntryId', async (c) => {
     const auth = getAuth(c);
@@ -1006,6 +1115,27 @@ export function createTimeEntryRoutes(dependencies: CardEcosystemDependencies) {
       throw new NotFoundError('TIME_ENTRY_NOT_FOUND', 'The time entry was not found.');
     }
     return c.json({ timeEntry: serializeTimeEntry(entry) });
+  });
+
+  routes.delete('/:timeEntryId', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    const timeEntryId = requireId(c.req.param('timeEntryId'), 'timeEntryId');
+    await authorizeMutation(c, auth, 'work.time_entries.delete', 'work.time_entry', organizationId, timeEntryId);
+    const existing = await dependencies.store.getTimeEntryById(organizationId, timeEntryId);
+    if (!existing) {
+      throw new NotFoundError('TIME_ENTRY_NOT_FOUND', 'The time entry was not found.');
+    }
+    const removed = await dependencies.store.deleteTimeEntry(
+      organizationId,
+      timeEntryId,
+      auth.actor.userId,
+    );
+    if (!removed) {
+      throw new NotFoundError('TIME_ENTRY_NOT_FOUND', 'The time entry was not found.');
+    }
+    return c.body(null, 204);
   });
 
   return routes;

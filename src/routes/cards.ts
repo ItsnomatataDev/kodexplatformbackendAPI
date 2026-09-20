@@ -20,6 +20,7 @@ import {
   readOptionalTimestamp,
   readRequiredText,
   requireId,
+  requireUuidValue,
 } from '../work/http.js';
 
 export type CardRouteDependencies = {
@@ -462,6 +463,114 @@ export function createCardRoutes(dependencies: CardRouteDependencies) {
     }
 
     return c.json({ card: serializeCard(card) });
+  });
+
+  routes.post('/:cardId/move', async (c) => {
+    const auth = getAuth(c);
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
+    const organizationId = requireOrganizationId(auth);
+    const cardId = requireId(c.req.param('cardId'), 'cardId');
+    const existing = await dependencies.store.getCardById(organizationId, cardId);
+    if (!existing) {
+      throw new NotFoundError('CARD_NOT_FOUND', 'The card was not found.');
+    }
+
+    const targetBoardId = requireUuidValue(
+      body.targetBoardId ?? body.target_board_id,
+      'targetBoardId',
+    );
+    await requireBoardInOrganization(dependencies.store, organizationId, targetBoardId);
+    const columns = await dependencies.store.listColumnsByBoard(
+      organizationId,
+      targetBoardId,
+    );
+    if (columns.length === 0) {
+      throw new ValidationError('The destination board has no columns.');
+    }
+
+    const requestedColumnId = body.targetColumnId ?? body.target_column_id;
+    const column = requestedColumnId
+      ? await requireColumnOnBoard(
+          dependencies.store,
+          organizationId,
+          targetBoardId,
+          requireColumnId(requestedColumnId),
+        )
+      : columns.find((item) => item.statusKey === 'backlog') ??
+        columns.find((item) => item.statusKey === 'todo') ??
+        columns[0];
+
+    assertAuthorized({
+      context: auth,
+      action: 'work.cards.update',
+      resource: {
+        type: 'work.card',
+        id: cardId,
+        organizationId,
+      },
+    });
+    await rateLimitWork(c, 'mutation');
+
+    const currentMetadata =
+      existing.metadata &&
+      typeof existing.metadata === 'object' &&
+      !Array.isArray(existing.metadata)
+        ? (existing.metadata as Record<string, unknown>)
+        : {};
+
+    const card = await dependencies.store.moveCard(
+      organizationId,
+      cardId,
+      {
+        targetBoardId,
+        targetColumnId: column.id,
+        statusKey: column.statusKey ?? existing.statusKey,
+        metadata: {
+          ...currentMetadata,
+          previous_board_id: existing.boardId,
+          moved_between_boards_at: new Date().toISOString(),
+          moved_between_boards_by: auth.actor.userId,
+        },
+      },
+      auth.actor.userId,
+    );
+    if (!card) {
+      throw new NotFoundError('CARD_NOT_FOUND', 'The card was not found.');
+    }
+    return c.json({ card: serializeCard(card) });
+  });
+
+  routes.delete('/:cardId', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    const cardId = requireId(c.req.param('cardId'), 'cardId');
+    const existing = await dependencies.store.getCardById(organizationId, cardId);
+    if (!existing) {
+      throw new NotFoundError('CARD_NOT_FOUND', 'The card was not found.');
+    }
+
+    assertAuthorized({
+      context: auth,
+      action: 'work.cards.delete',
+      resource: {
+        type: 'work.card',
+        id: cardId,
+        organizationId,
+      },
+    });
+    await rateLimitWork(c, 'mutation');
+
+    const removed = await dependencies.store.deleteCard(
+      organizationId,
+      cardId,
+      auth.actor.userId,
+    );
+    if (!removed) {
+      throw new NotFoundError('CARD_NOT_FOUND', 'The card was not found.');
+    }
+    return c.body(null, 204);
   });
 
   return routes;

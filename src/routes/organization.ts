@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { getAuth } from '../auth/middleware.js';
+import { assertAuthorized } from '../authorization/authorize.js';
 import { requireOrganizationId } from '../authorization/organization.js';
 import { ForbiddenError, NotFoundError } from '../http/errors.js';
 import { rejectTenancyOverrides } from '../organizations/http.js';
@@ -58,6 +59,38 @@ export function createOrganizationRoutes(
     const organizationId = requireOrganizationId(auth);
     const members = await dependencies.store.listMembers(organizationId);
 
+    return c.json({
+      members: members.map((member) => ({
+        userId: member.userId,
+        email: member.email,
+        fullName: member.fullName,
+        avatarUrl: member.avatarUrl,
+        jobTitle: member.jobTitle,
+        department: member.department,
+        username: member.username,
+        employeeCode: member.employeeCode,
+        roleKey: member.roleKey,
+        officeId: member.officeId,
+        status: member.status,
+      })),
+    });
+  });
+
+  organization.get('/assignable-users', async (c) => {
+    const auth = getAuth(c);
+    rejectTenancyOverrides(auth, c);
+
+    const organizationId = requireOrganizationId(auth);
+    assertAuthorized({
+      context: auth,
+      action: 'work.cards.read',
+      resource: {
+        type: 'work.card',
+        organizationId,
+      },
+    });
+
+    const members = await dependencies.store.listMembers(organizationId);
     return c.json({
       members: members.map((member) => ({
         userId: member.userId,

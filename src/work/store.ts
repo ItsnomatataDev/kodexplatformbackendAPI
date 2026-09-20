@@ -51,6 +51,10 @@ export interface BoardStore {
     boardId: string,
     input: UpdateBoardInput,
   ): Promise<BoardRecord | null>;
+  archiveBoard(
+    organizationId: string,
+    boardId: string,
+  ): Promise<BoardRecord | null>;
 }
 
 export type ColumnRecord = {
@@ -96,7 +100,18 @@ export interface ColumnStore {
     columnId: string,
     input: UpdateColumnInput,
   ): Promise<ColumnRecord | null>;
+  deleteColumn(
+    organizationId: string,
+    columnId: string,
+    destinationColumnId: string,
+  ): Promise<DeleteColumnResult>;
 }
+
+export type DeleteColumnResult =
+  | { status: 'deleted' }
+  | { status: 'not_found' }
+  | { status: 'last_column' }
+  | { status: 'destination_invalid' };
 
 export type WorkPersonProfile = {
   userId: string;
@@ -171,6 +186,14 @@ export type UpdateCardInput = {
   metadata?: Record<string, unknown>;
 };
 
+export type MoveCardInput = {
+  targetBoardId: string;
+  targetColumnId: string;
+  statusKey?: string;
+  position?: number;
+  metadata?: Record<string, unknown>;
+};
+
 export interface CardStore {
   listCardsByBoard(
     organizationId: string,
@@ -187,6 +210,17 @@ export interface CardStore {
     input: UpdateCardInput,
     actorUserId?: string,
   ): Promise<CardRecord | null>;
+  moveCard(
+    organizationId: string,
+    cardId: string,
+    input: MoveCardInput,
+    actorUserId: string,
+  ): Promise<CardRecord | null>;
+  deleteCard(
+    organizationId: string,
+    cardId: string,
+    actorUserId: string,
+  ): Promise<boolean>;
 }
 
 export type OrganizationMemberRecord = {
@@ -301,8 +335,14 @@ export type TimeEntryRecord = {
   startedAt: Date | null;
   endedAt: Date | null;
   isBillable: boolean;
+  deletedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+  cardTitle?: string | null;
+  boardId?: string | null;
+  boardName?: string | null;
+  userName?: string | null;
+  userEmail?: string | null;
 };
 
 export type CreateCommentInput = {
@@ -384,6 +424,17 @@ export type UpdateTimeEntryInput = {
   startedAt?: Date | null;
   endedAt?: Date | null;
   isBillable?: boolean;
+};
+
+export type ListTimeEntriesInput = {
+  organizationId: string;
+  userId?: string | null;
+  cardId?: string | null;
+  boardId?: string | null;
+  from?: Date | null;
+  to?: Date | null;
+  running?: boolean;
+  limit?: number;
 };
 
 export type ChecklistItemRecord = {
@@ -567,6 +618,7 @@ export interface CardEcosystemStore {
     organizationId: string,
     cardId: string,
   ): Promise<TimeEntryRecord[]>;
+  listTimeEntries(input: ListTimeEntriesInput): Promise<TimeEntryRecord[]>;
   getTimeEntryById(
     organizationId: string,
     timeEntryId: string,
@@ -579,6 +631,15 @@ export interface CardEcosystemStore {
     timeEntryId: string,
     input: UpdateTimeEntryInput,
   ): Promise<TimeEntryRecord | null>;
+  deleteTimeEntry(
+    organizationId: string,
+    timeEntryId: string,
+    actorUserId: string,
+  ): Promise<TimeEntryRecord | null>;
+  listRunningTimeEntries(
+    organizationId: string,
+    userId?: string | null,
+  ): Promise<TimeEntryRecord[]>;
 
   listChecklistsByCard(
     organizationId: string,

@@ -471,6 +471,56 @@ test('member directory is restricted to admin or manager flags', async () => {
   );
 });
 
+test('assignable users are available to members with nested work card read', async () => {
+  const store = new MemoryOrganizationDirectoryStore();
+  seedDirectory(store);
+
+  const withoutWork = createDirectoryApp(
+    async () =>
+      authContext({
+        membership: {
+          roleKey: 'it',
+          isAdminRole: false,
+          isManagerRole: false,
+          permissions: {},
+        },
+      }),
+    store,
+  );
+  const denied = await json(
+    await withoutWork.request('/api/organization/assignable-users', {
+      headers: { Authorization: await bearer(userA) },
+    }),
+  );
+  assert.equal(denied.error?.code, 'INSUFFICIENT_PERMISSION');
+
+  const withWork = createDirectoryApp(
+    async () =>
+      authContext({
+        membership: {
+          roleKey: 'it',
+          isAdminRole: false,
+          isManagerRole: false,
+          permissions: {
+            work: {
+              cards: { read: true },
+            },
+          },
+        },
+      }),
+    store,
+  );
+  const listed = await json(
+    await withWork.request('/api/organization/assignable-users', {
+      headers: { Authorization: await bearer(userA) },
+    }),
+  );
+  assert.deepEqual(
+    listed.members.map((member: { userId: string }) => member.userId).sort(),
+    [userA, userC].sort(),
+  );
+});
+
 test('non-admin office lists hide inactive offices and 404 other-org ids', async () => {
   const store = new MemoryOrganizationDirectoryStore();
   seedDirectory(store);

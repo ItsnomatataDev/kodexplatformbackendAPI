@@ -627,3 +627,113 @@ test('cards cannot be accessed or updated across organizations', async () => {
   );
   assert.equal(missing.error?.code, 'CARD_NOT_FOUND');
 });
+
+test('cards can be moved between boards and deleted in the authenticated organization', async () => {
+  const store = new MemoryBoardStore();
+  const app = createWorkApp(store, async () => authContext());
+  const authorization = await bearer(userA);
+  const sourceBoardId = await createBoard(app, userA, 'Source');
+  const targetBoardId = await createBoard(app, userA, 'Target');
+  const sourceColumnId = await createColumn(app, userA, sourceBoardId, 'To Do', {
+    statusKey: 'todo',
+  });
+  const targetColumnId = await createColumn(app, userA, targetBoardId, 'In Progress', {
+    statusKey: 'in_progress',
+  });
+  const created = await createCard(app, userA, sourceBoardId, {
+    title: 'Move me',
+    columnId: sourceColumnId,
+  });
+
+  const forgedBoard = await json(
+    await app.request(`/api/cards/${created.card?.id}/move`, {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        targetBoardId,
+        createdBy: userB,
+      }),
+    }),
+  );
+  assert.equal(forgedBoard.error?.code, 'USER_OVERRIDE_REJECTED');
+
+  const moved = await json(
+    await app.request(`/api/cards/${created.card?.id}/move`, {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        targetBoardId,
+        targetColumnId,
+      }),
+    }),
+  );
+  assert.equal(moved.card?.boardId, targetBoardId);
+  assert.equal(moved.card?.columnId, targetColumnId);
+  assert.equal(moved.card?.statusKey, 'in_progress');
+  assert.equal(
+    (moved.card?.metadata as { previous_board_id?: string } | null)?.previous_board_id,
+    sourceBoardId,
+  );
+
+  const sourceList = await json(
+    await app.request(`/api/boards/${sourceBoardId}/cards`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(sourceList.cards?.length, 0);
+
+  const targetList = await json(
+    await app.request(`/api/boards/${targetBoardId}/cards`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(targetList.cards?.length, 1);
+
+  store.seedOrganizationMember({
+    userId: userA,
+    organizationId: orgA,
+    status: 'active',
+    accountStatus: 'active',
+    isActive: true,
+  });
+  const logged = await app.request(`/api/cards/${created.card?.id}/time-entries`, {
+    method: 'POST',
+    headers: {
+      Authorization: authorization,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ seconds: 600, note: 'Keep for reporting' }),
+  });
+  assert.equal(logged.status, 201);
+
+  const deleted = await app.request(`/api/cards/${created.card?.id}`, {
+    method: 'DELETE',
+    headers: { Authorization: authorization },
+  });
+  assert.equal(deleted.status, 204);
+
+  const missing = await json(
+    await app.request(`/api/cards/${created.card?.id}`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(missing.error?.code, 'CARD_NOT_FOUND');
+
+  const hidden = await json(
+    await app.request(`/api/boards/${targetBoardId}/cards`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(hidden.cards?.length, 0);
+
+  const kept = await store.listTimeEntriesByCard(orgA, created.card!.id);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].seconds, 600);
+  assert.equal(kept[0].deletedAt, null);
+});
