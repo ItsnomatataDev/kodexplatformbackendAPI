@@ -9,7 +9,6 @@
 # Do not trust X-Forwarded-For from arbitrary internet clients.
 
 {$KODE_API_DOMAIN:api.example.invalid} {
-	encode gzip
 	header {
 		-Server
 		X-Content-Type-Options nosniff
@@ -17,9 +16,28 @@
 		Referrer-Policy no-referrer
 	}
 
-	reverse_proxy api:3000 {
-		header_up X-Forwarded-Proto {scheme}
-		header_up X-Forwarded-For {remote_host}
-		header_up X-Real-IP {remote_host}
+	# Camera / original videos can be hundreds of MiB–1 GiB and take a long time
+	# on mobile or Starlink uplinks. Keep binary upload routes ungzip'd and with
+	# long read timeouts so the proxy does not kill the stream mid-transfer.
+	@contentStudioBinary path /api/content-studio/schedules/*/assets/binary /api/content-studio/clients/*/media/binary /api/stock/assets/*/images/*/binary
+	handle @contentStudioBinary {
+		reverse_proxy api:3000 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+			transport http {
+				read_timeout 60m
+				write_timeout 60m
+			}
+		}
+	}
+
+	handle {
+		encode gzip
+		reverse_proxy api:3000 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+		}
 	}
 }

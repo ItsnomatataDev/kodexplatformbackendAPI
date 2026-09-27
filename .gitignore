@@ -11,3 +11,5 @@ coverage/
 *.key
 *.crt
 certs/
+.local/
+.env.vps

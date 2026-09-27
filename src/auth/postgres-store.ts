@@ -425,8 +425,12 @@ export class PostgresAuthStore implements AuthStore {
     return result.rows[0] ? mapReset(result.rows[0]) : null;
   }
 
-  async markPasswordResetTokenUsed(tokenId: string, usedAt: Date) {
-    await db.query(
+  async markPasswordResetTokenUsed(
+    tokenId: string,
+    usedAt: Date,
+    client?: TransactionClient,
+  ) {
+    await executor(client).query(
       `
         UPDATE identity.password_reset_tokens
         SET used_at = $2
@@ -436,10 +440,36 @@ export class PostgresAuthStore implements AuthStore {
     );
   }
 
+  async consumePasswordResetToken(
+    tokenId: string,
+    usedAt: Date,
+    client?: TransactionClient,
+  ) {
+    const result = await executor(client).query<ResetRow>(
+      `
+        UPDATE identity.password_reset_tokens
+        SET used_at = $2
+        WHERE id = $1
+          AND used_at IS NULL
+          AND expires_at > $2
+        RETURNING
+          id,
+          user_id,
+          token_hash,
+          created_at,
+          expires_at,
+          used_at
+      `,
+      [tokenId, usedAt],
+    );
+    return result.rows[0] ? mapReset(result.rows[0]) : null;
+  }
+
   async invalidatePasswordResetTokensForUser(
     userId: string,
     at: Date,
     client?: TransactionClient,
+    exceptTokenId?: string,
   ) {
     await executor(client).query(
       `
@@ -447,8 +477,9 @@ export class PostgresAuthStore implements AuthStore {
         SET used_at = $2
         WHERE user_id = $1
           AND used_at IS NULL
+          AND ($3::uuid IS NULL OR id <> $3)
       `,
-      [userId, at],
+      [userId, at, exceptTokenId ?? null],
     );
   }
 }

@@ -36,7 +36,11 @@ export class MemoryAuthStore implements AuthStore {
     return this.cloneUser(userId);
   }
 
-  async upsertPasswordHash(userId: string, passwordHash: string) {
+  async upsertPasswordHash(
+    userId: string,
+    passwordHash: string,
+    _client?: TransactionClient,
+  ) {
     const user = this.usersById.get(userId);
 
     if (!user) {
@@ -184,7 +188,11 @@ export class MemoryAuthStore implements AuthStore {
     return record ? { ...record } : null;
   }
 
-  async markPasswordResetTokenUsed(tokenId: string, usedAt: Date) {
+  async markPasswordResetTokenUsed(
+    tokenId: string,
+    usedAt: Date,
+    _client?: TransactionClient,
+  ) {
     for (const record of this.resetTokens.values()) {
       if (record.id === tokenId) {
         record.usedAt = usedAt;
@@ -192,13 +200,36 @@ export class MemoryAuthStore implements AuthStore {
     }
   }
 
+  async consumePasswordResetToken(
+    tokenId: string,
+    usedAt: Date,
+    _client?: TransactionClient,
+  ) {
+    for (const record of this.resetTokens.values()) {
+      if (
+        record.id === tokenId &&
+        record.usedAt == null &&
+        record.expiresAt > usedAt
+      ) {
+        record.usedAt = usedAt;
+        return { ...record };
+      }
+    }
+    return null;
+  }
+
   async invalidatePasswordResetTokensForUser(
     userId: string,
     at: Date,
     _client?: TransactionClient,
+    exceptTokenId?: string,
   ) {
     for (const record of this.resetTokens.values()) {
-      if (record.userId === userId && record.usedAt == null) {
+      if (
+        record.userId === userId &&
+        record.usedAt == null &&
+        record.id !== exceptTokenId
+      ) {
         record.usedAt = at;
       }
     }

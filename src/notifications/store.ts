@@ -1,10 +1,12 @@
 export const NOTIFICATION_TYPES = {
   taskAssigned: 'task_assigned',
   taskComment: 'task_comment',
+  attendanceClockInReminder: 'attendance_clock_in_reminder',
+  attendanceLate: 'attendance_late',
+  attendanceAutoClockOut: 'attendance_auto_clock_out',
 } as const;
 
-export type NotificationType =
-  (typeof NOTIFICATION_TYPES)[keyof typeof NOTIFICATION_TYPES];
+export type NotificationType = string;
 
 export type NotificationRecord = {
   id: string;
@@ -70,4 +72,7 @@ export interface NotificationStore {
     recipientUserId: string,
   ): Promise<number>;
   getDisplayName(userId: string): Promise<string | null>;
+  getRecipientEmails(
+    userIds: string[],
+  ): Promise<Map<string, { email: string; fullName: string | null }>>;
 }

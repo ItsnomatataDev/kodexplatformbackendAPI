@@ -66,6 +66,9 @@ function denyingLimiter(): RateLimiter {
     async consume() {
       return { allowed: false, retryAfterSeconds: 42 };
     },
+    async inspect() {
+      return { allowed: false, retryAfterSeconds: 42 };
+    },
   };
 }
 
@@ -73,6 +76,7 @@ async function createHarness(options: {
   accountStatus?: AuthContext['actor']['accountStatus'];
   isActive?: boolean;
   rateLimiter?: RateLimiter;
+  refreshTokenReuseGraceSeconds?: number;
 } = {}) {
   const store = new MemoryAuthStore();
   const passwordHash = await hashPassword(password);
@@ -114,6 +118,7 @@ async function createHarness(options: {
     accessTokens,
     accessTokenTtlSeconds: 900,
     refreshTokenTtlSeconds: 3_600,
+    refreshTokenReuseGraceSeconds: options.refreshTokenReuseGraceSeconds,
     resolveAuthContext: resolve,
   });
 
@@ -255,7 +260,8 @@ test('refresh rotates the token and rejects replay by revoking the session', asy
   assert.equal(typeof refreshed.refresh_token, 'string');
   assert.notEqual(refreshed.refresh_token, login.refresh_token);
 
-  const replay = await json(
+  // Concurrent multi-tab reuse within the grace window must not kill the session.
+  const concurrent = await json(
     await app.request('/auth/refresh', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -263,14 +269,43 @@ test('refresh rotates the token and rejects replay by revoking the session', asy
     }),
   );
 
-  assert.equal(replay.error?.code, 'REFRESH_TOKEN_REPLAY');
-  assert.equal((await store.listActiveSessions(userA)).length, 0);
+  assert.equal(typeof concurrent.access_token, 'string');
+  assert.equal(concurrent.refresh_token, refreshed.refresh_token);
+  assert.equal((await store.listActiveSessions(userA)).length, 1);
 
-  const rotatedReplay = await json(
-    await app.request('/auth/refresh', {
+  const afterGraceHarness = await createHarness({
+    refreshTokenReuseGraceSeconds: 0,
+  });
+  const afterGraceLogin = await json(
+    await afterGraceHarness.app.request('/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refresh_token: refreshed.refresh_token }),
+      body: JSON.stringify({ email: 'user@example.com', password }),
+    }),
+  );
+  const afterGraceRotated = await json(
+    await afterGraceHarness.app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: afterGraceLogin.refresh_token }),
+    }),
+  );
+  const replay = await json(
+    await afterGraceHarness.app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: afterGraceLogin.refresh_token }),
+    }),
+  );
+
+  assert.equal(replay.error?.code, 'REFRESH_TOKEN_REPLAY');
+  assert.equal((await afterGraceHarness.store.listActiveSessions(userA)).length, 0);
+
+  const rotatedReplay = await json(
+    await afterGraceHarness.app.request('/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: afterGraceRotated.refresh_token }),
     }),
   );
   assert.equal(rotatedReplay.error?.code, 'SESSION_REVOKED');

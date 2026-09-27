@@ -1,3 +1,4 @@
+import { listLimit, listOffset, pageOf } from '../db/list-bounds.js';
 import { db } from '../db/pool.js';
 import type {
   AssigneeRecord,
@@ -563,6 +564,7 @@ type TimeEntryRow = {
   card_title?: string | null;
   board_id?: string | null;
   board_name?: string | null;
+  office_id?: string | null;
   user_name?: string | null;
   user_email?: string | null;
 };
@@ -595,6 +597,7 @@ function mapTimeEntry(row: TimeEntryRow): TimeEntryRecord {
     cardTitle: row.card_title ?? null,
     boardId: row.board_id ?? null,
     boardName: row.board_name ?? null,
+    officeId: row.office_id ?? null,
     userName: row.user_name ?? null,
     userEmail: row.user_email ?? null,
   };
@@ -678,19 +681,25 @@ function mapChecklist(
 }
 
 export class PostgresBoardStore implements WorkStore {
-  async listByOrganization(organizationId: string) {
+  async listByOrganization(
+    organizationId: string,
+    page: { limit?: number; offset?: number } = {},
+  ) {
+    const limit = listLimit(page.limit);
     const result = await db.query<BoardRow>(
       `
         SELECT ${BOARD_COLUMNS}
         FROM work.boards
         WHERE organization_id = $1
           AND archived_at IS NULL
-        ORDER BY position ASC, created_at DESC
+        ORDER BY position ASC, created_at DESC, id ASC
+        LIMIT $2 OFFSET $3
       `,
-      [organizationId],
+      [organizationId, limit + 1, listOffset(page.offset)],
     );
 
-    return result.rows.map(mapBoard);
+    const paged = pageOf(result.rows.map(mapBoard), limit);
+    return { boards: paged.rows, hasMore: paged.hasMore };
   }
 
   async getById(organizationId: string, boardId: string) {
@@ -1077,6 +1086,11 @@ export class PostgresBoardStore implements WorkStore {
     }
   }
 
+  /**
+   * Active cards for one board. This stays uncapped: a page limit would drop
+   * cards from the Kanban until column pagination exists on the client.
+   * The organization and board predicates still bound the working set.
+   */
   async listCardsByBoard(organizationId: string, boardId: string) {
     const result = await db.query<CardRow>(
       `
@@ -2186,7 +2200,7 @@ export class PostgresBoardStore implements WorkStore {
   }
 
   async listTimeEntries(input: ListTimeEntriesInput) {
-    const limit = Math.min(Math.max(input.limit ?? 200, 1), 500);
+    const limit = Math.min(Math.max(input.limit ?? 200, 1), 2000);
     const result = await db.query<TimeEntryRow>(
       `
         SELECT
@@ -2194,6 +2208,7 @@ export class PostgresBoardStore implements WorkStore {
           card.title AS card_title,
           card.board_id,
           board.name AS board_name,
+          COALESCE(membership.office_id, profile.office_id, card.legacy_office_id) AS office_id,
           profile.full_name AS user_name,
           users.email AS user_email
         FROM work.time_entries entry
@@ -2207,6 +2222,10 @@ export class PostgresBoardStore implements WorkStore {
           ON profile.user_id = entry.user_id
         LEFT JOIN identity.users users
           ON users.id = entry.user_id
+        LEFT JOIN organizations.memberships membership
+          ON membership.user_id = entry.user_id
+         AND membership.organization_id = entry.organization_id
+         AND membership.status = 'active'
         WHERE entry.organization_id = $1
           AND entry.deleted_at IS NULL
           AND ($2::uuid IS NULL OR entry.user_id = $2)

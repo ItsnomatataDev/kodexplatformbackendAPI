@@ -22,11 +22,15 @@ export type TicketRecord = {
   officeId: string | null;
   linkedCardId: string | null;
   ticketNumber: string;
+  trackingToken: string;
   requesterType: 'internal' | 'external';
   userId: string | null;
   createdBy: string | null;
   assignedTo: string | null;
   requesterEmail: string | null;
+  externalName: string | null;
+  externalCompany: string | null;
+  externalPhone: string | null;
   category: string;
   subject: string;
   description: string;
@@ -37,6 +41,7 @@ export type TicketRecord = {
   resolvedAt: Date | null;
   closedAt: Date | null;
   closedBy: string | null;
+  closedByEmail: string | null;
   createdAt: Date;
   updatedAt: Date;
   requesterName: string | null;
@@ -55,6 +60,105 @@ export type TicketCommentRecord = {
   visibility: TicketCommentVisibility;
   createdAt: Date;
   authorName: string | null;
+  externalName: string | null;
+  externalEmail: string | null;
+};
+
+export type TicketRatingRecord = {
+  id: string;
+  ticketId: string;
+  organizationId: string;
+  rating: number;
+  feedback: string | null;
+  createdBy: string | null;
+  externalEmail: string | null;
+  ratedAssigneeId: string | null;
+  createdAt: Date;
+};
+
+export type TicketWorkClockState = 'running' | 'paused' | 'stopped' | 'idle';
+
+export type TicketWorkIntelligenceRecord = {
+  allowed: boolean;
+  ticketId?: string;
+  trackedSeconds: number;
+  running: boolean;
+  clockState: TicketWorkClockState;
+  lastHeartbeatAt: string | null;
+  minutesLow: number | null;
+  minutesMedian: number | null;
+  minutesHigh: number | null;
+  sampleCount: number;
+  confidence: 'none' | 'low' | 'medium' | 'high';
+  error?: string;
+};
+
+export type PublicTicketOrganization = {
+  id: string;
+  name: string;
+  slug: string;
+};
+
+export type PublicTicketOffice = {
+  id: string;
+  name: string;
+  slug: string;
+};
+
+export type CreatePublicTicketInput = {
+  organizationId: string;
+  officeId: string;
+  externalName: string;
+  externalCompany?: string | null;
+  requesterEmail: string;
+  externalPhone?: string | null;
+  category: string;
+  subject: string;
+  description: string;
+  priority?: TicketPriority;
+};
+
+export type CreatePublicTicketCommentInput = {
+  trackingToken: string;
+  body: string;
+  requesterName?: string | null;
+  requesterEmail?: string | null;
+};
+
+export type ClosePublicTicketInput = {
+  trackingToken: string;
+  rating: number;
+  feedback?: string | null;
+};
+
+export type CloseAndRateTicketInput = {
+  organizationId: string;
+  ticketId: string;
+  rating: number;
+  feedback?: string | null;
+  closedBy: string | null;
+  closedByEmail?: string | null;
+  createdBy?: string | null;
+};
+
+export type MonthlyTicketReportTicket = {
+  id: string;
+  ticketNumber: string;
+  subject: string;
+  status: TicketStatus;
+  priority: TicketPriority;
+  category: string;
+  assignedTo: string | null;
+  assignedName: string | null;
+  createdAt: Date;
+  resolvedAt: Date | null;
+};
+
+export type MonthlyTicketReportRecipient = {
+  userId: string;
+  fullName: string | null;
+  email: string;
+  roleKey: string | null;
 };
 
 export type TicketAgentRecord = {
@@ -127,7 +231,7 @@ export type CreateTicketAttachmentInput = {
   id: string;
   organizationId: string;
   ticketId: string;
-  uploadedBy: string;
+  uploadedBy: string | null;
   bucket: string;
   objectKey: string;
   originalFilename: string;
@@ -149,7 +253,9 @@ export interface TicketStore {
   list(input: ListTicketsInput): Promise<TicketRecord[]>;
   getById(organizationId: string, ticketId: string): Promise<TicketRecord | null>;
   getByCardId(organizationId: string, cardId: string): Promise<TicketRecord | null>;
+  getByTrackingToken(trackingToken: string): Promise<TicketRecord | null>;
   create(input: CreateTicketInput): Promise<TicketRecord>;
+  createPublic(input: CreatePublicTicketInput): Promise<TicketRecord>;
   update(
     organizationId: string,
     ticketId: string,
@@ -162,6 +268,9 @@ export interface TicketStore {
   ): Promise<TicketCommentRecord[]>;
   createComment(
     input: CreateTicketCommentInput,
+  ): Promise<TicketCommentRecord | null>;
+  createPublicComment(
+    input: CreatePublicTicketCommentInput,
   ): Promise<TicketCommentRecord | null>;
   listAttachments(
     organizationId: string,
@@ -178,6 +287,52 @@ export interface TicketStore {
     organizationId: string,
     attachmentId: string,
   ): Promise<TicketAttachmentRecord | null>;
+  getRating(
+    organizationId: string,
+    ticketId: string,
+  ): Promise<TicketRatingRecord | null>;
+  closeAndRate(
+    input: CloseAndRateTicketInput,
+  ): Promise<{
+    ticket: TicketRecord;
+    rating: TicketRatingRecord | null;
+  } | null>;
+  closeAndRatePublic(
+    input: ClosePublicTicketInput,
+  ): Promise<{
+    ticket: TicketRecord;
+    rating: TicketRatingRecord | null;
+  } | null>;
+  getPublicOrganizationBySlug(
+    slug: string,
+  ): Promise<PublicTicketOrganization | null>;
+  listPublicOffices(organizationId: string): Promise<PublicTicketOffice[]>;
+  getMemberOfficeSlug(
+    organizationId: string,
+    userId: string,
+  ): Promise<string | null>;
+  getWorkIntelligence(
+    organizationId: string,
+    ticketIds: string[],
+  ): Promise<TicketWorkIntelligenceRecord[]>;
+  heartbeatWork(
+    organizationId: string,
+    ticketId: string,
+    userId: string,
+  ): Promise<TicketWorkIntelligenceRecord | null>;
+  stopWork(
+    organizationId: string,
+    ticketId: string,
+    userId: string,
+  ): Promise<TicketWorkIntelligenceRecord | null>;
+  listMonthlyReportTickets(
+    organizationId: string,
+    from: Date,
+    to: Date,
+  ): Promise<MonthlyTicketReportTicket[]>;
+  listMonthlyReportRecipients(
+    organizationId: string,
+  ): Promise<MonthlyTicketReportRecipient[]>;
   listAssignableAgents(organizationId: string): Promise<TicketAgentRecord[]>;
   getOrganizationMember(
     organizationId: string,

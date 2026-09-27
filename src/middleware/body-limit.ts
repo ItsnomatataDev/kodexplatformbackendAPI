@@ -3,6 +3,25 @@ import { PayloadTooLargeError, ValidationError } from '../http/errors.js';
 
 const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
+/** One normalized security event. Metadata itself is capped at 8 KiB. */
+export const SECURITY_INGEST_MAX_BODY_BYTES = 16 * 1024;
+
+export function isSecurityIngestPath(pathname: string) {
+  return pathname === '/api/security/ingest' || pathname === '/api/security/ingest/';
+}
+
+/** Raw binary uploads stream to MinIO; do not buffer/decode them. */
+export function isContentStudioBinaryUploadPath(pathname: string) {
+  return (
+    /^\/api\/content-studio\/schedules\/[^/]+\/assets\/binary\/?$/.test(pathname) ||
+    /^\/api\/content-studio\/clients\/[^/]+\/media\/binary\/?$/.test(pathname) ||
+    /^\/api\/documents\/(payslip-batches\/[^/]+\/items\/binary|upload\/binary)\/?$/.test(
+      pathname,
+    ) ||
+    /^\/api\/stock\/assets\/[^/]+\/images\/(asset|site)\/binary\/?$/.test(pathname)
+  );
+}
+
 async function readBodyWithLimit(
   request: Request,
   maxBytes: number,
@@ -57,6 +76,16 @@ export function bodyLimitMiddleware(maxBytes: number) {
       return;
     }
 
+    const pathname = new URL(c.req.url).pathname;
+    if (isContentStudioBinaryUploadPath(pathname)) {
+      await next();
+      return;
+    }
+
+    const limit = isSecurityIngestPath(pathname)
+      ? Math.min(maxBytes, SECURITY_INGEST_MAX_BODY_BYTES)
+      : maxBytes;
+
     const declared = c.req.header('content-length');
     if (declared != null && declared !== '') {
       const size = Number(declared);
@@ -64,12 +93,12 @@ export function bodyLimitMiddleware(maxBytes: number) {
         throw new ValidationError('Invalid Content-Length header.');
       }
 
-      if (size > maxBytes) {
+      if (size > limit) {
         throw new PayloadTooLargeError();
       }
     }
 
-    const body = await readBodyWithLimit(c.req.raw, maxBytes);
+    const body = await readBodyWithLimit(c.req.raw, limit);
     c.set('limitedBodyText', new TextDecoder('utf8', { fatal: false }).decode(body));
     await next();
   });

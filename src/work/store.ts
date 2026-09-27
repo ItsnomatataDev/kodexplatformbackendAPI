@@ -40,7 +40,10 @@ export type UpdateBoardInput = {
 };
 
 export interface BoardStore {
-  listByOrganization(organizationId: string): Promise<BoardRecord[]>;
+  listByOrganization(
+    organizationId: string,
+    page?: { limit?: number; offset?: number },
+  ): Promise<{ boards: BoardRecord[]; hasMore: boolean }>;
   getById(
     organizationId: string,
     boardId: string,
@@ -341,6 +344,7 @@ export type TimeEntryRecord = {
   cardTitle?: string | null;
   boardId?: string | null;
   boardName?: string | null;
+  officeId?: string | null;
   userName?: string | null;
   userEmail?: string | null;
 };

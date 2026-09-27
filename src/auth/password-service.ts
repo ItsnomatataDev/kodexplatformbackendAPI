@@ -21,7 +21,10 @@ export type PasswordServiceConfig = {
   sendPasswordResetEmail: (input: {
     to: string;
     resetToken: string;
+    firstName?: string;
+    expiresMinutes: number;
   }) => Promise<void>;
+  resolveFirstName?: (userId: string, email: string) => Promise<string | null>;
   withTransaction?: <T>(
     work: (client?: TransactionClient) => Promise<T>,
   ) => Promise<T>;
@@ -51,7 +54,7 @@ export class PasswordService {
     if (!identity?.passwordHash) {
       throw new UnauthorizedError(
         'INVALID_CREDENTIALS',
-        'Authentication failed.',
+        'Incorrect email or password.',
       );
     }
 
@@ -60,7 +63,7 @@ export class PasswordService {
     if (!matches) {
       throw new UnauthorizedError(
         'INVALID_CREDENTIALS',
-        'Authentication failed.',
+        'Incorrect email or password.',
       );
     }
 
@@ -109,42 +112,60 @@ export class PasswordService {
     }
 
     const resetToken = generateOpaqueToken();
+    const tokenId = randomUUID();
     const now = new Date();
-    await this.transaction(async (client) => {
-      await this.config.store.invalidatePasswordResetTokensForUser(
-        identity.userId,
-        now,
-        client,
-      );
-      await this.config.store.createPasswordResetToken(
-        {
-          id: randomUUID(),
-          userId: identity.userId,
-          tokenHash: hashOpaqueToken(this.config.tokenSecret, resetToken),
-          expiresAt: new Date(
-            Date.now() + this.config.passwordResetTtlSeconds * 1000,
-          ),
-        },
-        client,
-      );
+
+    // Mint first — do NOT invalidate prior tokens until email succeeds,
+    // so a failed send never strands someone who still had a valid link.
+    await this.config.store.createPasswordResetToken({
+      id: tokenId,
+      userId: identity.userId,
+      tokenHash: hashOpaqueToken(this.config.tokenSecret, resetToken),
+      expiresAt: new Date(
+        Date.now() + this.config.passwordResetTtlSeconds * 1000,
+      ),
     });
+
+    const expiresMinutes = Math.max(
+      1,
+      Math.round(this.config.passwordResetTtlSeconds / 60),
+    );
+    const resolvedFirstName = this.config.resolveFirstName
+      ? await this.config.resolveFirstName(identity.userId, identity.email)
+      : null;
 
     try {
       await this.config.sendPasswordResetEmail({
         to: identity.email,
         resetToken,
+        firstName: resolvedFirstName ?? undefined,
+        expiresMinutes,
       });
     } catch (error) {
+      // Burn the undelivered token so it cannot be used later.
+      await this.config.store.markPasswordResetTokenUsed(tokenId, new Date());
       if (!(error instanceof EmailDeliveryError)) {
         logger.warn(
           {
             template: 'password_reset',
             toDomain: emailDomain(identity.email),
+            err: error instanceof Error ? error.message : String(error),
           },
           'Password reset email delivery failed.',
         );
       }
+      throw error instanceof EmailDeliveryError
+        ? error
+        : new EmailDeliveryError(error);
     }
+
+    // Email delivered — retire any older unused tokens for this user.
+    await this.config.store.invalidatePasswordResetTokensForUser(
+      identity.userId,
+      now,
+      undefined,
+      tokenId,
+    );
   }
 
   async confirmPasswordReset(
@@ -177,12 +198,34 @@ export class PasswordService {
 
     validatePassword(newPassword, identity?.email ?? null);
     const passwordHash = await hashPassword(newPassword);
-    await this.config.store.upsertPasswordHash(record.userId, passwordHash);
-    await this.config.store.markPasswordResetTokenUsed(record.id, new Date());
-    await this.config.store.invalidatePasswordResetTokensForUser(
-      record.userId,
-      new Date(),
-    );
+    const usedAt = new Date();
+
+    await this.transaction(async (client) => {
+      const consumed = await this.config.store.consumePasswordResetToken(
+        record.id,
+        usedAt,
+        client,
+      );
+      if (!consumed) {
+        throw new UnauthorizedError(
+          'INVALID_RESET_TOKEN',
+          'The password reset token is not valid.',
+        );
+      }
+
+      await this.config.store.upsertPasswordHash(
+        record.userId,
+        passwordHash,
+        client,
+      );
+      await this.config.store.invalidatePasswordResetTokensForUser(
+        record.userId,
+        usedAt,
+        client,
+        record.id,
+      );
+    });
+
     await this.config.sessions.revokeAllSessionsForUser(
       record.userId,
       'password_reset',

@@ -9,9 +9,12 @@ the authentication, authorization, and business boundary.
 Copy the matching example file to `.env`:
 
 ```bash
-cp .env.development.example .env
+cp .env.development.example .env   # local
+# cp .env.staging.example .env     # staging host
+# cp .env.production.example .env  # production host
 ```
 
+`.env.example` is an index only. Runtime always loads `.env` (gitignored).
 `APP_ENV` must be `development`, `staging`, or `production`.
 
 ## Local development

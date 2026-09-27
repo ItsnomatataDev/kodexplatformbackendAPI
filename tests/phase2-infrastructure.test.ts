@@ -203,11 +203,17 @@ test('PB-03 Redis limiter uses the environment prefix and fails closed', async (
       keys.push(key);
       return 1;
     },
+    async get() {
+      return null;
+    },
     async expire() {
       return true;
     },
     async ttl() {
       return 60;
+    },
+    async del() {
+      return 0;
     },
     async close() {},
   };

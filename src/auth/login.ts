@@ -3,6 +3,8 @@ import { publishAuthEvent } from './events.js';
 import { hashPassword, verifyPassword } from './passwords.js';
 import type { SessionService, IssuedCredentials, RequestMeta } from './sessions.js';
 import type { AuthStore } from './store.js';
+import { recordSecurityEvent } from '../security/recorder.js';
+import { db } from '../db/pool.js';
 
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -22,7 +24,56 @@ export type LoginServiceConfig = {
   sessions: SessionService;
 };
 
-const GENERIC_FAILURE = 'Authentication failed.';
+const GENERIC_FAILURE = 'Incorrect email or password.';
+
+async function resolveOrgForUser(userId: string | undefined) {
+  if (!userId) return null;
+  try {
+    const result = await db.query(
+      `SELECT organization_id
+       FROM organizations.memberships
+       WHERE user_id = $1 AND status = 'active'
+       ORDER BY created_at ASC
+       LIMIT 1`,
+      [userId],
+    );
+    return (result.rows[0]?.organization_id as string | undefined) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function recordLoginSecurityEvent(input: {
+  organizationId?: string | null;
+  userId?: string;
+  success: boolean;
+  failureCategory?: string;
+  meta: RequestMeta;
+}) {
+  if (!input.organizationId) return;
+  try {
+    await recordSecurityEvent({
+      organizationId: input.organizationId,
+      eventType: input.success ? 'AUTH_SUCCESS' : 'AUTH_FAILURE',
+      severity: input.success ? 'info' : 'medium',
+      riskScore: input.success ? 0 : 40,
+      successful: input.success,
+      userId: input.userId ?? null,
+      ipAddress: input.meta.ipAddress ?? null,
+      userAgent: input.meta.userAgent ?? null,
+      requestMethod: 'POST',
+      endpoint: '/auth/login',
+      httpStatus: input.success ? 200 : 401,
+      requestId: input.meta.requestId ?? null,
+      attackCategory: input.success ? null : 'authentication',
+      metadata: {
+        failureCategory: input.failureCategory ?? null,
+      },
+    });
+  } catch {
+    // Security recording must never block authentication.
+  }
+}
 
 export class LoginService {
   constructor(private readonly config: LoginServiceConfig) {}
@@ -47,6 +98,14 @@ export class LoginService {
         failureCategory: identity ? 'invalid_password' : 'unknown_account',
         ipAddress: meta.ipAddress,
         userAgent: meta.userAgent,
+      });
+      const orgId = await resolveOrgForUser(identity?.userId);
+      await recordLoginSecurityEvent({
+        organizationId: orgId,
+        userId: identity?.userId,
+        success: false,
+        failureCategory: identity ? 'invalid_password' : 'unknown_account',
+        meta,
       });
       throw new UnauthorizedError('INVALID_CREDENTIALS', GENERIC_FAILURE);
     }
@@ -109,6 +168,12 @@ export class LoginService {
       organizationId: issued.context.membership.organizationId,
       ipAddress: meta.ipAddress,
       userAgent: meta.userAgent,
+    });
+    await recordLoginSecurityEvent({
+      organizationId: issued.context.membership.organizationId,
+      userId: identity.userId,
+      success: true,
+      meta,
     });
 
     return issued;

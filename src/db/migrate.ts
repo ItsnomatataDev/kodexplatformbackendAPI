@@ -104,6 +104,9 @@ export async function runMigrations() {
 
     try {
       await client.query('BEGIN');
+      // Pool connections cancel statements after 30s. A migration file is one
+      // statement and must be allowed to finish.
+      await client.query('SET LOCAL statement_timeout = 0');
       await client.query(sql);
 
       await client.query(

@@ -46,7 +46,7 @@ See also `docs/architecture/core-engineering-standards.md`.
 2. Look up `identity.users` by `email_normalized`.
 3. Verify the password with Argon2id against `identity.password_credentials`.
 4. Unknown accounts and wrong passwords both return `INVALID_CREDENTIALS`
-   (`Authentication failed.`). The API does not say whether the email exists.
+   (`Incorrect email or password.`). The API does not say whether the email exists.
 5. Suspended / inactive / unapproved accounts are denied after a correct
    password.
 6. `resolveAuthContext(userId)` loads membership, role, and permissions.
@@ -320,13 +320,11 @@ credential.
 
 Supabase Auth password hashes are **not** copied into Kode. Migrated production
 identity rows will not have a usable `identity.password_credentials` secret
-until the user completes a future secure Kode password setup/reset flow. Do not
-use the development bootstrap command to provision production passwords.
+until the user completes Kode password setup via **Forgot password**
+(`POST /auth/password/reset/request` → email link →
+`POST /auth/password/reset/confirm`). That flow works even when the user has
+never had a Kode password (first-time set).
 
-## Known limitations
-
-- Email delivery for password reset is not configured.
-- Redis rate limiting is required for staging/production auth abuse controls.
-- Access JWTs are not denylisted; they die at `exp` after logout.
-- No MFA, social login, or magic link.
-- Production user password setup/reset email is not implemented yet.
+Do not use the development bootstrap command to provision production passwords.
+Set `EMAIL_PROVIDER=smtp` and `APP_PUBLIC_URL` so reset emails include a working
+`/reset-password?token=…` link.

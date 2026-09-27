@@ -9,6 +9,7 @@ import { MemoryAuthStore } from '../src/auth/memory-store.js';
 import { PasswordService } from '../src/auth/password-service.js';
 import { hashPassword } from '../src/auth/passwords.js';
 import { MemoryRateLimiter } from '../src/auth/rate-limit.js';
+import { loginRateLimits } from '../src/auth/login-rate-limits.js';
 import { SessionService } from '../src/auth/sessions.js';
 import type { AuthContext } from '../src/authorization/types.js';
 import { UnauthorizedError } from '../src/http/errors.js';
@@ -19,7 +20,7 @@ const secret = 'test-only-access-token-secret-value!!';
 const password = 'correct-horse-battery';
 const wrongPassword = 'wrong-password-value';
 const corsOrigins = ['http://127.0.0.1:5173'];
-const genericAuthFailure = 'Authentication failed.';
+const genericAuthFailure = 'Incorrect email or password.';
 const genericAuthRequired = 'Authentication is required.';
 
 type AuthBody = {
@@ -108,6 +109,8 @@ async function createHarness() {
     accessTokens,
     accessTokenTtlSeconds: 900,
     refreshTokenTtlSeconds: 3_600,
+    // Security regression asserts hard replay revoke (grace covered in lifecycle tests).
+    refreshTokenReuseGraceSeconds: 0,
     resolveAuthContext: resolve,
   });
 
@@ -291,7 +294,7 @@ test('nonexistent account returns the same generic 401 and does not enumerate us
 
 test('repeated invalid login attempts are rate limited with Retry-After', async () => {
   const { app } = await createHarness();
-  const emailLimit = 5;
+  const emailLimit = loginRateLimits('development').emailLimit;
   const failures: number[] = [];
 
   for (let attempt = 0; attempt < emailLimit; attempt += 1) {

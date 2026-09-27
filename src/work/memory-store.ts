@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { listLimit, listOffset, pageOf } from '../db/list-bounds.js';
 import type {
   AssigneeRecord,
   AttachmentRecord,
@@ -60,8 +61,11 @@ export class MemoryBoardStore implements WorkStore {
     this.members.set(`${member.organizationId}:${member.userId}`, { ...member });
   }
 
-  async listByOrganization(organizationId: string) {
-    return [...this.boards.values()]
+  async listByOrganization(
+    organizationId: string,
+    page: { limit?: number; offset?: number } = {},
+  ) {
+    const ordered = [...this.boards.values()]
       .filter(
         (board) =>
           board.organizationId === organizationId && board.archivedAt == null,
@@ -74,6 +78,10 @@ export class MemoryBoardStore implements WorkStore {
         return right.createdAt.getTime() - left.createdAt.getTime();
       })
       .map((board) => ({ ...board }));
+    const offset = listOffset(page.offset);
+    const limit = listLimit(page.limit);
+    const paged = pageOf(ordered.slice(offset, offset + limit + 1), limit);
+    return { boards: paged.rows, hasMore: paged.hasMore };
   }
 
   async getById(organizationId: string, boardId: string) {
@@ -1047,7 +1055,7 @@ export class MemoryBoardStore implements WorkStore {
   }
 
   async listTimeEntries(input: ListTimeEntriesInput) {
-    const limit = Math.min(Math.max(input.limit ?? 200, 1), 500);
+    const limit = Math.min(Math.max(input.limit ?? 200, 1), 2000);
     return [...this.timeEntries.values()]
       .filter((entry) => {
         if (entry.organizationId !== input.organizationId || entry.deletedAt) {
@@ -1083,6 +1091,7 @@ export class MemoryBoardStore implements WorkStore {
       cardTitle: card?.title ?? null,
       boardId: card?.boardId ?? null,
       boardName: board?.name ?? null,
+      officeId: null,
     };
   }
 

@@ -64,6 +64,8 @@ export function minRequestBodyBytesForAttachment(maxAttachmentBytes: number): nu
 export type HttpLimits = {
   maxRequestBodyBytes: number;
   maxAttachmentBytes: number;
+  /** Original-quality Content Studio media (binary stream path). Default 1 GiB. */
+  maxContentStudioUploadBytes: number;
 };
 
 export type RateLimitPolicy = {

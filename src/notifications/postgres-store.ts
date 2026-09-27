@@ -232,4 +232,33 @@ export class PostgresNotificationStore implements NotificationStore {
     const name = result.rows[0]?.full_name?.trim();
     return name && name.length > 0 ? name : null;
   }
+
+  async getRecipientEmails(userIds: string[]) {
+    const unique = [...new Set(userIds.filter(Boolean))];
+    const map = new Map<string, { email: string; fullName: string | null }>();
+    if (unique.length === 0) return map;
+
+    const result = await db.query<{
+      id: string;
+      email: string | null;
+      full_name: string | null;
+    }>(
+      `
+        SELECT u.id, u.email, p.full_name
+        FROM identity.users u
+        LEFT JOIN identity.user_profiles p ON p.user_id = u.id
+        WHERE u.id = ANY($1::uuid[])
+      `,
+      [unique],
+    );
+
+    for (const row of result.rows) {
+      if (!row.email?.trim()) continue;
+      map.set(row.id, {
+        email: row.email.trim(),
+        fullName: row.full_name?.trim() || null,
+      });
+    }
+    return map;
+  }
 }

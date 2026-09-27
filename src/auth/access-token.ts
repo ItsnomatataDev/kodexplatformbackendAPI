@@ -91,7 +91,7 @@ export class AccessTokenService implements CredentialVerifier {
       if (error instanceof joseErrors.JWTExpired) {
         throw new UnauthorizedError(
           'EXPIRED_CREDENTIAL',
-          'The access token has expired.',
+          'Authentication is required.',
         );
       }
 

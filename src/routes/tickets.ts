@@ -7,9 +7,10 @@ import { hasPermission } from '../authorization/permissions.js';
 import { requireOrganizationId } from '../authorization/organization.js';
 import { env } from '../config/env.js';
 import { decodeStrictBase64 } from '../http/base64.js';
-import { NotFoundError, ValidationError } from '../http/errors.js';
+import { ForbiddenError, NotFoundError, ValidationError } from '../http/errors.js';
 import { FIELD_LIMITS } from '../http/limits.js';
 import { rateLimitWork } from '../http/work-rate-limit.js';
+import { streamStoredMedia, attachmentDisposition } from '../content/media-stream.js';
 import type { FileStorage } from '../files/storage.js';
 import {
   readJson,
@@ -32,6 +33,11 @@ import {
   type TicketStore,
 } from '../tickets/store.js';
 import type { AuthContext } from '../authorization/types.js';
+import {
+  canSeeTicketWorkIntelligence,
+  canTriggerMonthlyTicketReport,
+} from '../tickets/intelligence.js';
+import { sendAttendanceEmail } from '../email/attendance-mailer.js';
 
 export type TicketRouteDependencies = {
   store: TicketStore;
@@ -45,11 +51,15 @@ function serializeTicket(ticket: TicketRecord) {
     officeId: ticket.officeId,
     linkedCardId: ticket.linkedCardId,
     ticketNumber: ticket.ticketNumber,
+    trackingToken: ticket.trackingToken,
     requesterType: ticket.requesterType,
     userId: ticket.userId,
     createdBy: ticket.createdBy,
     assignedTo: ticket.assignedTo,
     requesterEmail: ticket.requesterEmail,
+    externalName: ticket.externalName,
+    externalCompany: ticket.externalCompany,
+    externalPhone: ticket.externalPhone,
     category: ticket.category,
     subject: ticket.subject,
     description: ticket.description,
@@ -60,6 +70,7 @@ function serializeTicket(ticket: TicketRecord) {
     resolvedAt: ticket.resolvedAt?.toISOString() ?? null,
     closedAt: ticket.closedAt?.toISOString() ?? null,
     closedBy: ticket.closedBy,
+    closedByEmail: ticket.closedByEmail,
     createdAt: ticket.createdAt.toISOString(),
     updatedAt: ticket.updatedAt.toISOString(),
     requesterName: ticket.requesterName,
@@ -80,6 +91,8 @@ function serializeComment(comment: TicketCommentRecord) {
     visibility: comment.visibility,
     createdAt: comment.createdAt.toISOString(),
     authorName: comment.authorName,
+    externalName: comment.externalName,
+    externalEmail: comment.externalEmail,
   };
 }
 
@@ -96,6 +109,25 @@ function serializeAttachment(attachment: TicketAttachmentRecord) {
     createdAt: attachment.createdAt.toISOString(),
   };
 }
+
+function serializeRating(
+  rating: Awaited<ReturnType<TicketStore['getRating']>>,
+) {
+  if (!rating) return null;
+  return {
+    id: rating.id,
+    ticket_id: rating.ticketId,
+    organization_id: rating.organizationId,
+    rating: rating.rating,
+    feedback: rating.feedback,
+    external_email: rating.externalEmail,
+    created_by: rating.createdBy,
+    rated_assignee_id: rating.ratedAssigneeId,
+    created_at: rating.createdAt.toISOString(),
+  };
+}
+
+const TICKET_CLOSE_FEEDBACK_MIN_CHARS = 15;
 
 function safeFilename(value: string) {
   const trimmed = value.trim();
@@ -118,10 +150,6 @@ function isAllowedTicketAttachment(contentType: string, filename: string) {
     return true;
   }
   return /\.(png|jpe?g|gif|webp|heic|heif|pdf|txt)$/i.test(filename);
-}
-
-function contentDispositionFilename(filename: string) {
-  return filename.replace(/[\r\n"]/g, '_');
 }
 
 function authorizeTickets(auth: ReturnType<typeof getAuth>, action: string) {
@@ -247,6 +275,220 @@ export function createTicketRoutes(dependencies: TicketRouteDependencies) {
     return c.json({ ticket: serializeTicket(ticket) });
   });
 
+  routes.post('/work-intelligence', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = authorizeTickets(auth, 'tickets.read');
+    await rateLimitWork(c, 'mutation');
+    const officeSlug = await dependencies.store.getMemberOfficeSlug(
+      organizationId,
+      auth.actor.userId,
+    );
+    if (!canSeeTicketWorkIntelligence(auth, officeSlug)) {
+      return c.json({ allowed: false, tickets: [] });
+    }
+    const body = await readJson(c);
+    const rawIds = body.ticketIds ?? body.ticket_ids ?? body.p_ticket_ids;
+    const ticketIds = Array.isArray(rawIds)
+      ? rawIds
+          .filter((value): value is string => typeof value === 'string')
+          .map((value) => requireUuidValue(value, 'ticketIds'))
+      : [];
+    const tickets = await dependencies.store.getWorkIntelligence(
+      organizationId,
+      ticketIds,
+    );
+    return c.json({
+      allowed: true,
+      tickets: tickets.map((row) => ({
+        allowed: row.allowed,
+        ticket_id: row.ticketId,
+        tracked_seconds: row.trackedSeconds,
+        running: row.running,
+        clock_state: row.clockState,
+        last_heartbeat_at: row.lastHeartbeatAt,
+        minutes_low: row.minutesLow,
+        minutes_median: row.minutesMedian,
+        minutes_high: row.minutesHigh,
+        sample_count: row.sampleCount,
+        confidence: row.confidence,
+        error: row.error,
+      })),
+    });
+  });
+
+  routes.post('/work-intelligence/:ticketId/heartbeat', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = authorizeTickets(auth, 'tickets.read');
+    await rateLimitWork(c, 'mutation');
+    const officeSlug = await dependencies.store.getMemberOfficeSlug(
+      organizationId,
+      auth.actor.userId,
+    );
+    if (!canSeeTicketWorkIntelligence(auth, officeSlug)) {
+      return c.json({ allowed: false });
+    }
+    const ticketId = requireId(c.req.param('ticketId'), 'ticketId');
+    const intel = await dependencies.store.heartbeatWork(
+      organizationId,
+      ticketId,
+      auth.actor.userId,
+    );
+    if (!intel) {
+      return c.json({ allowed: true, error: 'not_found' });
+    }
+    return c.json({
+      allowed: intel.allowed,
+      ticket_id: intel.ticketId,
+      tracked_seconds: intel.trackedSeconds,
+      running: intel.running,
+      clock_state: intel.clockState,
+      last_heartbeat_at: intel.lastHeartbeatAt,
+      minutes_low: intel.minutesLow,
+      minutes_median: intel.minutesMedian,
+      minutes_high: intel.minutesHigh,
+      sample_count: intel.sampleCount,
+      confidence: intel.confidence,
+      error: intel.error,
+    });
+  });
+
+  routes.post('/work-intelligence/:ticketId/stop', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = authorizeTickets(auth, 'tickets.read');
+    await rateLimitWork(c, 'mutation');
+    const officeSlug = await dependencies.store.getMemberOfficeSlug(
+      organizationId,
+      auth.actor.userId,
+    );
+    if (!canSeeTicketWorkIntelligence(auth, officeSlug)) {
+      return c.json({ allowed: false });
+    }
+    const ticketId = requireId(c.req.param('ticketId'), 'ticketId');
+    const intel = await dependencies.store.stopWork(
+      organizationId,
+      ticketId,
+      auth.actor.userId,
+    );
+    if (!intel) {
+      return c.json({ allowed: true, error: 'not_found' });
+    }
+    return c.json({
+      allowed: intel.allowed,
+      ticket_id: intel.ticketId,
+      tracked_seconds: intel.trackedSeconds,
+      running: intel.running,
+      clock_state: intel.clockState,
+      last_heartbeat_at: intel.lastHeartbeatAt,
+      minutes_low: intel.minutesLow,
+      minutes_median: intel.minutesMedian,
+      minutes_high: intel.minutesHigh,
+      sample_count: intel.sampleCount,
+      confidence: intel.confidence,
+      error: intel.error,
+    });
+  });
+
+  routes.post('/monthly-report', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = authorizeTickets(auth, 'tickets.read');
+    await rateLimitWork(c, 'mutation');
+    if (!canTriggerMonthlyTicketReport(auth)) {
+      throw new ForbiddenError(
+        'INSUFFICIENT_PERMISSION',
+        'Only IT or admin roles can trigger the monthly IT ticket report.',
+      );
+    }
+    const body = await readJson(c);
+    const year = Number(body.year);
+    const month = Number(body.month);
+    if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+      throw new ValidationError('year must be a valid calendar year.', {
+        field: 'year',
+      });
+    }
+    if (!Number.isInteger(month) || month < 1 || month > 12) {
+      throw new ValidationError('month must be between 1 and 12.', {
+        field: 'month',
+      });
+    }
+    const from = new Date(Date.UTC(year, month - 1, 1));
+    const to = new Date(Date.UTC(year, month, 1));
+    const [tickets, recipients] = await Promise.all([
+      dependencies.store.listMonthlyReportTickets(organizationId, from, to),
+      dependencies.store.listMonthlyReportRecipients(organizationId),
+    ]);
+    if (recipients.length === 0) {
+      return c.json({
+        ok: true,
+        sent: 0,
+        skipped: 1,
+        totalRecipients: 0,
+        errors: ['No admins found to send report to.'],
+      });
+    }
+
+    const byStatus: Record<string, number> = {};
+    const byPriority: Record<string, number> = {};
+    const byCategory: Record<string, number> = {};
+    let resolved = 0;
+    for (const ticket of tickets) {
+      byStatus[ticket.status] = (byStatus[ticket.status] ?? 0) + 1;
+      byPriority[ticket.priority] = (byPriority[ticket.priority] ?? 0) + 1;
+      byCategory[ticket.category] = (byCategory[ticket.category] ?? 0) + 1;
+      if (ticket.status === 'resolved' || ticket.status === 'closed') {
+        resolved += 1;
+      }
+    }
+    const label = from.toLocaleDateString('en-GB', {
+      month: 'long',
+      year: 'numeric',
+      timeZone: 'UTC',
+    });
+    const subject = `IT Monthly Report — ${label}`;
+    const text = [
+      `IT Service Desk Monthly Report — ${label}`,
+      '',
+      `Total tickets: ${tickets.length}`,
+      `Resolved/closed: ${resolved}`,
+      '',
+      'By status:',
+      ...Object.entries(byStatus).map(([key, value]) => `  ${key}: ${value}`),
+      '',
+      'By priority:',
+      ...Object.entries(byPriority).map(([key, value]) => `  ${key}: ${value}`),
+      '',
+      'Top categories:',
+      ...Object.entries(byCategory)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 8)
+        .map(([key, value]) => `  ${key}: ${value}`),
+    ].join('\n');
+
+    const errors: string[] = [];
+    let sent = 0;
+    for (const recipient of recipients) {
+      const ok = await sendAttendanceEmail({
+        to: recipient.email,
+        subject,
+        text,
+      });
+      if (ok) sent += 1;
+      else errors.push(`Failed to email ${recipient.email}`);
+    }
+
+    return c.json({
+      ok: true,
+      sent,
+      skipped: 0,
+      totalRecipients: recipients.length,
+      errors,
+    });
+  });
+
   routes.get('/:ticketId', async (c) => {
     const auth = getAuth(c);
     rejectIdentityOverrides(auth, c);
@@ -256,11 +498,11 @@ export function createTicketRoutes(dependencies: TicketRouteDependencies) {
     if (!ticket || !canAccessTicket(auth, ticket)) {
       throw new NotFoundError('TICKET_NOT_FOUND', 'The ticket was not found.');
     }
-    const comments = await dependencies.store.listComments(organizationId, ticketId);
-    const attachments = await dependencies.store.listAttachments(
-      organizationId,
-      ticketId,
-    );
+    const [comments, attachments, rating] = await Promise.all([
+      dependencies.store.listComments(organizationId, ticketId),
+      dependencies.store.listAttachments(organizationId, ticketId),
+      dependencies.store.getRating(organizationId, ticketId),
+    ]);
     const visibleComments = isTicketStaff(auth)
       ? comments
       : comments.filter((comment) => comment.visibility === 'public');
@@ -268,6 +510,68 @@ export function createTicketRoutes(dependencies: TicketRouteDependencies) {
       ticket: serializeTicket(ticket),
       comments: visibleComments.map(serializeComment),
       attachments: attachments.map(serializeAttachment),
+      rating: serializeRating(rating),
+    });
+  });
+
+  routes.post('/:ticketId/close', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = authorizeTickets(auth, 'tickets.update');
+    await rateLimitWork(c, 'mutation');
+    const ticketId = requireId(c.req.param('ticketId'), 'ticketId');
+    const existing = await dependencies.store.getById(organizationId, ticketId);
+    if (!existing || !canAccessTicket(auth, existing)) {
+      throw new NotFoundError('TICKET_NOT_FOUND', 'The ticket was not found.');
+    }
+
+    const isRequester = existing.userId === auth.actor.userId;
+    const staff = isTicketStaff(auth);
+    if (!isRequester && !staff) {
+      throw new ForbiddenError(
+        'TICKET_CLOSE_FORBIDDEN',
+        'Only the requester or service-desk staff can close this ticket.',
+      );
+    }
+
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
+    const ratingRaw = body.rating ?? body.p_rating;
+    const rating = Number(ratingRaw);
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      throw new ValidationError('Please choose a 1–5 star rating before closing.', {
+        field: 'rating',
+      });
+    }
+    const feedback = String(body.feedback ?? body.p_feedback ?? '').trim();
+    if (feedback.length < TICKET_CLOSE_FEEDBACK_MIN_CHARS) {
+      throw new ValidationError(
+        `Please describe what was fixed (at least ${TICKET_CLOSE_FEEDBACK_MIN_CHARS} characters) before closing.`,
+        { field: 'feedback' },
+      );
+    }
+
+    const closed = await dependencies.store.closeAndRate({
+      organizationId,
+      ticketId,
+      rating,
+      feedback,
+      closedBy: auth.actor.userId,
+      closedByEmail: auth.actor.email,
+      createdBy: auth.actor.userId,
+    });
+    if (!closed) {
+      throw new NotFoundError('TICKET_NOT_FOUND', 'The ticket was not found.');
+    }
+
+    return c.json({
+      ticket_id: closed.ticket.id,
+      status: closed.ticket.status,
+      rating: closed.rating?.rating ?? null,
+      assigned_to: closed.ticket.assignedTo,
+      ticket_number: closed.ticket.ticketNumber,
+      subject: closed.ticket.subject,
+      organization_id: closed.ticket.organizationId,
     });
   });
 
@@ -599,20 +903,16 @@ export function createTicketRoutes(dependencies: TicketRouteDependencies) {
     if (!attachment || attachment.ticketId !== ticketId) {
       throw new NotFoundError('ATTACHMENT_NOT_FOUND', 'The attachment was not found.');
     }
-    const stored = await dependencies.files.getObject(
-      attachment.bucket,
-      attachment.objectKey,
-    );
-    if (!stored) {
-      throw new NotFoundError('ATTACHMENT_NOT_FOUND', 'The attachment was not found.');
-    }
-    return new Response(Uint8Array.from(stored.body), {
-      status: 200,
-      headers: {
-        'content-type': stored.contentType ?? 'application/octet-stream',
-        'content-disposition': `attachment; filename="${contentDispositionFilename(attachment.originalFilename)}"`,
-        'cache-control': 'private, no-store',
-      },
+    return streamStoredMedia({
+      files: dependencies.files,
+      bucket: attachment.bucket,
+      objectKey: attachment.objectKey,
+      rangeHeader: c.req.header('range'),
+      cacheControl: 'private, no-store',
+      contentType: attachment.contentType,
+      contentDisposition: attachmentDisposition('inline', attachment.originalFilename),
+      notFoundCode: 'ATTACHMENT_NOT_FOUND',
+      notFoundMessage: 'The attachment was not found.',
     });
   });
 

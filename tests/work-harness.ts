@@ -116,6 +116,7 @@ export function createWorkApp(
     | 'trustedProxyIps'
     | 'notifications'
     | 'tickets'
+    | 'attendance'
   > = {},
 ) {
   store.seedOrganizationMember({

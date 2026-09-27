@@ -1,9 +1,5 @@
-# Development stack only.
-# Do not use these services, ports, or volumes for staging or production.
-# Production topology example: docker-compose.production.example.yml
-# Compose project name keeps volume names isolated from any future staging file.
 
-name: kode-platform-dev
+name: kodex-platform-dev
 
 services:
   postgres:
@@ -11,15 +7,15 @@ services:
     container_name: kode-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: kode_platform
+      POSTGRES_DB: kodex_platform
       POSTGRES_USER: kode
-      POSTGRES_PASSWORD: kode_dev_password
+      POSTGRES_PASSWORD: kodex_dev_password
     ports:
       - "127.0.0.1:5433:5432"
     volumes:
       - kode_postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U kode -d kode_platform"]
+      test: ["CMD-SHELL", "pg_isready -U kodex -d kodex_platform"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -60,5 +56,11 @@ services:
 
 volumes:
   kode_postgres_data:
+    external: true
+    name: kode-platform_kode_postgres_data
   kode_redis_data:
+    external: true
+    name: kode-platform-dev_kode_redis_data
   kode_minio_data:
+    external: true
+    name: kode-platform-dev_kode_minio_data

@@ -20,6 +20,8 @@ export type SessionServiceConfig = {
   accessTokens: AccessTokenService;
   accessTokenTtlSeconds: number;
   refreshTokenTtlSeconds: number;
+  /** Soft-reuse window for concurrent refreshes (multi-tab). Default 30s. */
+  refreshTokenReuseGraceSeconds?: number;
   resolveAuthContext: (userId: string) => Promise<AuthContext>;
   now?: () => Date;
   withTransaction?: <T>(
@@ -36,10 +38,45 @@ export type IssuedCredentials = {
 };
 
 export class SessionService {
+  private readonly recentRotations = new Map<
+    string,
+    { issued: IssuedCredentials; atMs: number }
+  >();
+
   constructor(private readonly config: SessionServiceConfig) {}
 
   private now() {
     return this.config.now?.() ?? new Date();
+  }
+
+  private reuseGraceMs() {
+    const seconds = this.config.refreshTokenReuseGraceSeconds;
+    if (seconds === 0) return 0;
+    return (seconds ?? 30) * 1000;
+  }
+
+  private rememberRotation(sessionId: string, issued: IssuedCredentials) {
+    const graceMs = this.reuseGraceMs();
+    if (graceMs <= 0) return;
+    this.recentRotations.set(sessionId, { issued, atMs: Date.now() });
+    // Drop stale entries opportunistically.
+    for (const [id, entry] of this.recentRotations) {
+      if (Date.now() - entry.atMs > graceMs) {
+        this.recentRotations.delete(id);
+      }
+    }
+  }
+
+  private reuseRecentRotation(sessionId: string): IssuedCredentials | null {
+    const graceMs = this.reuseGraceMs();
+    if (graceMs <= 0) return null;
+    const entry = this.recentRotations.get(sessionId);
+    if (!entry) return null;
+    if (Date.now() - entry.atMs > graceMs) {
+      this.recentRotations.delete(sessionId);
+      return null;
+    }
+    return entry.issued;
   }
 
   private async transaction<T>(
@@ -201,6 +238,22 @@ export class SessionService {
     }
 
     if (current.usedAt) {
+      const reused = this.reuseRecentRotation(current.sessionId);
+      if (reused) {
+        return reused;
+      }
+
+      const graceMs = this.reuseGraceMs();
+      const usedAgoMs = this.now().getTime() - current.usedAt.getTime();
+      if (graceMs > 0 && usedAgoMs >= 0 && usedAgoMs <= graceMs) {
+        // Winner's response not cached (e.g. other instance) — soft-deny without
+        // killing the live session so the other tab keeps working.
+        throw new UnauthorizedError(
+          'INVALID_REFRESH_TOKEN',
+          'Authentication is required.',
+        );
+      }
+
       await this.revokeSession(current.sessionId, 'refresh_token_replay', meta);
       await publishAuthEvent('auth.session.replay_detected', {
         requestId: meta.requestId,
@@ -312,13 +365,15 @@ export class SessionService {
       userAgent: meta.userAgent,
     });
 
-    return {
+    const issued: IssuedCredentials = {
       accessToken,
       refreshToken: nextRefreshToken,
       expiresIn: this.config.accessTokenTtlSeconds,
       sessionId: session.id,
       context,
     };
+    this.rememberRotation(session.id, issued);
+    return issued;
   }
 }
 

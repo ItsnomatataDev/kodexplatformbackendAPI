@@ -271,6 +271,49 @@ test('client organization id cannot override membership', async () => {
   assert.equal(body.error?.code, 'ORGANIZATION_OVERRIDE_REJECTED');
 });
 
+test('valid bearer token authenticates', async () => {
+  const issued = await sessionAuth.issueBearer(userA);
+  const app = createTestApp(async () => authContext());
+  const response = await app.request('/api/me', {
+    headers: { Authorization: issued.authorization },
+  });
+
+  assert.equal(response.status, 200);
+});
+
+test('query access_token without Authorization is rejected', async () => {
+  const issued = await sessionAuth.issueBearer(userA);
+  const app = createTestApp(async () => authContext());
+  const response = await app.request(`/api/me?access_token=${encodeURIComponent(issued.token)}`);
+  const body = await json(response);
+
+  assert.equal(response.status, 401);
+  assert.equal(body.error?.code, 'MISSING_CREDENTIAL');
+});
+
+test('query token without Authorization is rejected', async () => {
+  const issued = await sessionAuth.issueBearer(userA);
+  const app = createTestApp(async () => authContext());
+  const response = await app.request(`/api/me?token=${encodeURIComponent(issued.token)}`);
+  const body = await json(response);
+
+  assert.equal(response.status, 401);
+  assert.equal(body.error?.code, 'MISSING_CREDENTIAL');
+});
+
+test('revoked session is rejected', async () => {
+  const issued = await sessionAuth.issueBearer(userA);
+  sessionAuth.revoke(issued.sessionId);
+  const app = createTestApp(async () => authContext());
+  const response = await app.request('/api/me', {
+    headers: { Authorization: issued.authorization },
+  });
+  const body = await json(response);
+
+  assert.equal(response.status, 401);
+  assert.equal(body.error?.code, 'SESSION_REVOKED');
+});
+
 test('protected route requires authentication and health does not', async () => {
   const app = createTestApp(async () => authContext());
 

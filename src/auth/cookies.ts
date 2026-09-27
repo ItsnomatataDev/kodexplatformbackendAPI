@@ -15,10 +15,13 @@ export function setAuthCookies(
   refreshToken: string,
   settings: CookieSettings,
 ) {
+
+  const sameSite = settings.secure ? ('None' as const) : ('Lax' as const);
+
   setCookie(c, REFRESH_COOKIE, refreshToken, {
     httpOnly: true,
     secure: settings.secure,
-    sameSite: 'Lax',
+    sameSite,
     path: '/auth',
     maxAge: settings.refreshMaxAgeSeconds,
   });
@@ -26,7 +29,7 @@ export function setAuthCookies(
   setCookie(c, CSRF_COOKIE, generateOpaqueToken(), {
     httpOnly: false,
     secure: settings.secure,
-    sameSite: 'Lax',
+    sameSite,
     path: '/',
     maxAge: settings.refreshMaxAgeSeconds,
   });

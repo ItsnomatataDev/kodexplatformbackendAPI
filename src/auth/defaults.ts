@@ -65,7 +65,10 @@ export function createDefaultAuthLifecycle(
     withTransaction,
   });
 
-  const emailSender = createEmailSender(env.email);
+  const emailSender = createEmailSender(env.email, {
+    appPublicUrl: env.appPublicUrl || undefined,
+    passwordResetTtlSeconds: env.auth.passwordResetTtlSeconds,
+  });
 
   return {
     auth,
@@ -78,6 +81,13 @@ export function createDefaultAuthLifecycle(
       passwordResetTtlSeconds: env.auth.passwordResetTtlSeconds,
       sendPasswordResetEmail: (message) =>
         emailSender.sendPasswordReset(message),
+      resolveFirstName: async (userId, email) => {
+        const profile = await loadPublicProfile(userId);
+        if (profile?.fullName?.trim()) {
+          return profile.fullName.trim().split(/\s+/)[0] ?? null;
+        }
+        return email.includes('@') ? email.split('@')[0] ?? null : null;
+      },
       withTransaction,
     }),
     rateLimiter:

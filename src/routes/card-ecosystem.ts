@@ -5,6 +5,7 @@ import { getAuth } from '../auth/middleware.js';
 import { assertAuthorized } from '../authorization/authorize.js';
 import { requireOrganizationId } from '../authorization/organization.js';
 import { env } from '../config/env.js';
+import { attachmentDisposition, streamStoredMedia } from '../content/media-stream.js';
 import type { FileStorage } from '../files/storage.js';
 import { notifyCardAssigned, notifyCardCommented } from '../notifications/events.js';
 import type { NotificationStore } from '../notifications/store.js';
@@ -181,6 +182,7 @@ function serializeTimeEntry(entry: TimeEntryRecord) {
     cardTitle: entry.cardTitle ?? null,
     boardId: entry.boardId ?? null,
     boardName: entry.boardName ?? null,
+    officeId: entry.officeId ?? null,
     userName: entry.userName ?? null,
     userEmail: entry.userEmail ?? null,
   };
@@ -949,17 +951,15 @@ export function createAttachmentRoutes(dependencies: CardEcosystemDependencies) 
     if (!attachment) {
       throw new NotFoundError('ATTACHMENT_NOT_FOUND', 'The attachment was not found.');
     }
-    const stored = await dependencies.files.getObject(attachment.bucket, attachment.objectKey);
-    if (!stored) {
-      throw new NotFoundError('ATTACHMENT_NOT_FOUND', 'The attachment was not found.');
-    }
-    return new Response(Uint8Array.from(stored.body), {
-      status: 200,
-      headers: {
-        'content-type': stored.contentType ?? 'application/octet-stream',
-        'content-disposition': `attachment; filename="${attachment.originalFilename}"`,
-        'cache-control': 'private, no-store',
-      },
+    return streamStoredMedia({
+      files: dependencies.files,
+      bucket: attachment.bucket,
+      objectKey: attachment.objectKey,
+      rangeHeader: c.req.header('range'),
+      cacheControl: 'private, no-store',
+      contentDisposition: attachmentDisposition('attachment', attachment.originalFilename),
+      notFoundCode: 'ATTACHMENT_NOT_FOUND',
+      notFoundMessage: 'The attachment was not found.',
     });
   });
 

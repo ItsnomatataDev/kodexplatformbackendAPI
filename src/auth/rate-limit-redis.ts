@@ -8,8 +8,10 @@ export type RedisLikeClient = {
   isOpen: boolean;
   connect(): Promise<unknown>;
   incr(key: string): Promise<number>;
+  get(key: string): Promise<string | null>;
   expire(key: string, seconds: number): Promise<boolean | number>;
   ttl(key: string): Promise<number>;
+  del(key: string): Promise<number>;
   close(): Promise<void>;
 };
 
@@ -59,6 +61,41 @@ export class RedisRateLimiter implements RateLimiter {
     activeLimiters.add(this);
   }
 
+  async inspect(
+    key: string,
+    limit: number,
+    windowSeconds: number,
+  ): Promise<RateLimitResult> {
+    try {
+      const client = await this.connect();
+      const redisKey = redisRateLimitKey(this.settings.appEnv, key);
+      const raw = await client.get(redisKey);
+      const count = raw ? Number(raw) : 0;
+
+      if (count >= limit) {
+        const ttl = await client.ttl(redisKey);
+        return {
+          allowed: false,
+          retryAfterSeconds: Math.max(1, ttl > 0 ? ttl : windowSeconds),
+        };
+      }
+
+      return {
+        allowed: true,
+        retryAfterSeconds: windowSeconds,
+      };
+    } catch (error) {
+      if (error instanceof ServiceUnavailableError) {
+        throw error;
+      }
+
+      throw new ServiceUnavailableError(
+        'RATE_LIMIT_UNAVAILABLE',
+        'Rate limiting is temporarily unavailable.',
+      );
+    }
+  }
+
   async consume(
     key: string,
     limit: number,
@@ -95,6 +132,11 @@ export class RedisRateLimiter implements RateLimiter {
         'Rate limiting is temporarily unavailable.',
       );
     }
+  }
+
+  async clearKey(key: string): Promise<void> {
+    const client = await this.connect();
+    await client.del(redisRateLimitKey(this.settings.appEnv, key));
   }
 
   async close(): Promise<void> {

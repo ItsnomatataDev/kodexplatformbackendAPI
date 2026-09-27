@@ -7,6 +7,8 @@ import {
   rejectClientOrganizationOverride,
   requireOrganizationId,
 } from '../authorization/organization.js';
+import { listOffset } from '../db/list-bounds.js';
+import { readListQuery } from '../http/list-query.js';
 import { NotFoundError, ValidationError } from '../http/errors.js';
 import { optionalMetadata } from '../http/fields.js';
 import { FIELD_LIMITS } from '../http/limits.js';
@@ -83,9 +85,14 @@ export function createBoardRoutes(dependencies: BoardRouteDependencies) {
       },
     });
 
-    const records = await dependencies.store.listByOrganization(organizationId);
+    const page = readListQuery(c);
+    const records = await dependencies.store.listByOrganization(organizationId, {
+      limit: page.limit,
+      offset: listOffset(Number(c.req.query('offset'))),
+    });
     return c.json({
-      boards: records.map(serializeBoard),
+      boards: records.boards.map(serializeBoard),
+      hasMore: records.hasMore,
     });
   });
 

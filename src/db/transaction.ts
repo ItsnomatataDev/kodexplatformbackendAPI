@@ -7,6 +7,13 @@ export async function withTransaction<T>(
   work: (client: TransactionClient) => Promise<T>,
 ): Promise<T> {
   const client = await db.connect();
+  let sessionError: Error | undefined;
+  const onSessionError = (error: Error) => {
+    sessionError = error;
+  };
+  // An idle-in-transaction timeout emits here with no active query.
+  // Without a listener, Node treats that as an uncaught exception.
+  client.on('error', onSessionError);
 
   try {
     await client.query('BEGIN');
@@ -14,9 +21,12 @@ export async function withTransaction<T>(
     await client.query('COMMIT');
     return result;
   } catch (error) {
-    await client.query('ROLLBACK');
+    if (!sessionError) {
+      await client.query('ROLLBACK');
+    }
     throw error;
   } finally {
-    client.release();
+    client.removeListener('error', onSessionError);
+    client.release(sessionError);
   }
 }

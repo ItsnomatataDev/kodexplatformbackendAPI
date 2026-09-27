@@ -107,10 +107,23 @@ export type AuthStore = {
   findPasswordResetTokenByHash(
     tokenHash: string,
   ): Promise<PasswordResetRecord | null>;
-  markPasswordResetTokenUsed(tokenId: string, usedAt: Date): Promise<void>;
+  markPasswordResetTokenUsed(
+    tokenId: string,
+    usedAt: Date,
+    client?: TransactionClient,
+  ): Promise<void>;
+  /**
+   * Atomically consume a reset token. Returns null if already used/expired/missing.
+   */
+  consumePasswordResetToken(
+    tokenId: string,
+    usedAt: Date,
+    client?: TransactionClient,
+  ): Promise<PasswordResetRecord | null>;
   invalidatePasswordResetTokensForUser(
     userId: string,
     at: Date,
     client?: TransactionClient,
+    exceptTokenId?: string,
   ): Promise<void>;
 };

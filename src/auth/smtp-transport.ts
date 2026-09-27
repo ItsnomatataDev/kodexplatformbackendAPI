@@ -6,6 +6,7 @@ export type SmtpMail = {
   to: string;
   subject: string;
   text: string;
+  html?: string;
 };
 
 export type SmtpTransportOverrides = {
@@ -140,21 +141,56 @@ async function authenticateAndSend(
   await expect(socket, 250);
   await write(socket, 'DATA');
   await expect(socket, 354);
-  await write(
-    socket,
-    [
-      `From: ${options.from}`,
-      `To: ${mail.to}`,
-      `Subject: ${mail.subject}`,
-      'MIME-Version: 1.0',
-      'Content-Type: text/plain; charset=utf-8',
-      '',
-      mail.text.replace(/^\./gm, '..'),
-      '.',
-    ].join('\r\n'),
-  );
+  await write(socket, buildMimeMessage(options.from, mail));
   await expect(socket, 250);
   await write(socket, 'QUIT');
+}
+
+function encodeSubject(subject: string): string {
+  if (/^[\x20-\x7E]*$/.test(subject)) {
+    return subject;
+  }
+  return `=?UTF-8?B?${Buffer.from(subject, 'utf8').toString('base64')}?=`;
+}
+
+function buildMimeMessage(from: string, mail: SmtpMail): string {
+  const headers = [
+    `From: ${from}`,
+    `To: ${mail.to}`,
+    `Subject: ${encodeSubject(mail.subject)}`,
+    'MIME-Version: 1.0',
+  ];
+
+  const textBody = mail.text.replace(/^\./gm, '..');
+  if (!mail.html) {
+    return [
+      ...headers,
+      'Content-Type: text/plain; charset=utf-8',
+      '',
+      textBody,
+      '.',
+    ].join('\r\n');
+  }
+
+  const boundary = `kode_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  const htmlBody = mail.html.replace(/^\./gm, '..');
+  return [
+    ...headers,
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=utf-8',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    textBody,
+    `--${boundary}`,
+    'Content-Type: text/html; charset=utf-8',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    htmlBody,
+    `--${boundary}--`,
+    '.',
+  ].join('\r\n');
 }
 
 function connectSmtp(
@@ -248,7 +284,12 @@ function readMultiline(socket: net.Socket, expectedCode: number): Promise<string
       cleanup();
 
       if (code !== expectedCode) {
-        reject(new Error('SMTP command failed.'));
+        const detail = complete.join(' ').slice(0, 400);
+        reject(
+          new Error(
+            `SMTP command failed (expected ${expectedCode}, got ${code}): ${detail}`,
+          ),
+        );
         return;
       }
 

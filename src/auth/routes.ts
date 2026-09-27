@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { getLimitedBodyText } from '../middleware/body-limit.js';
-import { ValidationError } from '../http/errors.js';
+import { ValidationError, UnauthorizedError, ServiceUnavailableError } from '../http/errors.js';
 import { createAuthMiddleware, getAuth, getSessionId } from './middleware.js';
 import type { AuthDependencies } from './middleware.js';
 import { rejectClientUserOverride } from './account.js';
@@ -15,11 +15,14 @@ import {
   type CookieSettings,
 } from './cookies.js';
 import { requestMeta, tokenResponse } from './http.js';
-import { enforceRateLimit, type RateLimiter } from './rate-limit.js';
+import { enforceRateLimit, assertNotRateLimited, type RateLimiter } from './rate-limit.js';
+import { loginRateLimits } from './login-rate-limits.js';
+import { env } from '../config/env.js';
 import { publishAuthEvent } from './events.js';
 import { generateOpaqueToken } from './opaque-token.js';
 import { setCookie } from 'hono/cookie';
 import { CSRF_COOKIE } from './cookies.js';
+import { EmailDeliveryError } from './email.js';
 
 export type AuthRouteDependencies = {
   auth: AuthDependencies;
@@ -60,10 +63,13 @@ export function createAuthRoutes(dependencies: AuthRouteDependencies) {
 
   routes.get('/csrf', (c) => {
     const token = generateOpaqueToken();
+    const sameSite = dependencies.cookies.secure
+      ? ('None' as const)
+      : ('Lax' as const);
     setCookie(c, CSRF_COOKIE, token, {
       httpOnly: false,
       secure: dependencies.cookies.secure,
-      sameSite: 'Lax',
+      sameSite,
       path: '/',
       maxAge: dependencies.cookies.refreshMaxAgeSeconds,
     });
@@ -72,11 +78,13 @@ export function createAuthRoutes(dependencies: AuthRouteDependencies) {
 
   routes.post('/login', async (c) => {
     const meta = requestMeta(c);
+    const limits = loginRateLimits(env.appEnv);
+
     await enforceRateLimit(
       dependencies.rateLimiter,
       `login:ip:${meta.ipAddress ?? 'unknown'}`,
-      10,
-      900,
+      limits.ipLimit,
+      limits.windowSeconds,
     );
 
     const body = await readJson(c);
@@ -87,26 +95,47 @@ export function createAuthRoutes(dependencies: AuthRouteDependencies) {
       throw new ValidationError('Email and password are required.');
     }
 
-    await enforceRateLimit(
+    const emailKey = `login:email:${email.trim().toLowerCase()}`;
+    // Lockout check only — do not burn quota until a failed password attempt.
+    await assertNotRateLimited(
       dependencies.rateLimiter,
-      `login:email:${email.trim().toLowerCase()}`,
-      5,
-      900,
+      emailKey,
+      limits.emailLimit,
+      limits.windowSeconds,
     );
 
-    const issued = await dependencies.login.login(email, password, meta);
-    setAuthCookies(c, issued.refreshToken, dependencies.cookies);
-    return c.json(tokenResponse(issued));
+    try {
+      const issued = await dependencies.login.login(email, password, meta);
+      setAuthCookies(c, issued.refreshToken, dependencies.cookies);
+      return c.json(tokenResponse(issued));
+    } catch (error) {
+      if (error instanceof UnauthorizedError && error.code === 'INVALID_CREDENTIALS') {
+        await enforceRateLimit(
+          dependencies.rateLimiter,
+          emailKey,
+          limits.emailLimit,
+          limits.windowSeconds,
+        );
+      }
+      throw error;
+    }
   });
 
   routes.post('/refresh', async (c) => {
     const meta = requestMeta(c);
-    await enforceRateLimit(
-      dependencies.rateLimiter,
-      `refresh:ip:${meta.ipAddress ?? 'unknown'}`,
-      30,
-      900,
-    );
+    try {
+      await enforceRateLimit(
+        dependencies.rateLimiter,
+        `refresh:ip:${meta.ipAddress ?? 'unknown'}`,
+        300,
+        900,
+      );
+    } catch (error) {
+      // Never kick users out because Redis rate limiting is down.
+      if (!(error instanceof ServiceUnavailableError)) {
+        throw error;
+      }
+    }
 
     const body = await readJson(c);
     const refreshToken = readRefreshToken(c, readString(body.refresh_token));
@@ -223,7 +252,14 @@ export function createAuthRoutes(dependencies: AuthRouteDependencies) {
       900,
     );
 
-    await dependencies.passwords.requestPasswordReset(email, meta);
+    try {
+      await dependencies.passwords.requestPasswordReset(email, meta);
+    } catch (error) {
+      // Enumeration-safe: never reveal whether the account exists or mail failed.
+      if (!(error instanceof EmailDeliveryError)) {
+        throw error;
+      }
+    }
     return c.json({
       message: 'If the account exists, password reset instructions will be sent.',
     });

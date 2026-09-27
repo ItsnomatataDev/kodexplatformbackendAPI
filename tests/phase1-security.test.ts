@@ -4,6 +4,7 @@ import { createApp } from '../src/app.js';
 import { AccessTokenService } from '../src/auth/access-token.js';
 import { LoginService } from '../src/auth/login.js';
 import { MemoryAuthStore } from '../src/auth/memory-store.js';
+import { loginRateLimits } from '../src/auth/login-rate-limits.js';
 import { MemoryRateLimiter, type RateLimiter } from '../src/auth/rate-limit.js';
 import { PasswordService } from '../src/auth/password-service.js';
 import { hashPassword } from '../src/auth/passwords.js';
@@ -42,6 +43,9 @@ function trackingLimiter(inner: RateLimiter) {
       keys.push(key);
       return inner.consume(key, limit, windowSeconds);
     },
+    async inspect(key, limit, windowSeconds) {
+      return inner.inspect(key, limit, windowSeconds);
+    },
   };
   return limiter;
 }
@@ -49,6 +53,12 @@ function trackingLimiter(inner: RateLimiter) {
 function unavailableLimiter(): RateLimiter {
   return {
     async consume() {
+      throw new ServiceUnavailableError(
+        'RATE_LIMIT_UNAVAILABLE',
+        'Rate limiting is temporarily unavailable.',
+      );
+    },
+    async inspect() {
       throw new ServiceUnavailableError(
         'RATE_LIMIT_UNAVAILABLE',
         'Rate limiting is temporarily unavailable.',
@@ -589,9 +599,14 @@ test('PB-09 trusted proxies use the right-most untrusted X-Forwarded-For hop', a
 });
 
 test('PB-09 untrusted forwarded headers cannot bypass the login IP limiter', async () => {
+  const policy = loginRateLimits('development');
   const limiter = new MemoryRateLimiter(['test']);
-  for (let index = 0; index < 10; index += 1) {
-    await limiter.consume('login:ip:203.0.113.10', 10, 900);
+  for (let index = 0; index < policy.ipLimit; index += 1) {
+    await limiter.consume(
+      'login:ip:203.0.113.10',
+      policy.ipLimit,
+      policy.windowSeconds,
+    );
   }
   const { app } = await createAuthHarness({ rateLimiter: limiter });
   const blocked = await login(app, '203.0.113.10', {
@@ -667,6 +682,9 @@ test('PB-11 Work mutations and attachments are rate limited after authorization'
     {
       rateLimiter: {
         async consume() {
+          return { allowed: false, retryAfterSeconds: 30 };
+        },
+        async inspect() {
           return { allowed: false, retryAfterSeconds: 30 };
         },
       },

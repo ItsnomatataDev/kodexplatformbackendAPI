@@ -280,7 +280,7 @@ export const env = {
     tokenSecret: authSecretFromEnv(appEnv),
     issuer: `kode-platform/${appEnv}`,
     audience: `kode-platform-api/${appEnv}`,
-    accessTokenTtlSeconds: ttlFromEnv('AUTH_ACCESS_TOKEN_TTL_SECONDS', 900),
+    accessTokenTtlSeconds: ttlFromEnv('AUTH_ACCESS_TOKEN_TTL_SECONDS', 3600),
     refreshTokenTtlSeconds: durationFromEnv(
       'AUTH_REFRESH_TOKEN_TTL_SECONDS',
       60 * 60 * 24 * 7,
@@ -316,10 +316,18 @@ export const env = {
       minRequestBodyBytes,
       64 * 1024 * 1024,
     );
+    // Content Studio stores originals (esp. video) — up to 1 GiB via binary stream path.
+    const maxContentStudioUploadBytes = bytesFromEnv(
+      'CONTENT_STUDIO_MAX_UPLOAD_BYTES',
+      1024 * 1024 * 1024,
+      1,
+      1024 * 1024 * 1024,
+    );
 
     return {
       maxAttachmentBytes,
       maxRequestBodyBytes,
+      maxContentStudioUploadBytes,
     };
   })(),
 
@@ -349,4 +357,32 @@ export const env = {
       windowSeconds: durationFromEnv('WORK_ATTACHMENT_RATE_WINDOW_SECONDS', 60, 1, 3_600),
     },
   } satisfies WorkRateLimitPolicies,
+
+  /** Optional LiveKit credentials for meeting token minting (moved off Supabase edge). */
+  livekit: {
+    url: optional('LIVEKIT_URL', ''),
+    apiKey: optional('LIVEKIT_API_KEY', ''),
+    apiSecret: optional('LIVEKIT_API_SECRET', ''),
+  },
+
+  /** Staff web app origin for password-reset links in emails. */
+  appPublicUrl: optional('APP_PUBLIC_URL', '').replace(/\/+$/, ''),
+
+  /**
+   * OpenAI-compatible LLM gateway for KODEX (Content Studio + future chat AI).
+   * Prefer LLM_* for the company gateway; OPENAI_* is cutover fallback.
+   * CURSOR_API_KEY is for Cursor Agents/SDK only — not KODEX chat completions.
+   */
+  llm: {
+    baseUrl: optional('LLM_BASE_URL', ''),
+    apiKey: optional('LLM_API_KEY', '') || optional('OPENAI_API_KEY', ''),
+    chatModel: optional('LLM_CHAT_MODEL', '') || optional('OPENAI_CHAT_MODEL', 'gpt-4o-mini'),
+    miniChatModel:
+      optional('LLM_CHAT_MINI_MODEL', '') ||
+      optional('OPENAI_CHAT_MODEL', '') ||
+      optional('LLM_CHAT_MODEL', 'gpt-4o-mini'),
+  },
+  cursor: {
+    apiKey: optional('CURSOR_API_KEY', ''),
+  },
 } as const;

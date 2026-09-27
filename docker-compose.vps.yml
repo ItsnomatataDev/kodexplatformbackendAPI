@@ -1,0 +1,94 @@
+# VPS cutover stack: data stores on loopback.
+# The API uses host networking so it can reach those loopback ports
+# (127.0.0.1 inside a bridge network is the container, not the host).
+# HOST=127.0.0.1 keeps Node off every other interface. Caddy on the host
+# is the public door and proxies to 127.0.0.1:3000.
+# Uses APP_ENV=staging naming so loopback TLS guards pass; this is the live cutover host.
+#
+# OPERATIONAL VERIFICATION REQUIRED:
+# Verify from an external host that TCP/3000 is not publicly reachable.
+
+name: kode-platform-vps
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: kode-vps-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kode_platform_staging
+      POSTGRES_USER: kode_staging
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - kode_vps_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kode_staging -d kode_platform_staging"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:8-alpine
+    container_name: kode-vps-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - kode_vps_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+  minio:
+    image: pgsty/minio:latest
+    container_name: kode-vps-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - kode_vps_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kode-vps-api
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env.vps
+    environment:
+      # Dockerfile defaults APP_ENV=production; override for loopback cutover.
+      APP_ENV: staging
+      NODE_ENV: staging
+      HOST: 127.0.0.1
+      PORT: 3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+volumes:
+  kode_vps_postgres_data:
+  kode_vps_redis_data:
+  kode_vps_minio_data:

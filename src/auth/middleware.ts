@@ -15,12 +15,18 @@ export type AuthDependencies = {
 export function createAuthMiddleware(dependencies: AuthDependencies) {
   return createMiddleware(async (c, next) => {
     const extracted = extractBearerToken(c.req.header('authorization'));
+    // HTTP APIs accept the access token only from Authorization.
+    // WebSocket upgrades authenticate in src/routes/chat-ws.ts.
+    const token = extracted.ok ? extracted.token : null;
 
-    if (!extracted.ok) {
-      throw new UnauthorizedError(extracted.code, extracted.message);
+    if (!token) {
+      if (!extracted.ok) {
+        throw new UnauthorizedError(extracted.code, extracted.message);
+      }
+      throw new UnauthorizedError();
     }
 
-    const verified = await dependencies.verifier.verify(extracted.token);
+    const verified = await dependencies.verifier.verify(token);
 
     if (!verified.sessionId) {
       throw new UnauthorizedError(

@@ -418,11 +418,29 @@ test('client organization overrides are rejected on tenancy routes', async () =>
   }
 });
 
-test('member directory is restricted to admin or manager flags', async () => {
+test('member directory is available to admin, manager, and it', async () => {
   const store = new MemoryOrganizationDirectoryStore();
   seedDirectory(store);
 
-  const memberApp = createDirectoryApp(
+  const mediaApp = createDirectoryApp(
+    async () =>
+      authContext({
+        membership: {
+          roleKey: 'media_team',
+          isAdminRole: false,
+          isManagerRole: false,
+        },
+      }),
+    store,
+  );
+  const denied = await json(
+    await mediaApp.request('/api/organization/members', {
+      headers: { Authorization: await bearer(userA) },
+    }),
+  );
+  assert.equal(denied.error?.code, 'INSUFFICIENT_PERMISSION');
+
+  const itApp = createDirectoryApp(
     async () =>
       authContext({
         membership: {
@@ -433,12 +451,15 @@ test('member directory is restricted to admin or manager flags', async () => {
       }),
     store,
   );
-  const denied = await json(
-    await memberApp.request('/api/organization/members', {
+  const itListed = await json(
+    await itApp.request('/api/organization/members', {
       headers: { Authorization: await bearer(userA) },
     }),
   );
-  assert.equal(denied.error?.code, 'INSUFFICIENT_PERMISSION');
+  assert.deepEqual(
+    itListed.members.map((member: { userId: string }) => member.userId).sort(),
+    [userA, userC].sort(),
+  );
 
   const managerApp = createDirectoryApp(
     async () =>
@@ -469,6 +490,113 @@ test('member directory is restricted to admin or manager flags', async () => {
       ?.email,
     'test@itsnomatata.com',
   );
+});
+
+test('directory mutations invite, approve, reject, and update access', async () => {
+  const store = new MemoryOrganizationDirectoryStore();
+  seedDirectory(store);
+  const pendingUser = '44444444-4444-4444-4444-444444444444';
+  seedActiveMember(store, {
+    organizationId: orgA,
+    userId: pendingUser,
+    roleKey: 'media_team',
+    officeId: officeA,
+    status: 'pending',
+    accountStatus: 'pending_approval',
+    fullName: 'Pat Pending',
+    email: 'pending@example.com',
+  });
+
+  const app = createDirectoryApp(async () => authContext(), store);
+  const authorization = await bearer(userA);
+
+  const invited = await json(
+    await app.request('/api/organization/members/invite', {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        email: 'newbie@example.com',
+        fullName: 'New Hire',
+        roleKey: 'it',
+        officeId: officeA,
+      }),
+    }),
+  );
+  assert.equal(invited.status, 'invite_created');
+  assert.equal(typeof invited.userId, 'string');
+
+  const approved = await json(
+    await app.request(`/api/organization/members/${pendingUser}/approve`, {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ roleKey: 'manager', officeId: officeA }),
+    }),
+  );
+  assert.equal(approved.member.status, 'active');
+  assert.equal(approved.member.roleKey, 'manager');
+  assert.equal(approved.member.accountStatus, 'active');
+
+  const access = await json(
+    await app.request(`/api/organization/members/${pendingUser}/access`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        roleKey: 'it',
+        officeId: officeA,
+        changeOffice: true,
+      }),
+    }),
+  );
+  assert.equal(access.member.roleKey, 'it');
+  assert.equal(access.member.officeId, officeA);
+
+  const rejected = await json(
+    await app.request(`/api/organization/members/${pendingUser}/reject`, {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ reason: 'Not a fit' }),
+    }),
+  );
+  assert.equal(rejected.member.status, 'removed');
+  assert.equal(rejected.member.accountStatus, 'rejected');
+
+  const mediaDenied = await json(
+    await createDirectoryApp(
+      async () =>
+        authContext({
+          membership: {
+            roleKey: 'media_team',
+            isAdminRole: false,
+            isManagerRole: false,
+          },
+        }),
+      store,
+    ).request('/api/organization/members/invite', {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        email: 'blocked@example.com',
+        fullName: 'Blocked',
+        roleKey: 'it',
+      }),
+    }),
+  );
+  assert.equal(mediaDenied.error?.code, 'INSUFFICIENT_PERMISSION');
 });
 
 test('assignable users are available to members with nested work card read', async () => {

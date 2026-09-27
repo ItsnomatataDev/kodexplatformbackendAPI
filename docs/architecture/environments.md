@@ -5,13 +5,20 @@ must be exactly `development`, `staging`, or `production`.
 
 Configuration examples:
 
-- `.env.development.example`
-- `.env.staging.example`
-- `.env.production.example`
+- `.env.development.example` — local / loopback (copy to `.env`)
+- `.env.staging.example` — staging host
+- `.env.production.example` — production host
 
-Copy the matching file to `.env`. Never copy production values onto a
-development machine. Runtime guards in `src/config/environment-guards.ts` exist
-to catch the obvious mistakes; they do not replace operator discipline.
+`.env.example` is an index only. Runtime always loads a single gitignored
+`.env` file:
+
+```bash
+cp .env.development.example .env
+```
+
+Never copy production values onto a development machine. Runtime guards in
+`src/config/environment-guards.ts` exist to catch the obvious mistakes; they
+do not replace operator discipline.
 
 ## Development
 

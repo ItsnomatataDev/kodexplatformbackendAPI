@@ -147,4 +147,18 @@ export class MemoryNotificationStore implements NotificationStore {
   async getDisplayName(userId: string) {
     return this.displayNames.get(userId) ?? null;
   }
+
+  async getRecipientEmails(userIds: string[]) {
+    const map = new Map<string, { email: string; fullName: string | null }>();
+    for (const userId of userIds) {
+      const name = this.displayNames.get(userId);
+      if (name) {
+        map.set(userId, {
+          email: `${userId}@example.test`,
+          fullName: name,
+        });
+      }
+    }
+    return map;
+  }
 }

@@ -74,9 +74,12 @@ export class TooManyRequestsError extends AppError {
   readonly retryAfterSeconds: number;
 
   constructor(retryAfterSeconds = 60) {
+    const minutes = Math.max(1, Math.ceil(retryAfterSeconds / 60));
     super(
       'RATE_LIMITED',
-      'Too many requests. Try again later.',
+      minutes <= 1
+        ? 'Too many login attempts. Try again in about a minute.'
+        : `Too many login attempts. Try again in about ${minutes} minutes.`,
       429,
       { retryAfterSeconds },
     );
