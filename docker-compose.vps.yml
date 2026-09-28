@@ -1,12 +1,10 @@
-# VPS cutover stack: data stores on loopback.
-# The API uses host networking so it can reach those loopback ports
-# (127.0.0.1 inside a bridge network is the container, not the host).
-# HOST=127.0.0.1 keeps Node off every other interface. Caddy on the host
-# is the public door and proxies to 127.0.0.1:3000.
-# Uses APP_ENV=staging naming so loopback TLS guards pass; this is the live cutover host.
-#
-# OPERATIONAL VERIFICATION REQUIRED:
-# Verify from an external host that TCP/3000 is not publicly reachable.
+# Authoritative VPS stack. Deploy with --env-file .env.vps -f docker-compose.vps.yml.
+# Host networking preserves PostgreSQL/Redis/MinIO host-loopback connections.
+# The observed Caddy path requires Node to listen beyond loopback.
+# HOST is deliberately fixed here; env_file must not override the topology.
+# SECURITY: 0.0.0.0 on the host requires TCP/3000 firewall protection BEFORE
+# recreation. See docs/deployment/vps.md and deploy/vps-api-guard.nft.example.
+# Staging naming preserves the existing loopback data-service configuration.
 
 name: kode-platform-vps
 
@@ -78,7 +76,7 @@ services:
       # Dockerfile defaults APP_ENV=production; override for loopback cutover.
       APP_ENV: staging
       NODE_ENV: staging
-      HOST: 127.0.0.1
+      HOST: 0.0.0.0
       PORT: 3000
     depends_on:
       postgres:

@@ -9,12 +9,16 @@ Configuration examples:
 - `.env.staging.example` — staging host
 - `.env.production.example` — production host
 
-`.env.example` is an index only. Runtime always loads a single gitignored
-`.env` file:
+`.env.example` is an index only. Local runtime loads a single gitignored
+`.env` file (existing process environment takes precedence):
 
 ```bash
 cp .env.development.example .env
 ```
+
+The VPS container receives its environment from `.env.vps` and explicit Compose
+overrides. See [VPS deployment](../deployment/vps.md) for the authoritative bind,
+required TCP/3000 firewall protection, and public-path verification.
 
 Never copy production values onto a development machine. Runtime guards in
 `src/config/environment-guards.ts` exist to catch the obvious mistakes; they

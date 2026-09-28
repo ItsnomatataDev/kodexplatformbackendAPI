@@ -1,0 +1,16 @@
+# REVIEW TEMPLATE ONLY. Never flush the host ruleset.
+# Merge into the host's existing persistent firewall management BEFORE deploying.
+# This additional input chain affects only TCP/3000 (IPv4 and IPv6).
+# For host Caddy using host-local routing, loopback is sufficient.
+# If Caddy is containerized, add an allow rule for its verified private bridge
+# interface AND stable source address before the drop. Do not allow public ingress.
+# Example only, replace BOTH values after inspecting the actual topology:
+#   iifname "br-caddy" ip saddr 172.30.0.2 tcp dport 3000 accept
+# Do not assume that example address/interface exists on the VPS.
+table inet kode_api_guard {
+    chain input {
+        type filter hook input priority -10; policy accept;
+        iifname "lo" tcp dport 3000 accept
+        tcp dport 3000 drop
+    }
+}

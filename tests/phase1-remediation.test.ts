@@ -41,12 +41,12 @@ test('websocket auth still reads the query token alias', () => {
   assert.equal(token, 'ws-alias');
 });
 
-test('vps API binds loopback and data stores stay on loopback', () => {
+test('vps API uses the proxy-reachable bind and data stores stay on loopback', () => {
   const vps = readFileSync(new URL('../docker-compose.vps.yml', import.meta.url), 'utf8');
   const apiBlock = vps.slice(vps.indexOf('  api:'));
   assert.match(apiBlock, /network_mode:\s*host/);
-  assert.match(apiBlock, /HOST:\s*127\.0\.0\.1/);
-  assert.doesNotMatch(apiBlock, /HOST:\s*0\.0\.0\.0/);
+  assert.match(apiBlock, /HOST:\s*0\.0\.0\.0/);
+  assert.doesNotMatch(apiBlock, /HOST:\s*127\.0\.0\.1/);
   assert.match(vps, /127\.0\.0\.1:5433:5432/);
   assert.match(vps, /127\.0\.0\.1:6379:6379/);
   assert.match(vps, /127\.0\.0\.1:9000:9000/);
