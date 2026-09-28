@@ -9,12 +9,13 @@ function applyCorsHeaders(
   headers.set('Access-Control-Allow-Credentials', 'true');
   headers.set(
     'Access-Control-Allow-Headers',
-    'Authorization, Content-Type, X-CSRF-Token, X-Request-Id, X-Kode-Ingest-Token',
+    'Authorization, Content-Type, X-CSRF-Token, X-Request-Id, X-Kode-Ingest-Token, Range',
   );
   headers.set(
     'Access-Control-Allow-Methods',
     'GET, POST, PUT, PATCH, DELETE, OPTIONS',
   );
+  headers.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges, X-Request-Id');
   headers.set('Access-Control-Max-Age', '600');
 }
 

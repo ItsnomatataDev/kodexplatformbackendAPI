@@ -39,10 +39,12 @@ test('mounted native GET serves media using only an issued opaque capability', a
     body: JSON.stringify({ objectKey }),
   });
   assert.equal(issued.status, 200);
+  assert.equal(issued.headers.get('cache-control'), 'no-store');
   const { url } = await issued.json() as { url: string };
   assert.match(url, /^\/api\/content-studio\/media\?cap=[\w-]+$/);
   const response = await app.request(url);
   assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'private, no-store');
   assert.equal(response.headers.get('content-type'), 'image/png');
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), body);
   assert.deepEqual(lookups, [[orgA, objectKey], [orgA, objectKey]]);
@@ -126,7 +128,7 @@ for (const kind of ['schedule', 'client'] as const) {
         return organizationId === orgA && office === officeId && id === parentId
           ? { id, organizationId, officeId } : null;
       },
-      async createAsset(input: { organizationId: string; storagePath: string }) {
+      async createUploadedAsset(input: { organizationId: string; storagePath: string }) {
         rows.push(input);
         return { ...input, id: 'asset', createdAt: new Date() };
       },
@@ -175,3 +177,67 @@ for (const kind of ['schedule', 'client'] as const) {
     assert.equal(await playback.text(), 'test');
   });
 }
+
+for (const kind of ['schedule', 'client'] as const) {
+  for (const encoding of ['binary', 'json'] as const) {
+    test(`${kind} ${encoding} upload cleans up storage when metadata persistence fails`, async () => {
+      const files = new MemoryFileStorage();
+      const parentId = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+      const officeId = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
+      let failedKey = '';
+      const fail = async (input: { storagePath: string }) => {
+        failedKey = input.storagePath;
+        assert(await files.getObject(CONTENT_REVIEW_ASSETS_BUCKET, failedKey));
+        throw Error('database insert failed');
+      };
+      const content = {
+        async getSchedule() { return { id: parentId, officeId, clientId: parentId }; },
+        async getClient() { return { id: parentId, officeId }; },
+        async createUploadedAsset(input: { storagePath: string }, clientId: string | null) {
+          assert.equal(clientId, parentId);
+          return fail(input);
+        },
+        createClientMedia: fail,
+        async findMediaOwnership() { return false; },
+      } as unknown as ContentStore;
+      const app = createApp({ content, files, auth: {
+        verifier: tokenService,
+        resolveAuthContext: async () => authContext({ membership: { officeId } }),
+        requireActiveSession: sessionAuth.requireActiveSession,
+      } });
+      const { authorization } = await sessionAuth.issueBearer(userA);
+      const path = kind === 'schedule'
+        ? `/api/content-studio/schedules/${parentId}/assets`
+        : `/api/content-studio/clients/${parentId}/media`;
+      const result = await app.request(path + (encoding === 'binary' ? '/binary?filename=test.png' : ''), {
+        method: 'POST',
+        headers: encoding === 'binary'
+          ? { authorization, 'content-type': 'image/png', 'content-length': String(body.length) }
+          : { authorization, 'content-type': 'application/json' },
+        body: encoding === 'binary' ? new Uint8Array(body)
+          : JSON.stringify({ filename: 'test.png', contentType: 'image/png', contentBase64: body.toString('base64') }),
+      });
+      assert.equal(result.status, 500);
+      assert(failedKey, 'metadata persistence was attempted');
+      assert.equal(await files.getObject(CONTENT_REVIEW_ASSETS_BUCKET, failedKey), null);
+    });
+  }
+}
+
+test('issued playback grants support seeking after the former one-minute expiry', async (t) => {
+  const { app } = await fixture();
+  const { authorization } = await sessionAuth.issueBearer(userA);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  const response = await app.request('/api/content-studio/media/capability', {
+    method: 'POST', headers: { authorization, 'content-type': 'application/json' },
+    body: JSON.stringify({ objectKey }),
+  });
+  const { url, expiresIn } = await response.json() as { url: string; expiresIn: number };
+  assert.equal(expiresIn, 3600);
+  t.mock.timers.tick(61_000);
+  const seek = await app.request(url, { headers: { range: 'bytes=-4' } });
+  assert.equal(seek.status, 206);
+  assert.equal(await seek.text(), 'edia');
+  t.mock.timers.tick(3_600_000);
+  assert.equal((await app.request(url)).status, 403);
+});

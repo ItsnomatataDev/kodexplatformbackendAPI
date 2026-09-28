@@ -24,7 +24,7 @@ export function parseDisplaySlot(body: string | null | undefined) {
   const match = body.match(/\[(?:post|slot)\s*[#:-]?\s*(\d+)\]/i);
   if (!match?.[1]) return null;
   const slot = Number(match[1]);
-  return Number.isInteger(slot) ? slot : null;
+  return Number.isInteger(slot) && slot > 0 ? slot - 1 : null;
 }
 
 export function activeSlots(assets: ContentScheduleAssetRecord[]) {
@@ -58,11 +58,15 @@ export function portalFeedbackState(params: {
     ) {
       continue;
     }
-    const slot = comment.displaySlot ?? parseDisplaySlot(comment.body);
-    if (slot == null) continue;
-    const existing = latestBySlot.get(slot);
-    if (!existing || comment.createdAt > existing.createdAt) {
-      latestBySlot.set(slot, comment);
+    const slot = comment.source === 'client_portal'
+      ? parseDisplaySlot(comment.body) ?? comment.displaySlot
+      : comment.displaySlot ?? parseDisplaySlot(comment.body);
+    // Schedule-wide decisions also reset per-post approval after revocation.
+    for (const affectedSlot of slot == null ? slots : [slot]) {
+      const existing = latestBySlot.get(affectedSlot);
+      if (!existing || comment.createdAt >= existing.createdAt) {
+        latestBySlot.set(affectedSlot, comment);
+      }
     }
   }
 
@@ -87,4 +91,11 @@ export function portalFeedbackState(params: {
     approved_count: approvedCount,
     all_posts_approved: expectedPosts > 0 && approvedCount >= expectedPosts,
   };
+}
+
+/** Internal decisions aggregate across staff reviewers, independently of client decisions. */
+export function internalFeedbackState(assets: ContentScheduleAssetRecord[], comments: ContentCommentRecord[]) {
+  return portalFeedbackState({ assets, clientEmail: '', comments: comments
+    .filter((comment) => comment.authorType === 'internal')
+    .map((comment) => ({ ...comment, authorType: 'client', authorEmail: '' })) });
 }

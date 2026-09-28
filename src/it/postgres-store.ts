@@ -3,9 +3,12 @@ import { db } from '../db/pool.js';
 import { NotFoundError, ValidationError } from '../http/errors.js';
 import {
   buildStorageSnapshot,
+  classifyProbe,
   probeLivekit,
+  probeObjectStorage,
   readHostDiskUsage,
   readHostRamUsage,
+  runtimeDiagnostics,
 } from './host-metrics.js';
 
 function iso(v: unknown) {
@@ -21,21 +24,19 @@ function dateOnly(v: unknown) {
 
 async function readContentStudioBytes(organizationId: string): Promise<number> {
   const result = await db.query<{ bytes: string | number }>(
-    `SELECT (
-        COALESCE((
-          SELECT SUM(COALESCE(m.stored_size_bytes, m.original_size_bytes, 0))
-          FROM content.client_media m
-          INNER JOIN content.clients c ON c.id = m.client_id
-          WHERE c.organization_id = $1
-        ), 0)
-        +
-        COALESCE((
-          SELECT SUM(COALESCE(a.stored_size_bytes, a.original_size_bytes, 0))
-          FROM content.schedule_assets a
-          INNER JOIN content.schedules s ON s.id = a.schedule_id
-          WHERE s.organization_id = $1
-        ), 0)
-      )::bigint AS bytes`,
+    `SELECT COALESCE(SUM(bytes), 0)::bigint AS bytes FROM (
+       SELECT bucket, object_key, MAX(bytes) AS bytes FROM (
+         SELECT m.bucket, COALESCE(NULLIF(m.storage_path, ''), m.file_url) AS object_key,
+                COALESCE(m.stored_size_bytes, m.original_size_bytes, 0) AS bytes
+         FROM content.client_media m JOIN content.clients c ON c.id = m.client_id
+         WHERE c.organization_id = $1
+         UNION ALL
+         SELECT a.bucket, COALESCE(NULLIF(a.storage_path, ''), a.file_url) AS object_key,
+                COALESCE(a.stored_size_bytes, a.original_size_bytes, 0) AS bytes
+         FROM content.schedule_assets a JOIN content.schedules s ON s.id = a.schedule_id
+         WHERE s.organization_id = $1
+       ) refs GROUP BY bucket, object_key
+     ) objects`,
     [organizationId],
   );
   return Number(result.rows[0]?.bytes ?? 0);
@@ -49,25 +50,52 @@ async function readDatabaseBytes(): Promise<number> {
 }
 
 export class PostgresItStore {
+  private readonly healthSamples = new Map<string, { expiresAt: number; result: ReturnType<PostgresItStore['collectHealth']> }>();
+
   async healthCheck(organizationId: string) {
+    const cached = this.healthSamples.get(organizationId);
+    if (cached && cached.expiresAt > Date.now()) return cached.result;
+    // Coalesce dashboard polling and bound memory across organizations.
+    for (const [key, sample] of this.healthSamples) {
+      if (sample.expiresAt <= Date.now()) this.healthSamples.delete(key);
+    }
+    if (this.healthSamples.size >= 100) this.healthSamples.delete(this.healthSamples.keys().next().value!);
+    const result = this.collectHealth(organizationId).catch((error) => {
+      this.healthSamples.delete(organizationId);
+      throw error;
+    });
+    this.healthSamples.set(organizationId, { expiresAt: Date.now() + 30_000, result });
+    return result;
+  }
+
+  private async collectHealth(organizationId: string) {
     const start = Date.now();
-    const [result, databaseBytes, storageBytes, disk, livekit] =
+    const [databaseProbe, databaseBytes, storageBytes, disk, livekit, objectStorage] =
       await Promise.all([
-        db.query(
-          `SELECT 1 AS ok,
-              (SELECT count(*)::int FROM it.projects WHERE organization_id = $1) AS projects,
-              (SELECT count(*)::int FROM it.issues WHERE organization_id = $1 AND status IN ('open','in_progress')) AS open_issues,
-              (SELECT count(*)::int FROM it.incidents WHERE organization_id = $1 AND status <> 'resolved') AS open_incidents,
-              (SELECT count(*)::int FROM it.system_alerts WHERE organization_id = $1 AND status = 'open') AS open_alerts,
-              (SELECT count(*)::int FROM it.account_access_requests
-                WHERE status = 'pending'
-                  AND (organization_id = $1 OR organization_id IS NULL)) AS pending_access_requests`,
-          [organizationId],
-        ),
-        readDatabaseBytes().catch(() => 0),
-        readContentStudioBytes(organizationId).catch(() => 0),
+        (async () => {
+          const queryStarted = Date.now();
+          try {
+            const result = await db.query(
+              `SELECT 1 AS ok,
+                  (SELECT count(*)::int FROM it.projects WHERE organization_id = $1) AS projects,
+                  (SELECT count(*)::int FROM it.issues WHERE organization_id = $1 AND status IN ('open','in_progress')) AS open_issues,
+                  (SELECT count(*)::int FROM it.incidents WHERE organization_id = $1 AND status <> 'resolved') AS open_incidents,
+                  (SELECT count(*)::int FROM it.system_alerts WHERE organization_id = $1 AND status = 'open') AS open_alerts,
+                  (SELECT count(*)::int FROM it.account_access_requests
+                    WHERE status = 'pending'
+                      AND (organization_id = $1 OR organization_id IS NULL)) AS pending_access_requests`,
+              [organizationId],
+            );
+            return { ok: true as const, result, latencyMs: Date.now() - queryStarted };
+          } catch {
+            return { ok: false as const, result: null, latencyMs: Date.now() - queryStarted };
+          }
+        })(),
+        readDatabaseBytes().catch(() => null),
+        readContentStudioBytes(organizationId).catch(() => null),
         readHostDiskUsage(),
         probeLivekit(),
+        probeObjectStorage(),
       ]);
     const ram = readHostRamUsage();
     const storage = buildStorageSnapshot({
@@ -76,20 +104,54 @@ export class PostgresItStore {
       disk,
       ram,
     });
-    const row = result.rows[0] ?? {};
+    const row = databaseProbe.result?.rows[0] ?? {};
     const warnings: string[] = [];
+    if (!databaseProbe.ok) warnings.push('Database query failed.');
+    if (databaseBytes == null) warnings.push('Database size measurement unavailable.');
+    if (storageBytes == null) warnings.push('Content media size estimate unavailable.');
+    if (disk.source === 'unavailable') warnings.push('Disk usage measurement unavailable.');
+    if (disk.source === 'env') warnings.push('Disk usage is a configured estimate, not a live measurement.');
     if (
       storage.diskPercent != null &&
       storage.diskPercent >= 85
     ) {
       warnings.push('Disk capacity is above 85%.');
     }
+    if (objectStorage.status === 'down') {
+      warnings.push('Object storage did not respond.');
+    }
     if (livekit.status === 'down') {
       warnings.push('LiveKit media server did not respond.');
     }
 
+    const apiLatencyMs = databaseProbe.latencyMs;
+    const services = {
+      database: {
+        status: classifyProbe(databaseProbe.ok, databaseProbe.latencyMs),
+        latencyMs: databaseProbe.latencyMs,
+      },
+      api: {
+        status: classifyProbe(true, apiLatencyMs),
+        latencyMs: apiLatencyMs,
+      },
+      auth: {
+        status: 'healthy' as const,
+        latencyMs: null as number | null,
+      },
+      storage: {
+        status: objectStorage.status,
+        latencyMs: objectStorage.latencyMs,
+        httpStatus: objectStorage.httpStatus,
+      },
+      livekit: {
+        status: livekit.status,
+        latencyMs: livekit.latencyMs,
+        httpStatus: livekit.httpStatus,
+      },
+    };
+
     return {
-      ok: warnings.length === 0,
+      ok: databaseProbe.ok,
       checkedAt: new Date().toISOString(),
       organizationId,
       latencyMs: Date.now() - start,
@@ -101,14 +163,23 @@ export class PostgresItStore {
         pending_access_requests: row.pending_access_requests ?? 0,
       },
       tableChecks: [
-        { table: 'it.projects', ok: true, error: null },
-        { table: 'it.issues', ok: true, error: null },
-        { table: 'it.system_monitors', ok: true, error: null },
-        { table: 'it.system_alerts', ok: true, error: null },
-        { table: 'it.system_events', ok: true, error: null },
+        { table: 'it.projects', ok: databaseProbe.ok, error: databaseProbe.ok ? null : 'query failed' },
+        { table: 'it.issues', ok: databaseProbe.ok, error: databaseProbe.ok ? null : 'query failed' },
+        { table: 'it.system_alerts', ok: databaseProbe.ok, error: databaseProbe.ok ? null : 'query failed' },
       ],
       warnings,
+      services,
       storage,
+      diagnostics: {
+        ...runtimeDiagnostics(), ramSource: ram.source,
+        databasePool: { total: db.totalCount, idle: db.idleCount, waiting: db.waitingCount },
+        storageSource: 'deduplicated-content-metadata',
+        storageScope: 'organization-content-only',
+        databaseScope: 'entire-database',
+        diskScope: 'api-visible-filesystem',
+        diskBreakdownAvailable: false,
+        historyAvailable: false,
+      },
       disk: {
         usedBytes: disk.usedBytes,
         totalBytes: disk.totalBytes,
@@ -117,9 +188,10 @@ export class PostgresItStore {
       livekit,
       environment: {
         kode: true,
-        database: 'ok',
+        database: databaseProbe.ok ? 'ok' : 'error',
         livekitUrl: livekit.url,
         diskSource: disk.source,
+        objectStorage: objectStorage.status,
       },
     };
   }

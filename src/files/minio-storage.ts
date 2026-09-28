@@ -233,6 +233,12 @@ export class MinioFileStorage implements FileStorage {
     }
   }
 
+  /** Read-only bucket probe. Does not create buckets. */
+  async headBucket(bucket: string): Promise<number> {
+    const response = await this.request('HEAD', bucket, '');
+    return response.status;
+  }
+
   async ensureBucket(bucket: string) {
     if (this.ensuredBuckets.has(bucket)) return;
 

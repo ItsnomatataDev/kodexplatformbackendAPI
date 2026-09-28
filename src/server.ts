@@ -3,6 +3,7 @@ import { WebSocketServer } from 'ws';
 import { createApp } from './app.js';
 import { env } from './config/env.js';
 import { logger } from './config/logger.js';
+import { closeMediaCapabilities } from './content/redis-capability.js';
 import { db } from './db/pool.js';
 import { closeAllRedisRateLimiters } from './auth/rate-limit-redis.js';
 import { getChatRealtimeHub } from './chat/hub.js';
@@ -67,6 +68,7 @@ async function shutdown(signal: string) {
     await getChatRealtimeHub().stop();
     await closeHttpServer();
     await closeAllRedisRateLimiters();
+    await closeMediaCapabilities();
     await db.end();
     process.exit(0);
   } catch (error) {

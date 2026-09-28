@@ -1,3 +1,4 @@
+import { internalFeedbackState } from '../content/portal.js';
 import { Hono } from 'hono';
 import { NotFoundError, ValidationError } from '../http/errors.js';
 import type { FileStorage } from '../files/storage.js';
@@ -155,8 +156,8 @@ export function createContentPreviewRoutes(
       files: dependencies.files,
       bucket: CONTENT_REVIEW_ASSETS_BUCKET,
       objectKey,
-      rangeHeader: c.req.header('range'),
-      cacheControl: 'private, max-age=300',
+      rangeHeader: c.req.header("range"),
+      cacheControl: "private, no-store",
     });
   });
 
@@ -185,7 +186,7 @@ export function createContentPreviewRoutes(
       draft: serializeSchedule(schedule),
       assets: assets.map(serializeAsset),
       comments: comments.map(serializeComment),
-      feedback: {},
+      feedback: internalFeedbackState(assets, comments),
     });
   });
 

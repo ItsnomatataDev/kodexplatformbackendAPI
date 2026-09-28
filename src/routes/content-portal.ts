@@ -327,156 +327,149 @@ export function createContentPortalRoutes(
       return c.json({ ok: false, error: 'unauthorized' });
     }
 
-    const schedule = await dependencies.store.getScheduleForClient(
-      auth.client.id,
-      scheduleId,
-    );
-    if (!schedule) return c.json({ ok: false, error: 'not_found' });
-    if (
-      schedule.status === 'draft' ||
-      schedule.status === 'archived' ||
-      schedule.status === 'ready_for_review'
-    ) {
-      return c.json({ ok: false, error: 'not_available' });
-    }
-    if (!portalCanReview(schedule)) {
-      return c.json({ ok: false, error: 'not_released' });
-    }
-    if (schedule.status === 'published') {
-      return c.json({ ok: false, error: 'read_only' });
-    }
-
-    const [assets, comments] = await Promise.all([
-      dependencies.store.listAssetsForSchedules(auth.client.organizationId, [
+    const client = auth.client;
+    return dependencies.store.withReviewTransaction(client.organizationId, scheduleId, async (store) => {
+      const schedule = await store.getScheduleForClient(
+        client.id,
         scheduleId,
-      ]),
-      dependencies.store.listComments(auth.client.organizationId, [scheduleId]),
-    ]);
-    const selectedAssets = assets.filter((asset) => asset.isSelected !== false);
-    const parsedSlot = parseDisplaySlot(feedbackBody);
+      );
+      if (!schedule) return c.json({ ok: false, error: 'not_found' });
+      if (
+        schedule.status === 'draft' ||
+        schedule.status === 'archived' ||
+        schedule.status === 'ready_for_review'
+      ) {
+        return c.json({ ok: false, error: 'not_available' });
+      }
+      if (!portalCanReview(schedule)) {
+        return c.json({ ok: false, error: 'not_released' });
+      }
+      if (schedule.status === 'published') {
+        return c.json({ ok: false, error: 'read_only' });
+      }
 
-    let nextStatus = schedule.status;
-    let activity = 'client_commented';
-    let commentType = 'client_comment';
+      const [assets, comments] = await Promise.all([
+        store.listAssetsForSchedules(client.organizationId, [
+          scheduleId,
+        ]),
+        store.listComments(client.organizationId, [scheduleId]),
+      ]);
+      const selectedAssets = assets.filter((asset) => asset.isSelected !== false);
+      const parsedSlot = parseDisplaySlot(feedbackBody);
+      const currentFeedback = portalFeedbackState({ assets: selectedAssets, comments, clientEmail: client.email });
+      if (parsedSlot != null && !selectedAssets.some((asset) => (asset.displaySlot ?? asset.sortOrder) === parsedSlot)) {
+        return c.json({ ok: false, error: 'invalid_slot' });
+      }
 
-    if (decision === 'approved') {
-      if (parsedSlot != null) {
-        const already = comments.some(
-          (comment) =>
-            comment.authorType === 'client' &&
-            comment.commentType === 'approval_note' &&
-            (comment.displaySlot ?? parseDisplaySlot(comment.body)) === parsedSlot,
-        );
-        if (already) {
-          return c.json({ ok: false, error: 'already_approved' });
+      let nextStatus = schedule.status;
+      let activity = 'client_commented';
+      let commentType = 'client_comment';
+
+      if (decision === 'approved') {
+        if (parsedSlot != null) {
+          const already = currentFeedback.approved_slots.includes(parsedSlot);
+          if (already) {
+            return c.json({ ok: false, error: 'already_approved' });
+          }
+        }
+        activity = 'client_approved';
+        commentType = 'approval_note';
+      } else if (decision === 'changes_requested') {
+        nextStatus = 'changes_requested';
+        activity = 'client_requested_changes';
+        commentType = 'change_request';
+      } else if (decision === 'revoke_approval') {
+        if (schedule.status !== 'approved') {
+          return c.json({ ok: false, error: 'not_approved' });
+        }
+        nextStatus = schedule.lastViewedAt ? 'viewed' : 'sent_to_client';
+        activity = 'client_revoked_approval';
+        commentType = 'change_request';
+      } else if (decision !== 'comment') {
+        return c.json({ ok: false, error: 'invalid_decision' });
+      }
+
+      const insertedComment = await store.addComment({
+        scheduleId,
+        organizationId: client.organizationId,
+        officeId: client.officeId,
+        authorName: client.contactName || client.companyName,
+        authorEmail: client.email,
+        body: feedbackBody,
+        createdBy: null,
+        displaySlot: parsedSlot,
+        source: 'client_portal',
+        visibility: 'client_visible',
+        authorType: 'client',
+        commentType,
+      });
+
+      const patch: {
+        status?: typeof nextStatus;
+        changesRequestedAt?: Date | null;
+        approvedAt?: Date | null;
+        approvedByName?: string | null;
+        approvedByEmail?: string | null;
+      } = {};
+
+      if (decision === 'changes_requested') {
+        patch.status = 'changes_requested';
+        patch.changesRequestedAt = new Date();
+        patch.approvedAt = null;
+        patch.approvedByName = null;
+        patch.approvedByEmail = null;
+      } else if (decision === 'revoke_approval') {
+        patch.status = nextStatus;
+        patch.approvedAt = null;
+        patch.approvedByName = null;
+        patch.approvedByEmail = null;
+      } else if (decision === 'approved') {
+        const nextComments = [...comments, insertedComment];
+        const feedback = portalFeedbackState({
+          assets: selectedAssets,
+          comments: nextComments,
+          clientEmail: client.email,
+        });
+        if (feedback.all_posts_approved) {
+          patch.status = 'approved';
+          patch.changesRequestedAt = null;
+          patch.approvedAt = new Date();
+          patch.approvedByName = client.contactName || client.companyName;
+          patch.approvedByEmail = client.email;
         }
       }
-      activity = 'client_approved';
-      commentType = 'approval_note';
-    } else if (decision === 'changes_requested') {
-      nextStatus = 'changes_requested';
-      activity = 'client_requested_changes';
-      commentType = 'change_request';
-    } else if (decision === 'revoke_approval') {
-      if (schedule.status !== 'approved') {
-        return c.json({ ok: false, error: 'not_approved' });
+
+      if (Object.keys(patch).length > 0) {
+        await store.updateSchedule(
+          client.organizationId,
+          scheduleId,
+          patch,
+        );
       }
-      nextStatus = schedule.lastViewedAt ? 'viewed' : 'sent_to_client';
-      activity = 'client_revoked_approval';
-      commentType = 'change_request';
-    } else if (decision !== 'comment') {
-      return c.json({ ok: false, error: 'invalid_decision' });
-    }
 
-    await dependencies.store.addComment({
-      scheduleId,
-      organizationId: auth.client.organizationId,
-      officeId: auth.client.officeId,
-      authorName: auth.client.contactName || auth.client.companyName,
-      authorEmail: auth.client.email,
-      body: feedbackBody,
-      createdBy: null,
-      displaySlot: parsedSlot,
-      source: 'client_portal',
-      visibility: 'client_visible',
-      authorType: 'client',
-      commentType,
-    });
-
-    const patch: {
-      status?: typeof nextStatus;
-      changesRequestedAt?: Date | null;
-      approvedAt?: Date | null;
-      approvedByName?: string | null;
-      approvedByEmail?: string | null;
-    } = {};
-
-    if (decision === 'changes_requested') {
-      patch.status = 'changes_requested';
-      patch.changesRequestedAt = new Date();
-      patch.approvedAt = null;
-      patch.approvedByName = null;
-      patch.approvedByEmail = null;
-    } else if (decision === 'revoke_approval') {
-      patch.status = nextStatus;
-      patch.approvedAt = null;
-      patch.approvedByName = null;
-      patch.approvedByEmail = null;
-    } else if (decision === 'approved') {
-      const nextComments = [
-        ...comments,
-        {
-          authorType: 'client',
-          commentType: 'approval_note',
-          displaySlot: parsedSlot,
-          body: feedbackBody,
-          authorEmail: auth.client.email,
-          createdAt: new Date(),
-        } as (typeof comments)[number],
-      ];
-      const feedback = portalFeedbackState({
-        assets: selectedAssets,
-        comments: nextComments,
-        clientEmail: auth.client.email,
-      });
-      if (feedback.all_posts_approved) {
-        patch.status = 'approved';
-        patch.approvedAt = new Date();
-        patch.approvedByName = auth.client.contactName || auth.client.companyName;
-        patch.approvedByEmail = auth.client.email;
-      }
-    }
-
-    if (Object.keys(patch).length > 0) {
-      await dependencies.store.updateSchedule(
-        auth.client.organizationId,
+      await store.recordActivity({
         scheduleId,
-        patch,
-      );
-    }
+        organizationId: client.organizationId,
+        officeId: client.officeId,
+        actorUserId: null,
+        activityType: activity,
+        metadata: { decision, displaySlot: parsedSlot },
+      });
 
-    await dependencies.store.recordActivity({
-      scheduleId,
-      organizationId: auth.client.organizationId,
-      officeId: auth.client.officeId,
-      actorUserId: null,
-      activityType: activity,
-      metadata: { decision, displaySlot: parsedSlot },
-    });
+      const [updatedSchedule, updatedComments] = await Promise.all([
+        store.getScheduleForClient(client.id, scheduleId),
+        store.listComments(client.organizationId, [scheduleId]),
+      ]);
 
-    const [updatedSchedule, updatedComments] = await Promise.all([
-      dependencies.store.getScheduleForClient(auth.client.id, scheduleId),
-      dependencies.store.listComments(auth.client.organizationId, [scheduleId]),
-    ]);
-
-    return c.json({
-      ok: true,
-      status: updatedSchedule?.status ?? nextStatus,
-      feedback: portalFeedbackState({
-        assets: selectedAssets,
-        comments: updatedComments,
-        clientEmail: auth.client.email,
-      }),
+      return c.json({
+        ok: true,
+        status: updatedSchedule?.status ?? nextStatus,
+        feedback: portalFeedbackState({
+          assets: selectedAssets,
+          comments: updatedComments,
+          clientEmail: client.email,
+        }),
+      });
     });
   });
 

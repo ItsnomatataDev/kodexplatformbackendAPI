@@ -273,6 +273,7 @@ export type UpdateScheduleAssetInput = Partial<{
 }>;
 
 export type ContentStore = {
+  withReviewTransaction<T>(organizationId: string, scheduleId: string, work: (store: ContentStore) => Promise<T>): Promise<T>;
   listClients(organizationId: string, officeId: string): Promise<ContentClientRecord[]>;
   getClient(
     organizationId: string,
@@ -338,6 +339,7 @@ export type ContentStore = {
     organizationId: string,
     assetId: string,
   ): Promise<ContentScheduleAssetRecord | null>;
+  createUploadedAsset(input: CreateScheduleAssetInput, clientId: string | null): Promise<ContentScheduleAssetRecord>;
   createAsset(input: CreateScheduleAssetInput): Promise<ContentScheduleAssetRecord>;
   updateAsset(
     organizationId: string,

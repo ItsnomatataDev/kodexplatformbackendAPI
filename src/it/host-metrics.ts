@@ -1,8 +1,10 @@
+import { readFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { hostname } from 'node:os';
 import { promisify } from 'node:util';
 import os from 'node:os';
 import { env } from '../config/env.js';
+import { MinioFileStorage } from '../files/minio-storage.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -17,12 +19,13 @@ export type HostRamUsage = {
   totalBytes: number;
   availableBytes: number;
   percent: number;
+  source?: string;
 };
 
 export type PlatformStorageSnapshot = {
-  databaseBytes: number;
-  storageBytes: number;
-  appUsedBytes: number;
+  databaseBytes: number | null;
+  storageBytes: number | null;
+  appUsedBytes: number | null;
   diskUsedBytes: number | null;
   diskTotalBytes: number | null;
   diskPercent: number | null;
@@ -34,12 +37,12 @@ export type PlatformStorageSnapshot = {
   ramAvailableBytes: number | null;
   ramPercent: number | null;
   diskBreakdown: {
-    backupsBytes: number;
-    dockerBytes: number;
-    containerdBytes: number;
-    logsBytes: number;
-    osBytes: number;
-    otherBytes: number;
+    backupsBytes: number | null;
+    dockerBytes: number | null;
+    containerdBytes: number | null;
+    logsBytes: number | null;
+    osBytes: number | null;
+    otherBytes: number | null;
   };
   history: Array<{
     checkedAt: string;
@@ -50,12 +53,27 @@ export type PlatformStorageSnapshot = {
   }>;
 };
 
+export type ProbeStatus = 'healthy' | 'degraded' | 'down';
+
 export type LivekitProbe = {
   url: string;
-  status: 'healthy' | 'degraded' | 'down';
+  status: ProbeStatus;
   latencyMs: number | null;
   httpStatus: number | null;
 };
+
+export type ObjectStorageProbe = {
+  endpoint: string;
+  status: ProbeStatus;
+  latencyMs: number | null;
+  httpStatus: number | null;
+};
+
+export function classifyProbe(ok: boolean, latencyMs: number | null, degradedAt = 800): ProbeStatus {
+  if (!ok) return 'down';
+  if (typeof latencyMs === 'number' && latencyMs >= degradedAt) return 'degraded';
+  return 'healthy';
+}
 
 function envBytes(name: string): number | null {
   const raw = process.env[name];
@@ -69,22 +87,48 @@ function percent(used: number | null, total: number | null): number | null {
   return Math.round((used / total) * 1000) / 10;
 }
 
+export function parseLinuxMemory(text: string): HostRamUsage | null {
+  const values = new Map([...text.matchAll(/^(MemTotal|MemAvailable):\s+(\d+)\s+kB$/gm)].map((m) => [m[1], Number(m[2]) * 1024]));
+  const totalBytes = values.get('MemTotal');
+  const availableBytes = values.get('MemAvailable');
+  if (!totalBytes || availableBytes == null || availableBytes > totalBytes) return null;
+  const usedBytes = totalBytes - availableBytes;
+  return { totalBytes, availableBytes, usedBytes, percent: percent(usedBytes, totalBytes) ?? 0, source: 'linux-memavailable' };
+}
+
 export function readHostRamUsage(): HostRamUsage {
+  if (process.platform === 'linux') {
+    try {
+      const linux = parseLinuxMemory(readFileSync('/proc/meminfo', 'utf8'));
+      if (linux) return linux;
+    } catch { /* Non-Linux or restricted proc mount. */ }
+  }
   const totalBytes = os.totalmem();
   const availableBytes = os.freemem();
   const usedBytes = Math.max(0, totalBytes - availableBytes);
+  return { usedBytes, totalBytes, availableBytes, percent: percent(usedBytes, totalBytes) ?? 0, source: 'os-free-memory' };
+}
+
+export function runtimeDiagnostics() {
+  const memory = process.memoryUsage();
+  const readCgroup = (path: string) => {
+    try { const value = Number(readFileSync(path, 'utf8').trim()); return Number.isFinite(value) ? value : null; }
+    catch { return null; }
+  };
   return {
-    usedBytes,
-    totalBytes,
-    availableBytes,
-    percent: percent(usedBytes, totalBytes) ?? 0,
+    processRssBytes: memory.rss, processHeapUsedBytes: memory.heapUsed,
+    processExternalBytes: memory.external, processUptimeSeconds: Math.round(process.uptime()),
+    loadAverage: os.loadavg(), logicalCpuCount: os.cpus().length,
+    containerMemoryUsedBytes: readCgroup('/sys/fs/cgroup/memory.current'),
+    containerMemoryLimitBytes: readCgroup('/sys/fs/cgroup/memory.max'),
+    diskPath: process.env.HOST_DISK_PATH || '/',
   };
 }
 
 async function readDiskFromDf(): Promise<HostDiskUsage | null> {
   try {
     // `-k -P` works on both Linux and macOS (1K-blocks, POSIX output).
-    const { stdout } = await execFileAsync('df', ['-k', '-P', '/'], {
+    const { stdout } = await execFileAsync('df', ['-k', '-P', process.env.HOST_DISK_PATH || '/'], {
       timeout: 2500,
       maxBuffer: 64 * 1024,
     });
@@ -118,6 +162,34 @@ export async function readHostDiskUsage(): Promise<HostDiskUsage> {
   }
 
   return { usedBytes: null, totalBytes: null, source: 'unavailable' };
+}
+
+export async function probeObjectStorage(): Promise<ObjectStorageProbe> {
+  const endpoint = env.minio.endpoint;
+  const start = Date.now();
+  if (!env.minio.accessKey || !env.minio.secretKey) {
+    return { endpoint, status: 'down', latencyMs: 0, httpStatus: null };
+  }
+
+  try {
+    const storage = new MinioFileStorage();
+    const httpStatus = await storage.headBucket(env.minio.bucket);
+    const latencyMs = Date.now() - start;
+    const reachable = httpStatus != null && httpStatus < 500;
+    return {
+      endpoint,
+      status: classifyProbe(reachable, latencyMs),
+      latencyMs,
+      httpStatus,
+    };
+  } catch {
+    return {
+      endpoint,
+      status: 'down',
+      latencyMs: Date.now() - start,
+      httpStatus: null,
+    };
+  }
 }
 
 export async function probeLivekit(): Promise<LivekitProbe> {
@@ -154,18 +226,16 @@ export async function probeLivekit(): Promise<LivekitProbe> {
 }
 
 export function buildStorageSnapshot(input: {
-  databaseBytes: number;
-  storageBytes: number;
+  databaseBytes: number | null;
+  storageBytes: number | null;
   disk: HostDiskUsage;
   ram: HostRamUsage;
 }): PlatformStorageSnapshot {
   const checkedAt = new Date().toISOString();
   const diskUsed = input.disk.usedBytes;
   const diskTotal = input.disk.totalBytes;
-  const appUsedBytes = input.databaseBytes + input.storageBytes;
-  const known = appUsedBytes;
-  const otherBytes =
-    diskUsed != null && diskUsed > known ? Math.max(0, diskUsed - known) : 0;
+  const appUsedBytes = input.databaseBytes != null && input.storageBytes != null
+    ? input.databaseBytes + input.storageBytes : null;
 
   return {
     databaseBytes: input.databaseBytes,
@@ -182,23 +252,14 @@ export function buildStorageSnapshot(input: {
     ramAvailableBytes: input.ram.availableBytes,
     ramPercent: input.ram.percent,
     diskBreakdown: {
-      backupsBytes: 0,
-      dockerBytes: 0,
-      containerdBytes: 0,
-      logsBytes: 0,
-      osBytes: 0,
-      otherBytes,
+      backupsBytes: null,
+      dockerBytes: null,
+      containerdBytes: null,
+      logsBytes: null,
+      osBytes: null,
+      otherBytes: null,
     },
-    history: diskUsed != null && diskTotal != null
-      ? [
-          {
-            checkedAt,
-            diskUsedBytes: diskUsed,
-            diskTotalBytes: diskTotal,
-            ramUsedBytes: input.ram.usedBytes,
-            ramTotalBytes: input.ram.totalBytes,
-          },
-        ]
-      : [],
+    // No persisted host samples are collected by this API.
+    history: [],
   };
 }

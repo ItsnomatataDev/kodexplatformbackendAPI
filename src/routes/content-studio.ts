@@ -1,3 +1,4 @@
+import { submitInternalReview } from '../content/internal-review.js';
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { getAuth } from '../auth/middleware.js';
@@ -38,7 +39,10 @@ import {
   contentClientObjectKey,
   contentScheduleObjectKey,
 } from '../content/buckets.js';
+import { logger } from '../config/logger.js';
+import { persistMediaUpload } from '../content/upload.js';
 import { streamStoredMedia } from '../content/media-stream.js';
+import { sharedMediaCapabilityStore } from '../content/redis-capability.js';
 import { mediaCapabilityStore } from '../content/media-capability.js';
 import {
   contentReviewLinkExpiresAt,
@@ -398,6 +402,7 @@ export function createContentStudioRoutes(
   dependencies: ContentStudioRouteDependencies,
 ) {
   const routes = new Hono();
+  const capabilities = env.appEnv === 'development' ? mediaCapabilityStore : sharedMediaCapabilityStore();
 
   routes.get('/clients', async (c) => {
     const auth = getAuth(c);
@@ -759,7 +764,7 @@ export function createContentStudioRoutes(
       if (assetRefs === 0 && libraryRefs === 0) {
         await dependencies.files
           .deleteObject(asset.bucket, asset.storagePath)
-          .catch(() => undefined);
+          .catch((err) => logger.error({ err, organizationId }, 'Content media deletion requires reconciliation'));
       }
     }
 
@@ -821,7 +826,8 @@ export function createContentStudioRoutes(
       300,
     );
 
-    if (!c.req.raw.body) {
+    const uploadBody = c.req.raw.body;
+    if (!uploadBody) {
       throw new ValidationError('Request body is required.', { field: 'body' });
     }
 
@@ -834,89 +840,69 @@ export function createContentStudioRoutes(
       filename,
     });
 
-    const put =
-      dependencies.files.putObjectStream?.bind(dependencies.files) ??
-      (async (input: {
-        bucket: string;
-        objectKey: string;
-        body: ReadableStream<Uint8Array> | Buffer;
-        contentType?: string | null;
-        contentLength: number;
-      }) => {
-        const chunks: Uint8Array[] = [];
-        if (Buffer.isBuffer(input.body)) {
-          chunks.push(input.body);
-        } else {
-          const reader = input.body.getReader();
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
+    return persistMediaUpload({ organizationId, objectKey, files: dependencies.files, store: dependencies.store }, async () => {
+
+      const put =
+        dependencies.files.putObjectStream?.bind(dependencies.files) ??
+        (async (input: {
+          bucket: string;
+          objectKey: string;
+          body: ReadableStream<Uint8Array> | Buffer;
+          contentType?: string | null;
+          contentLength: number;
+        }) => {
+          const chunks: Uint8Array[] = [];
+          if (Buffer.isBuffer(input.body)) {
+            chunks.push(input.body);
+          } else {
+            const reader = input.body.getReader();
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(value);
+            }
           }
-        }
-        await dependencies.files.putObject({
-          bucket: input.bucket,
-          objectKey: input.objectKey,
-          body: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))),
-          contentType: input.contentType,
+          await dependencies.files.putObject({
+            bucket: input.bucket,
+            objectKey: input.objectKey,
+            body: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))),
+            contentType: input.contentType,
+          });
         });
+
+      await put({
+        bucket: CONTENT_REVIEW_ASSETS_BUCKET,
+        objectKey,
+        body: uploadBody,
+        contentType,
+        contentLength: sizeBytes,
       });
 
-    await put({
-      bucket: CONTENT_REVIEW_ASSETS_BUCKET,
-      objectKey,
-      body: c.req.raw.body,
-      contentType,
-      contentLength: sizeBytes,
+      const assetType = contentAssetTypeFromMime(contentType);
+      const asset = await dependencies.store.createUploadedAsset({
+        scheduleId,
+        organizationId,
+        officeId: schedule.officeId,
+        uploadedBy: auth.actor.userId,
+        fileName: filename,
+        fileUrl: mediaProxyUrl(objectKey),
+        storagePath: objectKey,
+        bucket: CONTENT_REVIEW_ASSETS_BUCKET,
+        mimeType: contentType,
+        assetType,
+        heading: heading ?? null,
+        caption: caption ?? null,
+        displaySlot,
+        sortOrder: displaySlot,
+        originalSizeBytes: sizeBytes,
+        storedSizeBytes: sizeBytes,
+        compressionStatus: 'stored_original',
+        webPlaybackStatus: null,
+        expiresAt: CONTENT_ASSET_KEEP_UNTIL,
+      }, schedule.clientId);
+
+      return c.json({ asset: serializeAsset(asset) }, 201);
     });
-
-    const assetType = contentAssetTypeFromMime(contentType);
-    const asset = await dependencies.store.createAsset({
-      scheduleId,
-      organizationId,
-      officeId: schedule.officeId,
-      uploadedBy: auth.actor.userId,
-      fileName: filename,
-      fileUrl: mediaProxyUrl(objectKey),
-      storagePath: objectKey,
-      bucket: CONTENT_REVIEW_ASSETS_BUCKET,
-      mimeType: contentType,
-      assetType,
-      heading: heading ?? null,
-      caption: caption ?? null,
-      displaySlot,
-      sortOrder: displaySlot,
-      originalSizeBytes: sizeBytes,
-      storedSizeBytes: sizeBytes,
-      compressionStatus: 'stored_original',
-      webPlaybackStatus: null,
-      expiresAt: CONTENT_ASSET_KEEP_UNTIL,
-    });
-
-    // Library sync must not delay the upload response for large camera videos.
-    if (schedule.clientId) {
-      void dependencies.store
-        .createClientMedia({
-          clientId: schedule.clientId,
-          organizationId,
-          officeId: schedule.officeId,
-          uploadedBy: auth.actor.userId,
-          fileName: filename,
-          fileUrl: mediaProxyUrl(objectKey),
-          storagePath: objectKey,
-          bucket: CONTENT_REVIEW_ASSETS_BUCKET,
-          mimeType: contentType,
-          assetType,
-          originalSizeBytes: sizeBytes,
-          storedSizeBytes: sizeBytes,
-          compressionStatus: 'stored_original',
-          webPlaybackStatus: null,
-          expiresAt: CONTENT_ASSET_KEEP_UNTIL,
-        })
-        .catch(() => undefined);
-    }
-
-    return c.json({ asset: serializeAsset(asset) }, 201);
   });
 
   routes.post('/schedules/:scheduleId/assets', async (c) => {
@@ -957,61 +943,41 @@ export function createContentStudioRoutes(
       fileId,
       filename,
     });
-    await dependencies.files.putObject({
-      bucket: CONTENT_REVIEW_ASSETS_BUCKET,
-      objectKey,
-      body: content,
-      contentType,
+
+    return persistMediaUpload({ organizationId, objectKey, files: dependencies.files, store: dependencies.store }, async () => {
+      await dependencies.files.putObject({
+        bucket: CONTENT_REVIEW_ASSETS_BUCKET,
+        objectKey,
+        body: content,
+        contentType,
+      });
+
+      const assetType = contentAssetTypeFromMime(contentType);
+      const displaySlot = Number(body.displaySlot ?? body.display_slot ?? 0) || 0;
+      const asset = await dependencies.store.createUploadedAsset({
+        scheduleId,
+        organizationId,
+        officeId: schedule.officeId,
+        uploadedBy: auth.actor.userId,
+        fileName: filename,
+        fileUrl: mediaProxyUrl(objectKey),
+        storagePath: objectKey,
+        bucket: CONTENT_REVIEW_ASSETS_BUCKET,
+        mimeType: contentType,
+        assetType,
+        heading: readOptionalString(body.heading, 'heading', 300),
+        caption: readOptionalString(body.caption, 'caption', FIELD_LIMITS.cardDescription),
+        displaySlot,
+        sortOrder: Number(body.sortOrder ?? body.sort_order ?? displaySlot) || displaySlot,
+        originalSizeBytes: content.byteLength,
+        storedSizeBytes: content.byteLength,
+        compressionStatus: 'stored_original',
+        webPlaybackStatus: null,
+        expiresAt: CONTENT_ASSET_KEEP_UNTIL,
+      }, schedule.clientId);
+
+      return c.json({ asset: serializeAsset(asset) }, 201);
     });
-
-    const assetType = contentAssetTypeFromMime(contentType);
-    const displaySlot = Number(body.displaySlot ?? body.display_slot ?? 0) || 0;
-    const asset = await dependencies.store.createAsset({
-      scheduleId,
-      organizationId,
-      officeId: schedule.officeId,
-      uploadedBy: auth.actor.userId,
-      fileName: filename,
-      fileUrl: mediaProxyUrl(objectKey),
-      storagePath: objectKey,
-      bucket: CONTENT_REVIEW_ASSETS_BUCKET,
-      mimeType: contentType,
-      assetType,
-      heading: readOptionalString(body.heading, 'heading', 300),
-      caption: readOptionalString(body.caption, 'caption', FIELD_LIMITS.cardDescription),
-      displaySlot,
-      sortOrder: Number(body.sortOrder ?? body.sort_order ?? displaySlot) || displaySlot,
-      originalSizeBytes: content.byteLength,
-      storedSizeBytes: content.byteLength,
-      compressionStatus: 'stored_original',
-      webPlaybackStatus: null,
-      expiresAt: CONTENT_ASSET_KEEP_UNTIL,
-    });
-
-    // Sync into client library when schedule is client-bound.
-    if (schedule.clientId) {
-      void dependencies.store
-        .createClientMedia({
-          clientId: schedule.clientId,
-          organizationId,
-          officeId: schedule.officeId,
-          uploadedBy: auth.actor.userId,
-          fileName: filename,
-          fileUrl: mediaProxyUrl(objectKey),
-          storagePath: objectKey,
-          bucket: CONTENT_REVIEW_ASSETS_BUCKET,
-          mimeType: contentType,
-          assetType,
-          originalSizeBytes: content.byteLength,
-          storedSizeBytes: content.byteLength,
-          compressionStatus: 'stored_original',
-          webPlaybackStatus: null,
-          expiresAt: CONTENT_ASSET_KEEP_UNTIL,
-        })
-        .catch(() => undefined);
-    }
-
-    return c.json({ asset: serializeAsset(asset) }, 201);
   });
 
   routes.patch('/assets/:assetId', async (c) => {
@@ -1066,7 +1032,7 @@ export function createContentStudioRoutes(
       if (assetRefs === 0 && libraryRefs === 0) {
         await dependencies.files
           .deleteObject(asset.bucket, asset.storagePath)
-          .catch(() => undefined);
+          .catch((err) => logger.error({ err, organizationId }, 'Content media deletion requires reconciliation'));
       }
     }
     return c.json({ ok: true, asset: serializeAsset(asset) });
@@ -1164,7 +1130,8 @@ export function createContentStudioRoutes(
       200,
     );
 
-    if (!c.req.raw.body) {
+    const uploadBody = c.req.raw.body;
+    if (!uploadBody) {
       throw new ValidationError('Request body is required.', { field: 'body' });
     }
 
@@ -1177,63 +1144,66 @@ export function createContentStudioRoutes(
       filename,
     });
 
-    const put =
-      dependencies.files.putObjectStream?.bind(dependencies.files) ??
-      (async (input: {
-        bucket: string;
-        objectKey: string;
-        body: ReadableStream<Uint8Array> | Buffer;
-        contentType?: string | null;
-        contentLength: number;
-      }) => {
-        const chunks: Uint8Array[] = [];
-        if (Buffer.isBuffer(input.body)) {
-          chunks.push(input.body);
-        } else {
-          const reader = input.body.getReader();
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
+    return persistMediaUpload({ organizationId, objectKey, files: dependencies.files, store: dependencies.store }, async () => {
+
+      const put =
+        dependencies.files.putObjectStream?.bind(dependencies.files) ??
+        (async (input: {
+          bucket: string;
+          objectKey: string;
+          body: ReadableStream<Uint8Array> | Buffer;
+          contentType?: string | null;
+          contentLength: number;
+        }) => {
+          const chunks: Uint8Array[] = [];
+          if (Buffer.isBuffer(input.body)) {
+            chunks.push(input.body);
+          } else {
+            const reader = input.body.getReader();
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              chunks.push(value);
+            }
           }
-        }
-        await dependencies.files.putObject({
-          bucket: input.bucket,
-          objectKey: input.objectKey,
-          body: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))),
-          contentType: input.contentType,
+          await dependencies.files.putObject({
+            bucket: input.bucket,
+            objectKey: input.objectKey,
+            body: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))),
+            contentType: input.contentType,
+          });
         });
+
+      await put({
+        bucket: CONTENT_REVIEW_ASSETS_BUCKET,
+        objectKey,
+        body: uploadBody,
+        contentType,
+        contentLength: sizeBytes,
       });
 
-    await put({
-      bucket: CONTENT_REVIEW_ASSETS_BUCKET,
-      objectKey,
-      body: c.req.raw.body,
-      contentType,
-      contentLength: sizeBytes,
-    });
+      const assetType = contentAssetTypeFromMime(contentType);
+      const media = await dependencies.store.createClientMedia({
+        clientId,
+        organizationId,
+        officeId,
+        uploadedBy: auth.actor.userId,
+        fileName: filename,
+        fileUrl: mediaProxyUrl(objectKey),
+        storagePath: objectKey,
+        bucket: CONTENT_REVIEW_ASSETS_BUCKET,
+        mimeType: contentType,
+        assetType,
+        label: label ?? null,
+        originalSizeBytes: sizeBytes,
+        storedSizeBytes: sizeBytes,
+        compressionStatus: 'stored_original',
+        webPlaybackStatus: null,
+        expiresAt: CONTENT_ASSET_KEEP_UNTIL,
+      });
 
-    const assetType = contentAssetTypeFromMime(contentType);
-    const media = await dependencies.store.createClientMedia({
-      clientId,
-      organizationId,
-      officeId,
-      uploadedBy: auth.actor.userId,
-      fileName: filename,
-      fileUrl: mediaProxyUrl(objectKey),
-      storagePath: objectKey,
-      bucket: CONTENT_REVIEW_ASSETS_BUCKET,
-      mimeType: contentType,
-      assetType,
-      label: label ?? null,
-      originalSizeBytes: sizeBytes,
-      storedSizeBytes: sizeBytes,
-      compressionStatus: 'stored_original',
-      webPlaybackStatus: null,
-      expiresAt: CONTENT_ASSET_KEEP_UNTIL,
+      return c.json({ media: serializeMedia(media) }, 201);
     });
-
-    return c.json({ media: serializeMedia(media) }, 201);
   });
 
   routes.post('/clients/:clientId/media', async (c) => {
@@ -1279,34 +1249,37 @@ export function createContentStudioRoutes(
       fileId,
       filename,
     });
-    await dependencies.files.putObject({
-      bucket: CONTENT_REVIEW_ASSETS_BUCKET,
-      objectKey,
-      body: content,
-      contentType,
-    });
 
-    const assetType = contentAssetTypeFromMime(contentType);
-    const media = await dependencies.store.createClientMedia({
-      clientId,
-      organizationId,
-      officeId,
-      uploadedBy: auth.actor.userId,
-      fileName: filename,
-      fileUrl: mediaProxyUrl(objectKey),
-      storagePath: objectKey,
-      bucket: CONTENT_REVIEW_ASSETS_BUCKET,
-      mimeType: contentType,
-      assetType,
-      label: readOptionalString(body.label, 'label', 200),
-      originalSizeBytes: content.byteLength,
-      storedSizeBytes: content.byteLength,
-      compressionStatus: 'stored_original',
-      webPlaybackStatus: null,
-      expiresAt: CONTENT_ASSET_KEEP_UNTIL,
-    });
+    return persistMediaUpload({ organizationId, objectKey, files: dependencies.files, store: dependencies.store }, async () => {
+      await dependencies.files.putObject({
+        bucket: CONTENT_REVIEW_ASSETS_BUCKET,
+        objectKey,
+        body: content,
+        contentType,
+      });
 
-    return c.json({ media: serializeMedia(media) }, 201);
+      const assetType = contentAssetTypeFromMime(contentType);
+      const media = await dependencies.store.createClientMedia({
+        clientId,
+        organizationId,
+        officeId,
+        uploadedBy: auth.actor.userId,
+        fileName: filename,
+        fileUrl: mediaProxyUrl(objectKey),
+        storagePath: objectKey,
+        bucket: CONTENT_REVIEW_ASSETS_BUCKET,
+        mimeType: contentType,
+        assetType,
+        label: readOptionalString(body.label, 'label', 200),
+        originalSizeBytes: content.byteLength,
+        storedSizeBytes: content.byteLength,
+        compressionStatus: 'stored_original',
+        webPlaybackStatus: null,
+        expiresAt: CONTENT_ASSET_KEEP_UNTIL,
+      });
+
+      return c.json({ media: serializeMedia(media) }, 201);
+    });
   });
 
   routes.delete('/media/:mediaId', async (c) => {
@@ -1333,7 +1306,7 @@ export function createContentStudioRoutes(
       if (remaining === 0 && assetRefs === 0) {
         await dependencies.files
           .deleteObject(media.bucket, media.storagePath)
-          .catch(() => undefined);
+          .catch((err) => logger.error({ err, organizationId }, 'Content media deletion requires reconciliation'));
       }
     }
     return c.json({ ok: true });
@@ -1348,16 +1321,17 @@ export function createContentStudioRoutes(
         !(await dependencies.store.findMediaOwnership(organizationId, objectKey))) {
       throw new NotFoundError('CONTENT_MEDIA_NOT_FOUND', 'Media was not found.');
     }
-    const capability = mediaCapabilityStore.issue({ organizationId, objectKey });
+    c.header('Cache-Control', 'no-store');
+    const capability = await capabilities.issue({ organizationId, objectKey }, 60 * 60 * 1000);
     return c.json({
       url: `/api/content-studio/media?cap=${encodeURIComponent(capability)}`,
-      expiresIn: 60,
+      expiresIn: 60 * 60,
     });
   });
 
   routes.get('/media', async (c) => {
     const capability = (c.req.query('cap') ?? '').trim();
-    const granted = capability ? mediaCapabilityStore.consume(capability) : null;
+    const granted = capability ? await capabilities.consume(capability) : null;
     if (!granted) {
       throw new ForbiddenError('CONTENT_MEDIA_FORBIDDEN', 'Media capability is invalid or expired.');
     }
@@ -1369,9 +1343,26 @@ export function createContentStudioRoutes(
       files: dependencies.files,
       bucket: CONTENT_REVIEW_ASSETS_BUCKET,
       objectKey: granted.objectKey,
-      rangeHeader: c.req.header('range'),
-      cacheControl: 'private, max-age=300',
+      rangeHeader: c.req.header("range"),
+      cacheControl: "private, no-store",
     });
+  });
+
+  routes.post('/internal-reviews/:token/feedback', async (c) => {
+    const auth = getAuth(c);
+    const organizationId = authorizeContent(auth, 'content_studio.manage');
+    const schedule = await dependencies.store.getScheduleByReviewToken(c.req.param('token'));
+    if (!schedule || schedule.organizationId !== organizationId) {
+      throw new NotFoundError('CONTENT_SCHEDULE_NOT_FOUND', 'Schedule was not found.');
+    }
+    await assertContentStudioOffice({ directory: dependencies.directory, organizationId, officeId: schedule.officeId });
+    const body = await readJson(c);
+    const result = await submitInternalReview({
+      store: dependencies.store, organizationId, scheduleId: schedule.id, auth,
+      slot: typeof body.slot === 'number' ? body.slot : NaN, decision: readRequiredText(body.decision, 'decision', 40),
+      message: readRequiredText(body.message, 'message', FIELD_LIMITS.commentBody),
+    });
+    return c.json(result.ok ? { ...result, comment: serializeComment(result.comment) } : result);
   });
 
   routes.post('/schedules/:scheduleId/comments', async (c) => {

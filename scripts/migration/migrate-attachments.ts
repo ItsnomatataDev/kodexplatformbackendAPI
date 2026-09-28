@@ -297,7 +297,7 @@ async function importLinks(
       continue;
     }
 
-    const submittedBy =
+const submittedBy =
       row.uploaded_by && existing.users.has(row.uploaded_by)
         ? row.uploaded_by
         : await fallbackUploader(client, organizationId);

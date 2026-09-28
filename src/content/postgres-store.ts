@@ -1,5 +1,6 @@
 import { keysetPredicate, listLimit, pageOf } from '../db/list-bounds.js';
 import { db } from '../db/pool.js';
+import { withTransaction, type TransactionClient } from '../db/transaction.js';
 import { NotFoundError } from '../http/errors.js';
 import type {
   ContentClientMediaRecord,
@@ -277,9 +278,18 @@ function mapComment(row: CommentRow): ContentCommentRecord {
 }
 
 export class PostgresContentStore implements ContentStore {
+  constructor(private readonly connection: Pick<TransactionClient, 'query'> = db) {}
+
+  async withReviewTransaction<T>(organizationId: string, scheduleId: string, work: (store: ContentStore) => Promise<T>): Promise<T> {
+    return withTransaction(async (client) => {
+      await client.query('SELECT id FROM content.schedules WHERE organization_id = $1 AND id = $2 FOR UPDATE', [organizationId, scheduleId]);
+      return work(new PostgresContentStore(client));
+    });
+  }
+
   async listClients(organizationId: string, officeId: string, requestedLimit?: number) {
     const limit = listLimit(requestedLimit);
-    const result = await db.query<ClientRow>(
+    const result = await this.connection.query<ClientRow>(
       `SELECT * FROM content.clients
        WHERE organization_id = $1 AND office_id = $2
        ORDER BY created_at DESC, id DESC
@@ -290,7 +300,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async getClient(organizationId: string, officeId: string, clientId: string) {
-    const result = await db.query<ClientRow>(
+    const result = await this.connection.query<ClientRow>(
       `SELECT * FROM content.clients
        WHERE organization_id = $1 AND office_id = $2 AND id = $3
        LIMIT 1`,
@@ -300,7 +310,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async getClientByPortalToken(portalToken: string, email: string) {
-    const result = await db.query<ClientRow>(
+    const result = await this.connection.query<ClientRow>(
       `SELECT * FROM content.clients
        WHERE portal_token = $1
          AND lower(email) = lower($2)
@@ -313,7 +323,7 @@ export class PostgresContentStore implements ContentStore {
 
   async listSchedulesForClient(clientId: string, requestedLimit?: number) {
     const limit = listLimit(requestedLimit);
-    const result = await db.query<ScheduleRow>(
+    const result = await this.connection.query<ScheduleRow>(
       `SELECT * FROM content.schedules
        WHERE client_id = $1
          AND status IS DISTINCT FROM 'draft'
@@ -326,7 +336,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async getScheduleForClient(clientId: string, scheduleId: string) {
-    const result = await db.query<ScheduleRow>(
+    const result = await this.connection.query<ScheduleRow>(
       `SELECT * FROM content.schedules
        WHERE id = $1 AND client_id = $2
        LIMIT 1`,
@@ -336,7 +346,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async createClient(input: CreateClientInput) {
-    const result = await db.query<ClientRow>(
+    const result = await this.connection.query<ClientRow>(
       `INSERT INTO content.clients (
          organization_id, office_id, company_name, contact_name, email, phone,
          internal_reviewer_email, portal_token, login_pin_hash, pin_expires_at, created_by
@@ -365,7 +375,7 @@ export class PostgresContentStore implements ContentStore {
     clientId: string,
     input: UpdateClientInput,
   ) {
-    const result = await db.query<ClientRow>(
+    const result = await this.connection.query<ClientRow>(
       `UPDATE content.clients SET
          company_name = COALESCE($4, company_name),
          contact_name = COALESCE($5, contact_name),
@@ -406,7 +416,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async deleteClient(organizationId: string, officeId: string, clientId: string) {
-    const result = await db.query(
+    const result = await this.connection.query(
       `DELETE FROM content.clients
        WHERE organization_id = $1 AND office_id = $2 AND id = $3`,
       [organizationId, officeId, clientId],
@@ -422,7 +432,7 @@ export class PostgresContentStore implements ContentStore {
     clientId: string;
     monthKey: string;
   }) {
-    const result = await db.query<ScheduleRow>(
+    const result = await this.connection.query<ScheduleRow>(
       `SELECT * FROM content.schedules
        WHERE organization_id = $1
          AND office_id = $2
@@ -459,7 +469,7 @@ export class PostgresContentStore implements ContentStore {
     }
 
     values.push(listLimit(params.limit));
-    const result = await db.query<ScheduleRow>(
+    const result = await this.connection.query<ScheduleRow>(
       `SELECT * FROM content.schedules
        WHERE ${clauses.join(' AND ')}
        ORDER BY created_at DESC, id DESC
@@ -470,7 +480,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async getSchedule(organizationId: string, scheduleId: string) {
-    const result = await db.query<ScheduleRow>(
+    const result = await this.connection.query<ScheduleRow>(
       `SELECT * FROM content.schedules
        WHERE organization_id = $1 AND id = $2
        LIMIT 1`,
@@ -480,7 +490,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async getScheduleByReviewToken(reviewToken: string) {
-    const result = await db.query<ScheduleRow>(
+    const result = await this.connection.query<ScheduleRow>(
       `SELECT * FROM content.schedules
        WHERE review_token = $1
        LIMIT 1`,
@@ -490,7 +500,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async createSchedule(input: CreateScheduleInput) {
-    const result = await db.query<ScheduleRow>(
+    const result = await this.connection.query<ScheduleRow>(
       `INSERT INTO content.schedules (
          organization_id, office_id, client_id, created_by, title, layout_type,
          review_token, review_url, status, review_status, scheduled_at, expires_at,
@@ -523,7 +533,7 @@ export class PostgresContentStore implements ContentStore {
     scheduleId: string,
     input: UpdateScheduleInput,
   ) {
-    const result = await db.query<ScheduleRow>(
+    const result = await this.connection.query<ScheduleRow>(
       `UPDATE content.schedules SET
          title = COALESCE($3, title),
          subtitle = CASE WHEN $4::boolean THEN $5 ELSE subtitle END,
@@ -605,7 +615,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async deleteSchedule(organizationId: string, scheduleId: string) {
-    const result = await db.query(
+    const result = await this.connection.query(
       `DELETE FROM content.schedules WHERE organization_id = $1 AND id = $2`,
       [organizationId, scheduleId],
     );
@@ -619,7 +629,7 @@ export class PostgresContentStore implements ContentStore {
 
   async listAssetsForSchedules(organizationId: string, scheduleIds: string[]) {
     if (scheduleIds.length === 0) return [];
-    const result = await db.query<AssetRow>(
+    const result = await this.connection.query<AssetRow>(
       `SELECT * FROM content.schedule_assets
        WHERE organization_id = $1 AND schedule_id = ANY($2::uuid[])
        ORDER BY display_slot ASC, sort_order ASC, created_at ASC`,
@@ -629,7 +639,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async getAsset(organizationId: string, assetId: string) {
-    const result = await db.query<AssetRow>(
+    const result = await this.connection.query<AssetRow>(
       `SELECT * FROM content.schedule_assets
        WHERE organization_id = $1 AND id = $2
        LIMIT 1`,
@@ -638,8 +648,8 @@ export class PostgresContentStore implements ContentStore {
     return result.rows[0] ? mapAsset(result.rows[0]) : null;
   }
 
-  async createAsset(input: CreateScheduleAssetInput) {
-    const result = await db.query<AssetRow>(
+  async createAsset(input: CreateScheduleAssetInput, query: Pick<TransactionClient, 'query'> = db) {
+    const result = await query.query<AssetRow>(
       `INSERT INTO content.schedule_assets (
          id, schedule_id, organization_id, office_id, library_media_id, uploaded_by,
          file_name, file_url, storage_path, bucket, mime_type, asset_type,
@@ -682,12 +692,21 @@ export class PostgresContentStore implements ContentStore {
     return mapAsset(result.rows[0]!);
   }
 
+  async createUploadedAsset(input: CreateScheduleAssetInput, clientId: string | null) {
+    return withTransaction(async (query) => {
+      const media = clientId ? await this.createClientMedia({
+        ...input, clientId,
+      }, query) : null;
+      return this.createAsset({ ...input, libraryMediaId: media?.id ?? null }, query);
+    });
+  }
+
   async updateAsset(
     organizationId: string,
     assetId: string,
     input: UpdateScheduleAssetInput,
   ) {
-    const result = await db.query<AssetRow>(
+    const result = await this.connection.query<AssetRow>(
       `UPDATE content.schedule_assets SET
          heading = CASE WHEN $3::boolean THEN $4 ELSE heading END,
          caption = CASE WHEN $5::boolean THEN $6 ELSE caption END,
@@ -729,7 +748,7 @@ export class PostgresContentStore implements ContentStore {
     isSelected: boolean,
   ) {
     if (assetIds.length === 0) return;
-    await db.query(
+    await this.connection.query(
       `UPDATE content.schedule_assets
        SET is_selected = $3
        WHERE organization_id = $1 AND id = ANY($2::uuid[])`,
@@ -738,7 +757,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async deleteAsset(organizationId: string, assetId: string) {
-    const result = await db.query<AssetRow>(
+    const result = await this.connection.query<AssetRow>(
       `DELETE FROM content.schedule_assets
        WHERE organization_id = $1 AND id = $2
        RETURNING *`,
@@ -751,7 +770,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async countAssetsUsingStoragePath(organizationId: string, storagePath: string) {
-    const result = await db.query<{ count: string }>(
+    const result = await this.connection.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM content.schedule_assets
        WHERE organization_id = $1 AND storage_path = $2`,
       [organizationId, storagePath],
@@ -760,7 +779,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async findMediaOwnership(organizationId: string, storagePath: string) {
-    const result = await db.query(
+    const result = await this.connection.query(
       `SELECT 1 FROM content.schedule_assets
          WHERE organization_id = $1 AND storage_path = $2
        UNION ALL
@@ -786,7 +805,7 @@ export class PostgresContentStore implements ContentStore {
       'id',
     );
     params.push(limit + 1);
-    const result = await db.query<MediaRow>(
+    const result = await this.connection.query<MediaRow>(
       `SELECT * FROM content.client_media
        WHERE organization_id = $1 AND client_id = $2
          ${cursor}
@@ -799,7 +818,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async getClientMedia(organizationId: string, mediaId: string) {
-    const result = await db.query<MediaRow>(
+    const result = await this.connection.query<MediaRow>(
       `SELECT * FROM content.client_media
        WHERE organization_id = $1 AND id = $2
        LIMIT 1`,
@@ -808,8 +827,8 @@ export class PostgresContentStore implements ContentStore {
     return result.rows[0] ? mapMedia(result.rows[0]) : null;
   }
 
-  async createClientMedia(input: CreateClientMediaInput) {
-    const result = await db.query<MediaRow>(
+  async createClientMedia(input: CreateClientMediaInput, query: Pick<TransactionClient, 'query'> = db) {
+    const result = await query.query<MediaRow>(
       `INSERT INTO content.client_media (
          id, client_id, organization_id, office_id, uploaded_by,
          file_name, file_url, storage_path, bucket, mime_type, asset_type, label,
@@ -844,7 +863,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async deleteClientMedia(organizationId: string, mediaId: string) {
-    const result = await db.query<MediaRow>(
+    const result = await this.connection.query<MediaRow>(
       `DELETE FROM content.client_media
        WHERE organization_id = $1 AND id = $2
        RETURNING *`,
@@ -857,7 +876,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async countLibraryRefs(organizationId: string, mediaId: string) {
-    const result = await db.query<{ count: string }>(
+    const result = await this.connection.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM content.schedule_assets
        WHERE organization_id = $1 AND library_media_id = $2`,
       [organizationId, mediaId],
@@ -866,7 +885,7 @@ export class PostgresContentStore implements ContentStore {
   }
 
   async countClientMediaUsingPath(organizationId: string, storagePath: string) {
-    const result = await db.query<{ count: string }>(
+    const result = await this.connection.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM content.client_media
        WHERE organization_id = $1 AND storage_path = $2`,
       [organizationId, storagePath],
@@ -876,7 +895,7 @@ export class PostgresContentStore implements ContentStore {
 
   async listComments(organizationId: string, scheduleIds: string[]) {
     if (scheduleIds.length === 0) return [];
-    const result = await db.query<CommentRow>(
+    const result = await this.connection.query<CommentRow>(
       `SELECT * FROM content.comments
        WHERE organization_id = $1 AND schedule_id = ANY($2::uuid[])
        ORDER BY created_at ASC`,
@@ -887,7 +906,7 @@ export class PostgresContentStore implements ContentStore {
 
   async listActivity(organizationId: string, scheduleIds: string[]) {
     if (scheduleIds.length === 0) return [];
-    const result = await db.query<{
+    const result = await this.connection.query<{
       id: string;
       schedule_id: string;
       organization_id: string;
@@ -932,7 +951,7 @@ export class PostgresContentStore implements ContentStore {
     commentType?: string;
     parentCommentId?: string | null;
   }) {
-    const result = await db.query<CommentRow>(
+    const result = await this.connection.query<CommentRow>(
       `INSERT INTO content.comments (
          schedule_id, organization_id, office_id, parent_comment_id,
          author_name, author_email, body, source, visibility, author_type,
@@ -966,7 +985,7 @@ export class PostgresContentStore implements ContentStore {
     activityType: string;
     metadata?: Record<string, unknown>;
   }) {
-    await db.query(
+    await this.connection.query(
       `INSERT INTO content.activity (
          schedule_id, organization_id, office_id, actor_user_id, activity_type, metadata
        ) VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
