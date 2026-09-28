@@ -1,7 +1,7 @@
 import { keysetPredicate, listLimit, pageOf } from '../db/list-bounds.js';
 import { db } from '../db/pool.js';
 import { withTransaction, type TransactionClient } from '../db/transaction.js';
-import { NotFoundError } from '../http/errors.js';
+import { ConflictError, NotFoundError } from '../http/errors.js';
 import type {
   ContentClientMediaRecord,
   ContentClientRecord,
@@ -604,7 +604,16 @@ export class PostgresContentStore implements ContentStore {
         input.changesRequestedAt !== undefined,
         input.changesRequestedAt ?? null,
       ],
-    );
+    ).catch((error: unknown) => {
+      const failure = error as { code?: string; constraint?: string };
+      if (failure?.code === '23505' && failure.constraint === 'content_schedules_client_month_uq') {
+        throw new ConflictError(
+          'CONTENT_SCHEDULE_MONTH_CONFLICT',
+          'This client already has an active schedule for that month. Choose another month or archive the existing schedule.',
+        );
+      }
+      throw error;
+    });
     if (!result.rows[0]) {
       throw new NotFoundError(
         'CONTENT_SCHEDULE_NOT_FOUND',

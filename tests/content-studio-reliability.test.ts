@@ -114,3 +114,20 @@ for (const fail of [false, true]) {
     assert.equal(statements.at(-1), fail ? 'ROLLBACK' : 'COMMIT');
   });
 }
+
+test('schedule month collisions return a specific conflict without hiding other database failures', async () => {
+  for (const constraint of ['content_schedules_client_month_uq', 'other_unique_constraint']) {
+    const failure = Object.assign(new Error('database detail must not reach clients'), { code: '23505', constraint });
+    const store = new PostgresContentStore({ query: async () => { throw failure; } });
+    await assert.rejects(store.updateSchedule('org', 'schedule', {
+      status: 'sent_to_client', scheduledAt: new Date('2026-08-31T22:00:00.000Z'),
+    }), (error: unknown) => {
+      if (constraint === 'other_unique_constraint') return error === failure;
+      const conflict = error as { status: number; code: string; message: string };
+      assert.equal(conflict.status, 409);
+      assert.equal(conflict.code, 'CONTENT_SCHEDULE_MONTH_CONFLICT');
+      assert.doesNotMatch(conflict.message, /database detail/);
+      return true;
+    });
+  }
+});
