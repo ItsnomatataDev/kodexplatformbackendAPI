@@ -77,3 +77,45 @@ the entire database. Neither is a measured partition of root-disk usage. Missing
 readings remain unavailable. Backup/Docker/log breakdowns and historical charts
 stay unavailable until measured by a host reporter. `HOST_DISK_PATH` can select
 a filesystem visible to the API; the default is `/`.
+
+## Docker-only VPS probe (no host Node installation needed)
+
+Copy `scripts/diagnostics/content-videos-container.mjs` to the same path under
+`/opt/kode-platform` on the VPS, then run there:
+
+```sh
+docker exec -i kode-vps-api node --input-type=module \
+  < scripts/diagnostics/content-videos-container.mjs
+```
+
+The script uses the running container's built storage adapter and environment.
+It samples only 64 KiB at each end of five recent videos, logging asset/schedule
+IDs, byte ranges, sizes, header/total durations and codec/index hints. It neither
+sends email nor changes records/media. It does not measure the Caddy-to-browser
+path, sustained throughput, video duration/bitrate or hardware decoding speed.
+No URLs or credentials are printed. A successful sample cannot prove smooth playback.
+
+For a video currently playing, the browser console can report decode and buffer
+state without exposing its URL or capability (repeat before and during lag):
+
+```js
+Array.from(document.querySelectorAll('video')).map((video, index) => {
+  const quality = video.getVideoPlaybackQuality?.();
+  return {
+    index, time: video.currentTime, paused: video.paused,
+    readyState: video.readyState, networkState: video.networkState,
+    buffered: Array.from({ length: video.buffered.length }, (_, i) =>
+      [video.buffered.start(i), video.buffered.end(i)]),
+    totalFrames: quality?.totalVideoFrames,
+    droppedFrames: quality?.droppedVideoFrames,
+    errorCode: video.error?.code ?? null,
+  };
+});
+```
+
+A growing dropped-frame count with buffered media ahead suggests a decode/render
+bottleneck; a buffer running out suggests a delivery bottleneck. These are leads,
+not definitive diagnoses. Compare the same asset on affected and unaffected
+laptops. HEVC/high-resolution originals may need an H.264/AAC playback rendition
+and fast-start indexing; do not transcode all originals or change authorization
+without confirming the failing asset and measurements first.
