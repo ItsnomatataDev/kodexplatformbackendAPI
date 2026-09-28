@@ -241,3 +241,30 @@ test('issued playback grants support seeking after the former one-minute expiry'
   t.mock.timers.tick(3_600_000);
   assert.equal((await app.request(url)).status, 403);
 });
+
+test('one issued URL supports sequential ranges and forward/backward seeking', async () => {
+  const { app } = await fixture();
+  const { authorization } = await sessionAuth.issueBearer(userA);
+  const issued = await app.request('/api/content-studio/media/capability', {
+    method: 'POST', headers: { authorization, 'content-type': 'application/json' },
+    body: JSON.stringify({ objectKey }),
+  });
+  const { url } = await issued.json();
+  for (const [range, start, end] of [
+    ['bytes=0-2', 0, 2], ['bytes=3-5', 3, 5], ['bytes=6-', 6, 9],
+    ['bytes=1-3', 1, 3], ['bytes=-2', 8, 9], ['bytes=8-99', 8, 9],
+  ] as const) {
+    const response = await app.request(url, { headers: { range } });
+    assert.equal(response.status, 206);
+    assert.equal(response.headers.get('content-range'), `bytes ${start}-${end}/${body.length}`);
+    assert.equal(response.headers.get('content-length'), String(end - start + 1));
+    assert.equal(response.headers.get('accept-ranges'), 'bytes');
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), body.subarray(start, end + 1));
+  }
+  for (const range of ['bytes=100-', 'bytes=5-2', 'invalid']) {
+    const response = await app.request(url, { headers: { range } });
+    assert.equal(response.status, 416);
+    assert.equal(response.headers.get('content-range'), `bytes */${body.length}`);
+    assert.equal(await response.text(), '');
+  }
+});

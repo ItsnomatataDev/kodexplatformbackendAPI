@@ -1,5 +1,6 @@
 import { submitInternalReview } from '../content/internal-review.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { observeMediaBody } from '../content/media-diagnostics.js';
 import { Hono } from 'hono';
 import { getAuth } from '../auth/middleware.js';
 import { isUuid } from '../auth/uuid.js';
@@ -1330,21 +1331,54 @@ export function createContentStudioRoutes(
   });
 
   routes.get('/media', async (c) => {
+    const started = performance.now();
     const capability = (c.req.query('cap') ?? '').trim();
+    const range = c.req.header('range');
+    const log = c.get('logger').child({
+      playbackId: capability ? createHash('sha256').update(capability).digest('hex') : null,
+      method: c.req.method,
+      path: c.req.path,
+      // Never include arbitrary header text, URLs, object names, or credentials.
+      range: !range ? null : /^bytes=[0-9,-]{1,100}$/.test(range) ? range : 'malformed',
+    });
     const granted = capability ? await capabilities.consume(capability) : null;
     if (!granted) {
+      log.info({ capabilityState: 'invalid_or_expired', status: 403 }, 'media.authorization');
       throw new ForbiddenError('CONTENT_MEDIA_FORBIDDEN', 'Media capability is invalid or expired.');
     }
     if (!dependencies.store.findMediaOwnership ||
         !(await dependencies.store.findMediaOwnership(granted.organizationId, granted.objectKey))) {
+      log.info({ capabilityState: 'valid', ownership: false, status: 404 }, 'media.authorization');
       throw new NotFoundError('CONTENT_MEDIA_NOT_FOUND', 'Media was not found.');
     }
-    return streamStoredMedia({
-      files: dependencies.files,
-      bucket: CONTENT_REVIEW_ASSETS_BUCKET,
-      objectKey: granted.objectKey,
-      rangeHeader: c.req.header("range"),
-      cacheControl: "private, no-store",
+    const mediaLog = log.child({
+      mediaId: createHash('sha256').update(granted.objectKey).digest('hex'),
+      capabilityState: 'valid',
+      authorizationMs: Math.round(performance.now() - started),
+    });
+    const storageStarted = performance.now();
+    let response: Response;
+    try {
+      response = await streamStoredMedia({
+        files: dependencies.files,
+        bucket: CONTENT_REVIEW_ASSETS_BUCKET,
+        objectKey: granted.objectKey,
+        rangeHeader: range,
+        cacheControl: 'private, no-store',
+      });
+    } catch (error) {
+      mediaLog.info({ outcome: 'error', storageHeadersMs: Math.round(performance.now() - storageStarted) }, 'media.storage');
+      throw error;
+    }
+    const responseLog = mediaLog.child({ status: response.status });
+    responseLog.info({
+      storageHeadersMs: Math.round(performance.now() - storageStarted),
+      contentRange: response.headers.get('content-range'),
+      contentLength: response.headers.get('content-length'),
+      acceptRanges: response.headers.get('accept-ranges'),
+    }, 'media.storage');
+    return new Response(response.body ? observeMediaBody(response.body, responseLog) : null, {
+      status: response.status, headers: response.headers,
     });
   });
 

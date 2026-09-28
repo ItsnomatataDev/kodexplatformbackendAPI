@@ -164,6 +164,12 @@ export class MinioFileStorage implements FileStorage {
       { streamBody: true },
     );
 
+    // Error bodies are not forwarded to the browser. Release their connections
+    // explicitly instead of leaving cleanup to garbage collection.
+    if (response.status !== 200 && response.status !== 206) {
+      await response.body?.cancel();
+    }
+
     if (response.status === 404) {
       return null;
     }
