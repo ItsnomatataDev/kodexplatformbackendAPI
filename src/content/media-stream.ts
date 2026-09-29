@@ -1,3 +1,4 @@
+import { resolvePlaybackObject } from './playback.js';
 import type { FileStorage } from '../files/storage.js';
 import { NotFoundError } from '../http/errors.js';
 
@@ -8,6 +9,7 @@ export async function streamStoredMedia(params: {
   objectKey: string;
   rangeHeader?: string | null;
   cacheControl?: string;
+  preferPlayback?: boolean;
   contentType?: string | null;
   contentDisposition?: string;
   notFoundCode?: string;
@@ -21,9 +23,12 @@ export async function streamStoredMedia(params: {
     playbackContentType(params.contentType ?? stored, params.objectKey);
 
   if (params.files.getObjectStream) {
+    const objectKey = params.preferPlayback
+      ? await resolvePlaybackObject(params.files, params.bucket, params.objectKey)
+      : params.objectKey;
     const streamed = await params.files.getObjectStream(
       params.bucket,
-      params.objectKey,
+      objectKey,
       params.rangeHeader,
     );
     if (!streamed) {
@@ -31,7 +36,7 @@ export async function streamStoredMedia(params: {
     }
 
     const headers: Record<string, string> = {
-      'Content-Type': contentTypeFor(streamed.contentType),
+      'Content-Type': objectKey !== params.objectKey ? 'video/mp4' : contentTypeFor(streamed.contentType),
       'Accept-Ranges': 'bytes',
       'Content-Disposition': disposition,
       'Cache-Control': cacheControl,

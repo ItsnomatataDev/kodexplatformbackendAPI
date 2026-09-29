@@ -86,6 +86,35 @@ services:
       minio:
         condition: service_started
 
+
+  media-worker:
+    profiles: [media]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: media-worker
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env.vps
+    environment:
+      APP_ENV: staging
+      NODE_ENV: staging
+    cpus: 1.5
+    mem_limit: 1536m
+    pids_limit: 128
+    stop_grace_period: 45s
+    read_only: true
+    tmpfs:
+      - /tmp:size=4294967296,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
 volumes:
   kode_vps_postgres_data:
   kode_vps_redis_data:

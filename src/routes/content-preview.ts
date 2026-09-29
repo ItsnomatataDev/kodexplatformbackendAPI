@@ -153,6 +153,7 @@ export function createContentPreviewRoutes(
     }
 
     return streamStoredMedia({
+      preferPlayback: true,
       files: dependencies.files,
       bucket: CONTENT_REVIEW_ASSETS_BUCKET,
       objectKey,

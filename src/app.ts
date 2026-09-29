@@ -55,6 +55,7 @@ import { createChatWebSocketRoutes } from './routes/chat-ws.js';
 import { PostgresContentStore } from './content/postgres-store.js';
 import type { ContentStore } from './content/store.js';
 import { createContentStudioRoutes } from './routes/content-studio.js';
+import { createSchedulePlaybackRoutes } from './routes/schedule-playback.js';
 import { createKodexRoutes } from './routes/kodex.js';
 import { createContentPortalRoutes } from './routes/content-portal.js';
 import { createContentPreviewRoutes } from './routes/content-preview.js';
@@ -219,6 +220,7 @@ export function createApp(options: CreateAppOptions = {}) {
     return apiAuth(c, next);
   });
   api.route('/me', createMeRoutes(meWithFiles));
+  api.route('/schedules', createSchedulePlaybackRoutes());
   api.route('/organization', createOrganizationRoutes({ store: organizationDirectory }));
   api.route(
     '/organization',
