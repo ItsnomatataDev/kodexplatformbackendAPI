@@ -77,6 +77,7 @@ import { PostgresStockStore } from './stock/postgres-store.js';
 import { createStockRoutes } from './routes/stock.js';
 import { PostgresFleetStore } from './fleet/postgres-store.js';
 import { createFleetRoutes } from './routes/fleet.js';
+import { createFleetIngestRoutes } from './routes/fleet-ingest.js';
 import { PostgresMeetingsStore } from './meetings/postgres-store.js';
 import {
   createMeetingsRoutes,
@@ -330,6 +331,11 @@ export function createApp(options: CreateAppOptions = {}) {
   app.route(
     '/api/meetings/guest',
     createPublicMeetingGuestRoutes({ store: meetingsStore }),
+  );
+
+  app.route(
+    '/api/fleet/import',
+    createFleetIngestRoutes({ security }),
   );
 
   app.route(
