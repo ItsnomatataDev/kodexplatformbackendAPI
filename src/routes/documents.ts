@@ -864,7 +864,7 @@ export function createDocumentsRoutes(dependencies: DocumentsRouteDependencies) 
     const auth = getAuth(c);
     const organizationId = authorizeDocuments(auth, 'documents.manage');
     requireDocumentsStaff(auth);
-    await rateLimitWork(c, 'attachment');
+    await rateLimitWork(c, 'payslipBatch');
 
     const batchId = requireUuidValue(c.req.param('batchId'), 'batchId');
     const batch = await dependencies.store.getPayslipBatch(organizationId, batchId);

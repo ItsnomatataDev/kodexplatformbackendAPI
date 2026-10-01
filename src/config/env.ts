@@ -356,6 +356,18 @@ export const env = {
       limit: countFromEnv('WORK_IP_ATTACHMENT_RATE_LIMIT', 20, 1, 2_000),
       windowSeconds: durationFromEnv('WORK_ATTACHMENT_RATE_WINDOW_SECONDS', 60, 1, 3_600),
     },
+    payslipBatch: {
+      limit: countFromEnv('WORK_PAYSLIP_BATCH_RATE_LIMIT', 500, 1, 5_000),
+      windowSeconds: durationFromEnv('WORK_PAYSLIP_BATCH_RATE_WINDOW_SECONDS', 600, 1, 3_600),
+    },
+    payslipBatchOrg: {
+      limit: countFromEnv('WORK_ORG_PAYSLIP_BATCH_RATE_LIMIT', 1_000, 1, 10_000),
+      windowSeconds: durationFromEnv('WORK_PAYSLIP_BATCH_RATE_WINDOW_SECONDS', 600, 1, 3_600),
+    },
+    payslipBatchIp: {
+      limit: countFromEnv('WORK_IP_PAYSLIP_BATCH_RATE_LIMIT', 750, 1, 7_500),
+      windowSeconds: durationFromEnv('WORK_PAYSLIP_BATCH_RATE_WINDOW_SECONDS', 600, 1, 3_600),
+    },
   } satisfies WorkRateLimitPolicies,
 
   /** Optional LiveKit credentials for meeting token minting (moved off Supabase edge). */
