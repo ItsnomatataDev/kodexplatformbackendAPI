@@ -372,7 +372,25 @@ export class PostgresLeaveStore {
     const paged = pageOf(result.rows.map(mapRequest), limit);
     return { requests: paged.rows, hasMore: paged.hasMore };
   }
+  async listCalendarEvents(organizationId: string, officeId?: string | null) {
+    const params: unknown[] = [organizationId, officeId ?? null];
 
+    const result = await db.query<RequestRow>(
+      `SELECT r.*,
+              p.full_name AS requester_name,
+              u.email AS requester_email
+       FROM leave.requests r
+       LEFT JOIN identity.user_profiles p ON p.user_id = r.user_id
+       LEFT JOIN identity.users u ON u.id = r.user_id
+       WHERE r.organization_id = $1
+         AND ($2::uuid IS NULL OR r.office_id = $2 OR r.office_id IS NULL)
+         AND r.status IN ('pending', 'approved', 'rejected')
+       ORDER BY r.start_date ASC, r.id ASC`,
+      params,
+    );
+
+    return result.rows.map(mapRequest);
+  }
   async countPending(organizationId: string) {
     const result = await db.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM leave.requests

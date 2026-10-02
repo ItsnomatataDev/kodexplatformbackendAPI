@@ -78,6 +78,30 @@ function serializeRequest(row: Awaited<ReturnType<PostgresLeaveStore['listMyRequ
   };
 }
 
+function serializeCalendarEvent(
+  row: Awaited<ReturnType<PostgresLeaveStore['listCalendarEvents']>>[number],
+) {
+  return {
+    id: row.id,
+    organization_id: row.organizationId,
+    user_id: row.userId,
+    leave_type_id: row.leaveTypeId,
+    office_id: row.officeId,
+    start_date: row.startDate,
+    end_date: row.endDate,
+    requested_days: row.requestedDays,
+    status: row.status,
+    request_department: row.requestDepartment,
+    request_role: row.requestRole,
+    office: row.office,
+    requester_name: row.requesterName ?? null,
+    requester_email: row.requesterEmail ?? null,
+    requester_department: row.office ?? row.requestDepartment,
+    requester_role: row.requestRole,
+    requester_office_id: row.officeId,
+  };
+}
+
 export function createLeaveRoutes(dependencies: LeaveRouteDependencies) {
   const routes = new Hono();
 
@@ -228,7 +252,7 @@ export function createLeaveRoutes(dependencies: LeaveRouteDependencies) {
     );
     if (balance.remainingDays <= 0) {
       throw new ValidationError(
-        'You have used up all your leave days for the year. You cannot request more leave until your balance is restored.',
+        'You have used up all your leave days for the year. You cannot request more leave until your balance is restored 😂.',
       );
     }
     if (requestedDays > balance.remainingDays) {
@@ -431,6 +455,21 @@ export function createLeaveRoutes(dependencies: LeaveRouteDependencies) {
           email: row.modifierEmail ?? null,
         },
       })),
+    });
+  });
+
+  routes.get('/calendar/events', async (c) => {
+    const auth = getAuth(c);
+    const organizationId = authorizeLeave(auth, 'leave.read');
+    const officeId = c.req.query('officeId') ?? undefined;
+
+    const events = await dependencies.store.listCalendarEvents(
+      organizationId,
+      officeId,
+    );
+
+    return c.json({
+      events: events.map(serializeCalendarEvent),
     });
   });
 
