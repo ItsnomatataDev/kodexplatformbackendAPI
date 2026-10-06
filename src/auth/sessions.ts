@@ -1,12 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import type { TransactionClient } from '../db/transaction.js';
-import { ForbiddenError, UnauthorizedError } from '../http/errors.js';
+import {
+  ConflictError,
+  ForbiddenError,
+  UnauthorizedError,
+} from '../http/errors.js';
 import type { AuthContext } from '../authorization/types.js';
 import { assertAuthenticatedAccount } from './account.js';
 import type { AccessTokenService } from './access-token.js';
 import { publishAuthEvent } from './events.js';
-import { generateOpaqueToken, hashOpaqueToken } from './opaque-token.js';
-import type { AuthStore, SessionRecord } from './store.js';
+import {
+  deriveRefreshToken,
+  generateOpaqueToken,
+  hashOpaqueToken,
+} from './opaque-token.js';
+import type { AuthStore, RefreshTokenRecord, SessionRecord } from './store.js';
 
 export type RequestMeta = {
   requestId?: string;
@@ -38,11 +46,6 @@ export type IssuedCredentials = {
 };
 
 export class SessionService {
-  private readonly recentRotations = new Map<
-    string,
-    { issued: IssuedCredentials; atMs: number }
-  >();
-
   constructor(private readonly config: SessionServiceConfig) {}
 
   private now() {
@@ -55,28 +58,51 @@ export class SessionService {
     return (seconds ?? 30) * 1000;
   }
 
-  private rememberRotation(sessionId: string, issued: IssuedCredentials) {
-    const graceMs = this.reuseGraceMs();
-    if (graceMs <= 0) return;
-    this.recentRotations.set(sessionId, { issued, atMs: Date.now() });
-    // Drop stale entries opportunistically.
-    for (const [id, entry] of this.recentRotations) {
-      if (Date.now() - entry.atMs > graceMs) {
-        this.recentRotations.delete(id);
-      }
-    }
+  private withinReuseGrace(token: RefreshTokenRecord, now: Date) {
+    if (!token.usedAt) return false;
+    const age = now.getTime() - token.usedAt.getTime();
+    return this.reuseGraceMs() > 0 && age >= 0 && age <= this.reuseGraceMs();
   }
 
-  private reuseRecentRotation(sessionId: string): IssuedCredentials | null {
-    const graceMs = this.reuseGraceMs();
-    if (graceMs <= 0) return null;
-    const entry = this.recentRotations.get(sessionId);
-    if (!entry) return null;
-    if (Date.now() - entry.atMs > graceMs) {
-      this.recentRotations.delete(sessionId);
-      return null;
+  private async recoverConcurrentRefresh(
+    token: RefreshTokenRecord,
+    rawToken: string,
+    now: Date,
+    client?: TransactionClient,
+  ): Promise<string> {
+    // Follow newer rotations too, so an out-of-order response does not restore
+    // an already consumed successor. The session row remains locked throughout.
+    for (let depth = 0; depth < 16; depth++) {
+      if (!token.usedAt) {
+        if (token.expiresAt <= now) {
+          throw new UnauthorizedError(
+            'EXPIRED_REFRESH_TOKEN',
+            'The refresh token has expired.',
+          );
+        }
+        return rawToken;
+      }
+      if (!this.withinReuseGrace(token, now) || !token.replacedBy) break;
+      const nextRaw = deriveRefreshToken(
+        this.config.tokenSecret, rawToken, token.replacedBy,
+      );
+      const next = await this.config.store.findRefreshTokenByHash(
+        hashOpaqueToken(this.config.tokenSecret, nextRaw),
+        client,
+      );
+      // Pre-release rotations used random successors. A retryable response keeps
+      // the session intact while the browser retries with its current cookie.
+      if (
+        !next || next.id !== token.replacedBy ||
+        next.sessionId !== token.sessionId
+      ) break;
+      token = next;
+      rawToken = nextRaw;
     }
-    return entry.issued;
+    throw new ConflictError(
+      'REFRESH_CONFLICT',
+      'Retry authentication with the current refresh cookie.',
+    );
   }
 
   private async transaction<T>(
@@ -237,54 +263,7 @@ export class SessionService {
       );
     }
 
-    if (current.usedAt) {
-      const reused = this.reuseRecentRotation(current.sessionId);
-      if (reused) {
-        return reused;
-      }
-
-      const graceMs = this.reuseGraceMs();
-      const usedAgoMs = this.now().getTime() - current.usedAt.getTime();
-      if (graceMs > 0 && usedAgoMs >= 0 && usedAgoMs <= graceMs) {
-        // Winner's response not cached (e.g. other instance) — soft-deny without
-        // killing the live session so the other tab keeps working.
-        throw new UnauthorizedError(
-          'INVALID_REFRESH_TOKEN',
-          'Authentication is required.',
-        );
-      }
-
-      await this.revokeSession(current.sessionId, 'refresh_token_replay', meta);
-      await publishAuthEvent('auth.session.replay_detected', {
-        requestId: meta.requestId,
-        sessionId: current.sessionId,
-        reason: 'refresh_token_replay',
-        ipAddress: meta.ipAddress,
-        userAgent: meta.userAgent,
-      });
-      throw new UnauthorizedError(
-        'REFRESH_TOKEN_REPLAY',
-        'Authentication is required.',
-      );
-    }
-
-    const now = this.now();
-
-    if (current.expiresAt <= now) {
-      throw new UnauthorizedError(
-        'EXPIRED_REFRESH_TOKEN',
-        'The refresh token has expired.',
-      );
-    }
-
-    const session = await this.config.store.getSession(current.sessionId);
-
-    if (!session || session.revokedAt || session.expiresAt <= now) {
-      throw new UnauthorizedError(
-        'SESSION_REVOKED',
-        'The session is no longer valid.',
-      );
-    }
+    const session = await this.requireActiveSession(current.sessionId);
 
     const identity = await this.config.store.findLoginIdentityById(
       session.userId,
@@ -322,58 +301,109 @@ export class SessionService {
       );
     }
 
-    const nextRefreshToken = generateOpaqueToken();
-    const nextRefreshTokenId = randomUUID();
-    const sessionExpiresAt = new Date(
-      now.getTime() + this.config.refreshTokenTtlSeconds * 1000,
-    );
-
-    await this.transaction(async (client) => {
-      // Insert the replacement first so replaced_by can satisfy the FK.
-      await this.config.store.createRefreshToken(
-        {
-          id: nextRefreshTokenId,
-          sessionId: session.id,
-          tokenHash: hashOpaqueToken(this.config.tokenSecret, nextRefreshToken),
-          expiresAt: sessionExpiresAt,
-        },
-        client,
-      );
-      await this.config.store.markRefreshTokenUsed(
-        current.id,
-        nextRefreshTokenId,
-        now,
-        client,
-      );
-    });
-
-    await this.config.store.touchSession(session.id, now);
-
+    // Resolve account/membership before consuming a token. Transient context
+    // failures must leave the existing credentials usable for a retry.
     const context = await this.config.resolveAuthContext(session.userId);
     assertAuthenticatedAccount(context);
 
-    const accessToken = await this.config.accessTokens.issue(session.userId, {
-      sessionId: session.id,
+    const result = await this.transaction(async (client) => {
+      const locked = await this.config.store.getSession(session.id, client);
+      const now = this.now();
+      if (!locked || locked.revokedAt || locked.expiresAt <= now) {
+        throw new UnauthorizedError(
+          'SESSION_REVOKED', 'The session is no longer valid.',
+        );
+      }
+      // Re-read after the lock: another tab/worker may already have rotated it.
+      const token = await this.config.store.findRefreshTokenByHash(
+        tokenHash, client,
+      );
+      if (!token || token.sessionId !== locked.id) {
+        throw new UnauthorizedError(
+          'INVALID_REFRESH_TOKEN', 'Authentication is required.',
+        );
+      }
+
+      if (token.usedAt && !this.withinReuseGrace(token, now)) {
+        await this.config.store.revokeSession(
+          locked.id, 'refresh_token_replay', now, client,
+        );
+        // Return instead of throwing so the revocation is committed.
+        return { replay: true as const };
+      }
+
+      let refreshToken: string;
+      if (token.usedAt) {
+        refreshToken = await this.recoverConcurrentRefresh(
+          token, rawRefreshToken, now, client,
+        );
+      } else {
+        if (token.expiresAt <= now) {
+          throw new UnauthorizedError(
+            'EXPIRED_REFRESH_TOKEN', 'The refresh token has expired.',
+          );
+        }
+        const nextId = randomUUID();
+        refreshToken = deriveRefreshToken(
+          this.config.tokenSecret, rawRefreshToken, nextId,
+        );
+        const expiresAt = new Date(
+          now.getTime() + this.config.refreshTokenTtlSeconds * 1000,
+        );
+        // Insert first to satisfy replaced_by's foreign key; all three writes
+        // commit together, including the session's sliding expiry.
+        await this.config.store.createRefreshToken(
+          {
+            id: nextId,
+            sessionId: locked.id,
+            tokenHash: hashOpaqueToken(this.config.tokenSecret, refreshToken),
+            expiresAt,
+          },
+          client,
+        );
+        await this.config.store.markRefreshTokenUsed(
+          token.id, nextId, now, client,
+        );
+        await this.config.store.touchSession(locked.id, now, expiresAt, client);
+      }
+
+      const accessToken = await this.config.accessTokens.issue(locked.userId, {
+        sessionId: locked.id,
+      });
+      const issued: IssuedCredentials = {
+        accessToken,
+        refreshToken,
+        expiresIn: this.config.accessTokenTtlSeconds,
+        sessionId: locked.id,
+        context,
+      };
+      return { replay: false as const, issued };
     });
 
+    if (result.replay) {
+      await publishAuthEvent('auth.session.revoked', {
+        ...meta,
+        userId: session.userId,
+        sessionId: session.id,
+        reason: 'refresh_token_replay',
+      });
+      await publishAuthEvent('auth.session.replay_detected', {
+        ...meta,
+        sessionId: session.id,
+        reason: 'refresh_token_replay',
+      });
+      throw new UnauthorizedError(
+        'REFRESH_TOKEN_REPLAY', 'Authentication is required.',
+      );
+    }
+
     await publishAuthEvent('auth.session.refresh', {
-      requestId: meta.requestId,
+      ...meta,
       userId: session.userId,
       sessionId: session.id,
       organizationId: context.membership.organizationId,
-      ipAddress: meta.ipAddress,
-      userAgent: meta.userAgent,
     });
-
-    const issued: IssuedCredentials = {
-      accessToken,
-      refreshToken: nextRefreshToken,
-      expiresIn: this.config.accessTokenTtlSeconds,
-      sessionId: session.id,
-      context,
-    };
-    this.rememberRotation(session.id, issued);
-    return issued;
+    return result.issued;
   }
 }
 

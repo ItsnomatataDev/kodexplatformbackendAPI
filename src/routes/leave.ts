@@ -40,6 +40,11 @@ function isLeaveStaff(auth: AuthContext) {
   );
 }
 
+function readOptionalFilter(value: string | undefined, field: string) {
+  if (!value || value === 'all') return undefined;
+  return requireUuidValue(value, field);
+}
+
 function readPage(c: { req: { query: (name: string) => string | undefined } }) {
   return readListQuery(c);
 }
@@ -202,7 +207,7 @@ export function createLeaveRoutes(dependencies: LeaveRouteDependencies) {
     if (!isLeaveStaff(auth)) {
       throw new ForbiddenError('LEAVE_ADMIN_REQUIRED', 'Leave admin access required.');
     }
-    const officeId = c.req.query('officeId') ?? undefined;
+    const officeId = readOptionalFilter(c.req.query('officeId'), 'officeId');
     const page = await dependencies.store.listRequests(
       organizationId,
       officeId,
@@ -401,7 +406,7 @@ export function createLeaveRoutes(dependencies: LeaveRouteDependencies) {
     if (!isLeaveStaff(auth)) {
       throw new ForbiddenError('LEAVE_ADMIN_REQUIRED', 'Leave admin access required.');
     }
-    const officeId = c.req.query('officeId') ?? undefined;
+    const officeId = readOptionalFilter(c.req.query('officeId'), 'officeId');
     const employees = await dependencies.store.listBalanceEmployees({
       organizationId,
       officeId,
@@ -425,8 +430,8 @@ export function createLeaveRoutes(dependencies: LeaveRouteDependencies) {
     if (!isLeaveStaff(auth)) {
       throw new ForbiddenError('LEAVE_ADMIN_REQUIRED', 'Leave admin access required.');
     }
-    const userId = c.req.query('userId') ?? undefined;
-    const officeId = c.req.query('officeId') ?? undefined;
+    const userId = readOptionalFilter(c.req.query('userId'), 'userId');
+    const officeId = readOptionalFilter(c.req.query('officeId'), 'officeId');
     const limitRaw = Number(c.req.query('limit') ?? 50);
     const entries = await dependencies.store.listBalanceAudit({
       organizationId,
@@ -461,7 +466,7 @@ export function createLeaveRoutes(dependencies: LeaveRouteDependencies) {
   routes.get('/calendar/events', async (c) => {
     const auth = getAuth(c);
     const organizationId = authorizeLeave(auth, 'leave.read');
-    const officeId = c.req.query('officeId') ?? undefined;
+    const officeId = readOptionalFilter(c.req.query('officeId'), 'officeId');
 
     const events = await dependencies.store.listCalendarEvents(
       organizationId,

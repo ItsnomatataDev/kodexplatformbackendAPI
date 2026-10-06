@@ -1,0 +1,15 @@
+src/server.ts
+src/attendance/auto-clock-out.ts
+src/attendance/job-shared.ts
+src/attendance/harare.ts
+src/attendance/postgres-store.ts
+src/attendance/scheduler.ts
+src/attendance/end-of-day.ts
+src/attendance/reconcile.ts
+src/work/auto-stop.ts
+src/work/postgres-store.ts
+src/work/store.ts
+src/routes/attendance.ts
+src/routes/card-ecosystem.ts
+src/cli/end-of-day.ts
+migrations/0058_time_entry_auto_stop.sql

@@ -5,6 +5,8 @@ import { getAuth } from '../auth/middleware.js';
 import { assertAuthorized } from '../authorization/authorize.js';
 import { requireOrganizationId } from '../authorization/organization.js';
 import { env } from '../config/env.js';
+import { autoClockOutBoundary } from '../attendance/harare.js';
+import { END_OF_DAY_TIME } from '../attendance/end-of-day.js';
 import { attachmentDisposition, streamStoredMedia } from '../content/media-stream.js';
 import type { FileStorage } from '../files/storage.js';
 import { notifyCardAssigned, notifyCardCommented } from '../notifications/events.js';
@@ -176,6 +178,9 @@ function serializeTimeEntry(entry: TimeEntryRecord) {
     note: entry.note,
     startedAt: entry.startedAt?.toISOString() ?? null,
     endedAt: entry.endedAt?.toISOString() ?? null,
+    autoStoppedAt: entry.autoStoppedAt?.toISOString() ?? null,
+    autoStopAt: entry.startedAt && !entry.endedAt
+      ? autoClockOutBoundary(entry.startedAt, END_OF_DAY_TIME).toISOString() : null,
     isBillable: entry.isBillable,
     createdAt: entry.createdAt.toISOString(),
     updatedAt: entry.updatedAt.toISOString(),

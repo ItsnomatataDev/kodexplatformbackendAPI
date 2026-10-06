@@ -33,7 +33,10 @@
     "job:attendance:mark-late": "tsx scripts/jobs/attendance-mark-late.ts",
     "job:attendance:auto-clock-out": "tsx scripts/jobs/attendance-auto-clock-out.ts",
     "storage:ensure-chat-buckets": "tsx scripts/ensure-chat-buckets.ts",
-    "storage:ensure-content-buckets": "tsx scripts/ensure-content-buckets.ts"
+    "storage:ensure-content-buckets": "tsx scripts/ensure-content-buckets.ts",
+    "test:obligations-leave:postgres": "RUN_OBLIGATIONS_LEAVE_DB_TESTS=true tsx --test tests/obligations-leave-postgres.test.ts",
+    "test:end-of-day:postgres": "RUN_END_OF_DAY_DB_TESTS=true tsx --test tests/end-of-day-postgres.test.ts",
+    "test:auth-session:postgres": "RUN_AUTH_SESSION_DB_TESTS=true tsx --test tests/auth-session-postgres.test.ts"
   },
   "keywords": [],
   "author": "",

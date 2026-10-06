@@ -1,5 +1,6 @@
 import { db } from '../db/pool.js';
 import { ConflictError, NotFoundError } from '../http/errors.js';
+import { closeDueAttendanceSessions } from './reconcile.js';
 import type {
   AttendanceDailyStatusRecord,
   AttendanceDailyStatusValue,
@@ -147,6 +148,7 @@ function serializeDailyStatus(row: DailyStatusRow): AttendanceDailyStatusRecord 
 
 export class PostgresAttendanceStore implements AttendanceStore {
   async getActiveSession(organizationId: string, userId: string) {
+    await closeDueAttendanceSessions(organizationId, userId);
     const result = await db.query<SessionRow>(
       `
         SELECT ${SESSION_COLUMNS}
@@ -164,6 +166,7 @@ export class PostgresAttendanceStore implements AttendanceStore {
   }
 
   async getSessionById(organizationId: string, sessionId: string) {
+    await closeDueAttendanceSessions(organizationId);
     const result = await db.query<SessionRow>(
       `
         SELECT ${SESSION_COLUMNS}
@@ -178,6 +181,7 @@ export class PostgresAttendanceStore implements AttendanceStore {
   }
 
   async listSessions(input: ListSessionsInput) {
+    await closeDueAttendanceSessions(input.organizationId, input.userId);
     const limit = input.limit ?? 500;
     const result = await db.query<SessionRow>(
       `
@@ -221,6 +225,7 @@ export class PostgresAttendanceStore implements AttendanceStore {
 
   async clockIn(input: ClockInSessionInput) {
     const clockInAt = input.clockInAt ?? new Date();
+    await closeDueAttendanceSessions(input.organizationId, input.userId, clockInAt);
     try {
       const result = await db.query<SessionRow>(
         `

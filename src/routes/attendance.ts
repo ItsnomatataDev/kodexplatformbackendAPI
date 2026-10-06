@@ -14,7 +14,9 @@ import { assertWithinOfficeGeofences } from '../attendance/geofence.js';
 import {
   harareTimeToday,
   parseAttendanceSchedule,
+  autoClockOutBoundary,
 } from '../attendance/harare.js';
+import { END_OF_DAY_TIME } from '../attendance/end-of-day.js';
 import type {
   AttendanceSessionRecord,
   AttendanceStore,
@@ -32,6 +34,8 @@ function serializeSession(session: AttendanceSessionRecord) {
     userId: session.userId,
     clockInAt: session.clockInAt.toISOString(),
     clockOutAt: session.clockOutAt?.toISOString() ?? null,
+    autoClockOutAt: !session.clockOutAt
+      ? autoClockOutBoundary(session.clockInAt, END_OF_DAY_TIME).toISOString() : null,
     status: session.status,
     workSeconds: session.workSeconds,
     clockInMethod: session.clockInMethod,
@@ -122,7 +126,8 @@ function sessionElapsedSeconds(session: AttendanceSessionRecord, now = new Date(
   if (session.clockOutAt) {
     return Math.max(0, session.workSeconds);
   }
-  return secondsBetween(session.clockInAt, now);
+  return secondsBetween(session.clockInAt,
+    new Date(Math.min(now.getTime(), autoClockOutBoundary(session.clockInAt, END_OF_DAY_TIME).getTime())));
 }
 
 export function createAttendanceRoutes(dependencies: AttendanceRouteDependencies) {
@@ -258,6 +263,11 @@ export function createAttendanceRoutes(dependencies: AttendanceRouteDependencies
         );
       }
       authorizeAttendance(auth, 'attendance.manage');
+    }
+
+    // A browser may still show an active session after the backend's daily cutoff.
+    if (existing.clockOutAt && existing.clockOutMethod === 'auto') {
+      return c.json({ session: serializeSession(existing) });
     }
 
     const office = await dependencies.store.getMemberOfficeSettings(

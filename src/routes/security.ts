@@ -6,74 +6,40 @@ import { listOffset } from '../db/list-bounds.js';
 import { ForbiddenError, ServiceUnavailableError, UnauthorizedError, ValidationError } from '../http/errors.js';
 import { readListQuery } from '../http/list-query.js';
 import { rejectIdentityOverrides, readJson, readOptionalInteger, readRequiredText, requireUuidValue } from '../work/http.js';
-import {
-  readAssetStatus,
-  readAssetType,
-  readCredentialRef,
-  readCriticality,
-  readEnvironment,
-  readIntegrationType,
-  readProjectStatus,
-  readSlug,
-  rejectSecretFields,
-} from '../security/foundation-input.js';
+import {readAssetStatus,readAssetType,readCredentialRef,readCriticality,readEnvironment,readIntegrationType,readProjectStatus,readSlug,rejectSecretFields,} from '../security/foundation-input.js';
 import { env } from '../config/env.js';
-import {
-  INTEGRATION_CREDENTIAL_SCOPE,
-  integrationCredentialRateLimitKey,
-  issueIntegrationCredential,
-  listIntegrationCredentials,
-  parseIntegrationCredential,
-  revokeIntegrationCredential,
-  verifyIntegrationCredential,
-} from '../security/integration-credentials.js';
-import {
-  insertIntegrationEvent,
-  normalizeIntegrationEvent,
-} from '../security/integration-ingest.js';
+import {INTEGRATION_CREDENTIAL_SCOPE,integrationCredentialRateLimitKey,issueIntegrationCredential,listIntegrationCredentials,parseIntegrationCredential,revokeIntegrationCredential,verifyIntegrationCredential,} from '../security/integration-credentials.js';
+import {insertIntegrationEvent,normalizeIntegrationEvent,} from '../security/integration-ingest.js';
 import { listSecurityEvents, readSecurityEventQuery } from '../security/event-read.js';
-import {
-  createSecurityAsset,
-  createSecurityIntegration,
-  createSecurityProject,
-  getSecurityProject,
-  listProjectAssets,
-  listProjectIntegrations,
-  retireSecurityAsset,
-  retireSecurityProject,
-  revokeSecurityIntegration,
-  updateSecurityAsset,
-  updateSecurityProject,
-} from '../security/foundation-store.js';
+import {createSecurityAsset,createSecurityIntegration,createSecurityProject,getSecurityProject,listProjectAssets,listProjectIntegrations,retireSecurityAsset,retireSecurityProject,revokeSecurityIntegration,updateSecurityAsset,updateSecurityProject,} from '../security/foundation-store.js';
 import { isSecurityStaff, requireProductOrg } from '../products/staff.js';
 import { requireSecurityPermission } from '../security/permissions.js';
 import { recordSecurityEvent } from '../security/recorder.js';
 import type { PostgresSecurityStore } from '../security/postgres-store.js';
 
 export type SecurityRouteDependencies = { store: PostgresSecurityStore };
-
 function authorize(auth: ReturnType<typeof getAuth>) {
-  const organizationId = requireProductOrg(auth);
-  if (!isSecurityStaff(auth)) {
+    const organizationId = requireProductOrg(auth);
+    if (!isSecurityStaff(auth)) {
     throw new ForbiddenError('SECURITY_ADMIN_REQUIRED', 'Security admin access required.');
-  }
-  return organizationId;
+}
+return organizationId;
 }
 
 function isPrivateIp(ip: string) {
-  return /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|::1|fc00:|fd)/.test(ip);
+return /^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|::1|fc00:|fd)/.test(ip);
 }
 
 export function createSecurityIngestRoutes(
-  dependencies: SecurityRouteDependencies,
+dependencies: SecurityRouteDependencies,
 ) {
-  const routes = new Hono();
+const routes = new Hono();
 
-  routes.post('/', async (c) => {
-    if (c.req.query('token') || c.req.query('access_token')) {
-      throw new UnauthorizedError();
-    }
-    const authHeader = c.req.header('authorization') ?? '';
+routes.post('/', async (c) => {
+  if (c.req.query('token') || c.req.query('access_token')) {
+  throw new UnauthorizedError();
+}
+const authHeader = c.req.header('authorization') ?? '';
     const bearer = authHeader.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
     if (bearer?.startsWith('kint_')) {
       return ingestIntegrationCredential(c, bearer);

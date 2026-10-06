@@ -1,6 +1,7 @@
 import { listLimit, listOffset, pageOf } from '../db/list-bounds.js';
 import { db } from '../db/pool.js';
-import { NotFoundError, ValidationError } from '../http/errors.js';
+import { type TransactionClient, withTransaction } from '../db/transaction.js';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../http/errors.js';
 
 function harareParts(asOf = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -279,18 +280,17 @@ export class PostgresObligationsStore {
     return rows.obligations[0]!;
   }
 
-  async update(id: string, organizationId: string, patch: Record<string, unknown>) {
+  async update(id: string, organizationId: string, patch: Record<string, unknown>, actorUserId: string) {
     const fields: string[] = [];
     const values: unknown[] = [];
     const map: Record<string, string> = {
       title: 'title',
       description: 'description',
       dueDayOfMonth: 'due_day_of_month',
-      assigneeId: 'assignee_id',
       isActive: 'is_active',
     };
     for (const [key, column] of Object.entries(map)) {
-      if (Object.prototype.hasOwnProperty.call(patch, key)) {
+      if (patch[key] !== undefined) {
         let value = patch[key];
         if (key === 'dueDayOfMonth') value = Math.min(Math.max(Math.round(Number(value)), 1), 28);
         if (key === 'isActive') {
@@ -304,16 +304,23 @@ export class PostgresObligationsStore {
         fields.push(`${column} = $${values.length}`);
       }
     }
-    if (!fields.length) throw new ValidationError('No obligation fields to update.');
+    if (!fields.length && patch.assigneeId === undefined) throw new ValidationError('No obligation fields to update.');
     fields.push('updated_at = NOW()');
     values.push(organizationId, id);
-    const result = await db.query(
-      `UPDATE obligations.monthly_obligations SET ${fields.join(', ')}
-       WHERE organization_id = $${values.length - 1} AND id = $${values.length}
-       RETURNING id`,
-      values,
-    );
-    if (!result.rows[0]) throw new NotFoundError('OBLIGATION_NOT_FOUND', 'Obligation not found.');
+    await withTransaction(async (client) => {
+      if (patch.assigneeId !== undefined) {
+        await this.handoverInTransaction(client, {
+          organizationId, obligationId: id, actorUserId,
+          assigneeId: String(patch.assigneeId), canManage: true,
+        }, true);
+      }
+      const result = await client.query(
+        `UPDATE obligations.monthly_obligations SET ${fields.join(', ')}
+         WHERE organization_id = $${values.length - 1} AND id = $${values.length}
+         RETURNING id`, values,
+      );
+      if (!result.rows[0]) throw new NotFoundError('OBLIGATION_NOT_FOUND', 'Obligation not found.');
+    });
     const rows = await this.listObligations(organizationId, null, true, {
       id,
       limit: 1,
@@ -321,17 +328,98 @@ export class PostgresObligationsStore {
     return rows.obligations[0]!;
   }
 
-  async submitOccurrence(occurrenceId: string, userId: string, note?: string | null) {
-    const result = await db.query(
-      `UPDATE obligations.occurrences
-       SET status = 'submitted', submitted_at = NOW(), submitted_by = $2,
-           submission_note = $3, updated_at = NOW()
-       WHERE id = $1
-       RETURNING *`,
-      [occurrenceId, userId, note ?? null],
+  async listHandovers(input: {
+    organizationId: string; obligationId: string; actorUserId: string;
+    canManage: boolean; limit?: number; offset?: number;
+  }) {
+    const visible = await db.query(
+      `SELECT id FROM obligations.monthly_obligations
+       WHERE organization_id = $1 AND id = $2 AND ($3::boolean OR assignee_id = $4)`,
+      [input.organizationId, input.obligationId, input.canManage, input.actorUserId],
     );
-    if (!result.rows[0]) throw new NotFoundError('OCCURRENCE_NOT_FOUND', 'Occurrence not found.');
-    return mapOccurrence(result.rows[0]);
+    if (!visible.rows[0]) throw new NotFoundError('OBLIGATION_NOT_FOUND', 'Obligation not found.');
+    const limit = listLimit(input.limit);
+    const result = await db.query(
+      `SELECT * FROM obligations.handovers WHERE organization_id = $1 AND obligation_id = $2
+       ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4`,
+      [input.organizationId, input.obligationId, limit + 1, listOffset(input.offset)],
+    );
+    const page = pageOf(result.rows, limit);
+    return { handovers: page.rows, hasMore: page.hasMore };
+  }
+
+  async handover(input: {
+    organizationId: string; obligationId: string; actorUserId: string;
+    assigneeId: string; canManage: boolean; note?: string | null;
+  }) {
+    return withTransaction((client) => this.handoverInTransaction(client, input));
+  }
+
+  private async handoverInTransaction(client: TransactionClient, input: {
+    organizationId: string; obligationId: string; actorUserId: string;
+    assigneeId: string; canManage: boolean; note?: string | null;
+  }, allowUnchanged = false) {
+    const current = await client.query(
+      `SELECT * FROM obligations.monthly_obligations
+       WHERE id = $1 AND organization_id = $2 FOR UPDATE`,
+      [input.obligationId, input.organizationId],
+    );
+    const row = current.rows[0];
+    if (!row) throw new NotFoundError('OBLIGATION_NOT_FOUND', 'Obligation not found.');
+    if (!input.canManage && row.assignee_id !== input.actorUserId) {
+      throw new ForbiddenError('OBLIGATION_OWNER_REQUIRED', 'Only the current assignee or staff can hand over this obligation.');
+    }
+    if (!row.is_active || row.archived_at) {
+      throw new ConflictError('OBLIGATION_ARCHIVED', 'Archived obligations cannot be handed over.');
+    }
+    if (row.assignee_id === input.assigneeId) {
+      if (allowUnchanged) return { obligation: mapObligation(row), handover: null };
+      throw new ConflictError('OBLIGATION_ALREADY_ASSIGNED', 'This person already owns the obligation.');
+    }
+    const member = await client.query(
+      `SELECT m.user_id FROM organizations.memberships m
+       JOIN identity.users u ON u.id = m.user_id
+       WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status = 'active'
+         AND u.is_active = TRUE AND u.account_status = 'active' AND u.deleted_at IS NULL
+       FOR SHARE OF m, u`,
+      [input.organizationId, input.assigneeId],
+    );
+    if (!member.rows[0]) throw new ValidationError('assigneeId must be an active member of this organization.');
+    const updated = await client.query(
+      `UPDATE obligations.monthly_obligations SET assignee_id = $2, updated_at = NOW()
+       WHERE id = $1 RETURNING *`, [input.obligationId, input.assigneeId],
+    );
+    const audit = await client.query(
+      `INSERT INTO obligations.handovers
+       (organization_id, obligation_id, from_user_id, to_user_id, actor_user_id, note)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [input.organizationId, input.obligationId, row.assignee_id, input.assigneeId, input.actorUserId, input.note ?? null],
+    );
+    return { obligation: mapObligation(updated.rows[0]), handover: audit.rows[0] };
+  }
+
+  async submitOccurrence(occurrenceId: string, userId: string, note: string | null | undefined,
+    organizationId: string) {
+    return withTransaction(async (client) => {
+      // Serialize submissions with handovers so the previous owner cannot submit after transfer.
+      const owner = await client.query(
+        `SELECT o.id FROM obligations.monthly_obligations o
+         JOIN obligations.occurrences occ ON occ.obligation_id = o.id
+         WHERE occ.id = $1 AND o.organization_id = $2 AND occ.organization_id = $2
+           AND o.assignee_id = $3 AND o.is_active = TRUE AND o.archived_at IS NULL
+         FOR UPDATE OF o`, [occurrenceId, organizationId, userId],
+      );
+      if (!owner.rows[0]) throw new NotFoundError('OCCURRENCE_NOT_FOUND', 'Assigned occurrence not found.');
+      const result = await client.query(
+        `UPDATE obligations.occurrences
+         SET status = 'submitted', submitted_at = NOW(), submitted_by = $2,
+             submission_note = $3, updated_at = NOW()
+         WHERE id = $1 AND status IN ('pending','due','overdue') RETURNING *`,
+        [occurrenceId, userId, note ?? null],
+      );
+      if (!result.rows[0]) throw new ConflictError('OCCURRENCE_CLOSED', 'This occurrence is already closed.');
+      return mapOccurrence(result.rows[0]);
+    });
   }
 
   async listOccurrencesInRange(organizationId: string, start: string, end: string, assigneeId?: string | null) {

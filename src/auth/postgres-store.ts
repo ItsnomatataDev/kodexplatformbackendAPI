@@ -4,6 +4,7 @@ import {
   type TransactionClient,
 } from '../db/transaction.js';
 import type { AccountStatus } from '../authorization/types.js';
+import { ConflictError } from '../http/errors.js';
 import type {
   AuthStore,
   CreateRefreshTokenInput,
@@ -211,8 +212,8 @@ export class PostgresAuthStore implements AuthStore {
     return mapSession(result.rows[0]);
   }
 
-  async getSession(sessionId: string) {
-    const result = await db.query<SessionRow>(
+  async getSession(sessionId: string, client?: TransactionClient) {
+    const result = await executor(client).query<SessionRow>(
       `
         SELECT
           id,
@@ -226,6 +227,7 @@ export class PostgresAuthStore implements AuthStore {
           user_agent
         FROM identity.sessions
         WHERE id = $1
+        ${client ? 'FOR UPDATE' : ''}
       `,
       [sessionId],
     );
@@ -257,14 +259,20 @@ export class PostgresAuthStore implements AuthStore {
     return result.rows.map(mapSession);
   }
 
-  async touchSession(sessionId: string, at: Date) {
-    await db.query(
+  async touchSession(
+    sessionId: string,
+    at: Date,
+    expiresAt: Date,
+    client?: TransactionClient,
+  ) {
+    await executor(client).query(
       `
         UPDATE identity.sessions
-        SET last_seen_at = $2
+        SET last_seen_at = $2, expires_at = GREATEST(expires_at, $3)
         WHERE id = $1
+          AND revoked_at IS NULL
       `,
-      [sessionId, at],
+      [sessionId, at, expiresAt],
     );
   }
 
@@ -339,8 +347,8 @@ export class PostgresAuthStore implements AuthStore {
     return mapRefresh(result.rows[0]);
   }
 
-  async findRefreshTokenByHash(tokenHash: string) {
-    const result = await db.query<RefreshRow>(
+  async findRefreshTokenByHash(tokenHash: string, client?: TransactionClient) {
+    const result = await executor(client).query<RefreshRow>(
       `
         SELECT
           id,
@@ -365,16 +373,24 @@ export class PostgresAuthStore implements AuthStore {
     usedAt: Date,
     client?: TransactionClient,
   ) {
-    await executor(client).query(
+    const result = await executor(client).query(
       `
         UPDATE identity.refresh_tokens
         SET
           used_at = $2,
           replaced_by = $3
         WHERE id = $1
+          AND used_at IS NULL
       `,
       [tokenId, usedAt, replacedBy],
     );
+
+    if (result.rowCount !== 1) {
+      throw new ConflictError(
+        'REFRESH_CONFLICT',
+        'Retry authentication with the current refresh cookie.',
+      );
+    }
   }
 
   async createPasswordResetToken(
