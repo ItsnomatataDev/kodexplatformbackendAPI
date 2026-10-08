@@ -48,4 +48,10 @@ USER kode
 HEALTHCHECK NONE
 CMD ["node", "dist/content/playback-worker.js"]
 
+FROM runtime AS media-auth
+ENV MEDIA_AUTH_PORT=3200
+EXPOSE 3200
+HEALTHCHECK NONE
+CMD ["node", "dist/media-platform/playback/auth-server.js"]
+
 FROM runtime AS api

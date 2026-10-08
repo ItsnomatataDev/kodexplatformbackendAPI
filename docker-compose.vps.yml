@@ -115,7 +115,62 @@ services:
       minio:
         condition: service_started
 
+  media-auth:
+    profiles: [media]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: media-auth
+    restart: unless-stopped
+    environment:
+      MEDIA_AUTH_PORT: 3200
+      MEDIA_PLAYBACK_SIGNING_SECRET: ${MEDIA_PLAYBACK_SIGNING_SECRET:?MEDIA_PLAYBACK_SIGNING_SECRET is required}
+      MEDIA_ORIGIN_ENDPOINT: http://minio:9000
+      MEDIA_ORIGIN_BUCKET: content-review-assets
+      MEDIA_ORIGIN_ACCESS_KEY: ${MEDIA_ORIGIN_ACCESS_KEY:?Dedicated read-only media origin key required}
+      MEDIA_ORIGIN_SECRET_KEY: ${MEDIA_ORIGIN_SECRET_KEY:?Dedicated read-only media origin secret required}
+    networks:
+      - media-private
+    read_only: true
+    tmpfs:
+      - /tmp:size=67108864,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.25
+
+  media-edge:
+    profiles: [media]
+    image: nginx:1.28-alpine
+    entrypoint: [nginx, -g, "daemon off;"]
+    cpus: 0.5
+    mem_limit: 256m
+    pids_limit: 64
+    restart: unless-stopped
+    user: "101:101"
+    ports:
+      - "127.0.0.1:3100:8080"
+    volumes:
+      - ./deploy/media-edge/nginx.conf:/etc/nginx/nginx.conf:ro
+      - kode_media_edge_cache:/var/cache/nginx
+    read_only: true
+    tmpfs:
+      - /tmp:size=268435456,mode=1777
+      - /var/run:size=1048576,mode=0755
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks:
+      - default
+      - media-private
+
+networks:
+  media-private:
+    driver: bridge
+    internal: true
+
 volumes:
+  kode_media_edge_cache:
   kode_vps_postgres_data:
   kode_vps_redis_data:
   kode_vps_minio_data:
