@@ -6,6 +6,7 @@ import { logger } from '../config/logger.js';
 import { db } from '../db/pool.js';
 import { MinioFileStorage } from '../files/minio-storage.js';
 
+import { MediaVariantDrafts } from './processing/drafts.js';
 import { MediaJobService } from './jobs.js';
 import { PostgresMediaPlatformStore } from './postgres-store.js';
 import { processAdaptiveHls } from './processing/adaptive-hls.js';
@@ -101,7 +102,7 @@ function startHeartbeat(
       }
 
       try {
-        const heartbeat = await jobs.heartbeat(job.id);
+        const heartbeat = await jobs.heartbeat(job);
 
         if (heartbeat === null) {
           logger.error(
@@ -130,19 +131,15 @@ function startHeartbeat(
           'media.worker.heartbeat',
         );
       } catch (error) {
-        /*
-         * A transient database error does not immediately prove
-         * ownership was lost. Keep processing until the next
-         * heartbeat attempt or until PostgreSQL rejects ownership.
-         *
-         * The 90-second lease gives us room for multiple attempts.
-         */
+        // Stop publishing when ownership cannot be renewed. Database fencing
+        // and immutable generation prefixes prevent stale publication.
+        jobController.abort(new Error('media_job_lease_lost'));
         logger.warn(
           {
             jobId: job.id,
             assetId: job.assetId,
             workerId: WORKER_ID,
-            error,
+            code: 'heartbeat_failed',
           },
           'media.worker.heartbeat_error',
         );
@@ -184,12 +181,7 @@ async function processJob(job: MediaJob): Promise<void> {
     'media.worker.job_started',
   );
 
-  await store.updateAssetStatus({
-    assetId: asset.id,
-    status: 'processing',
-    errorCode: null,
-    errorMessage: null,
-  });
+  const drafts = new MediaVariantDrafts(job.fencingToken);
 
   const jobController = new AbortController();
 
@@ -235,9 +227,10 @@ async function processJob(job: MediaJob): Promise<void> {
       case 'playback_mp4': {
         const variant = await processPlaybackMp4({
           asset,
+          generation: job.fencingToken,
           source,
           storage,
-          store,
+          store: drafts,
           signal: jobController.signal,
         });
 
@@ -261,9 +254,10 @@ async function processJob(job: MediaJob): Promise<void> {
       case 'adaptive_hls': {
         const result = await processAdaptiveHls({
           asset,
+          generation: job.fencingToken,
           source,
           storage,
-          store,
+          store: drafts,
           signal: jobController.signal,
         });
 
@@ -309,20 +303,13 @@ async function processJob(job: MediaJob): Promise<void> {
       throw new Error('media_job_aborted');
     }
 
-    const completed = await jobs.complete(job.id);
+    const completed = await jobs.complete(job, drafts.ready());
 
     if (completed === null) {
       throw new Error(
         `media_job_lease_lost:${job.id}`,
       );
     }
-
-    await store.updateAssetStatus({
-      assetId: asset.id,
-      status: 'ready',
-      errorCode: null,
-      errorMessage: null,
-    });
 
     logger.info(
       {
@@ -460,7 +447,7 @@ async function handleJobFailure(
         jobType: job.jobType,
         workerId: WORKER_ID,
         errorName: err.name,
-        errorMessage: err.message,
+        errorCode: 'media_processing_failed',
       },
       'media.worker.lease_lost_failure_ignored',
     );
@@ -471,7 +458,7 @@ async function handleJobFailure(
   const retryable = isRetryableError(error);
 
   const failedJob = await jobs.fail(
-    job.id,
+    job,
     error,
     retryable,
   );
@@ -484,40 +471,12 @@ async function handleJobFailure(
         jobType: job.jobType,
         workerId: WORKER_ID,
         errorName: err.name,
-        errorMessage: err.message,
+        errorCode: 'media_processing_failed',
       },
       'media.worker.failure_state_conflict',
     );
 
     return;
-  }
-
-  /*
-   * Only a terminal source-level failure poisons the asset.
-   *
-   * A failed thumbnail/HLS/playback derivative must not make
-   * an otherwise valid source asset globally unusable.
-   */
-  if (
-    failedJob.status === 'failed' &&
-    isAssetFatalError(error)
-  ) {
-    await store.updateAssetStatus({
-      assetId: job.assetId,
-      status: 'failed',
-      errorCode: err.name || null,
-      errorMessage:
-        err.message || 'Media source processing failed',
-    }).catch((assetError) => {
-      logger.error(
-        {
-          jobId: job.id,
-          assetId: job.assetId,
-          error: assetError,
-        },
-        'media.worker.asset_failure_update_failed',
-      );
-    });
   }
 
   logger.warn(
@@ -536,7 +495,7 @@ async function handleJobFailure(
       assetFatal: isAssetFatalError(error),
       workerId: WORKER_ID,
       errorName: err.name,
-      errorMessage: err.message,
+      errorCode: 'media_processing_failed',
     },
     failedJob.status === 'queued'
       ? 'media.worker.job_retry_scheduled'
@@ -626,7 +585,7 @@ async function run(): Promise<void> {
           assetId: job?.assetId ?? null,
           workerId: WORKER_ID,
           errorName: err.name,
-          errorMessage: err.message,
+          errorCode: 'media_processing_failed',
         },
         'media.worker.loop_error',
       );

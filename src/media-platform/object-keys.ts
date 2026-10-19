@@ -35,3 +35,10 @@ export function mediaHlsRenditionPrefix(
 export function mediaThumbnailObjectKey(assetId: string): string {
   return `${mediaAssetPrefix(assetId)}/thumbnails/poster.jpg`;
 }
+
+export function mediaGenerationPrefix(assetId: string, generation: string): string {
+  if (!/^[0-9a-f-]{36}$/i.test(assetId) || !/^[1-9][0-9]{0,18}$/.test(generation)) {
+    throw new Error('media_generation_invalid');
+  }
+  return `.media/v2/${assetId.toLowerCase()}/${generation}`;
+}

@@ -2,6 +2,7 @@ import type { MediaPlatformStore } from './store.js';
 import type {
   MediaJob,
   MediaJobType,
+  UpsertMediaVariantInput,
 } from './types.js';
 
 export type EnqueueMediaJobOptions = {
@@ -58,9 +59,10 @@ export class MediaJobService {
     });
   }
 
-  async heartbeat(jobId: string): Promise<MediaJob | null> {
+  async heartbeat(job: MediaJob): Promise<MediaJob | null> {
     return this.store.heartbeatJob({
-      jobId,
+      jobId: job.id,
+      fencingToken: job.fencingToken,
       workerId: this.workerId,
       leaseMs: this.leaseMs,
     });
@@ -70,22 +72,25 @@ export class MediaJobService {
     return this.store.recoverExpiredJobs();
   }
 
-  async complete(jobId: string): Promise<MediaJob | null> {
+  async complete(job: MediaJob, variants: UpsertMediaVariantInput[]): Promise<MediaJob | null> {
     return this.store.completeJob({
-      jobId,
+      variants,
+      jobId: job.id,
+      fencingToken: job.fencingToken,
       workerId: this.workerId,
     });
   }
 
   async fail(
-    jobId: string,
+    job: MediaJob,
     error: unknown,
     retryable = false,
   ): Promise<MediaJob | null> {
     const normalized = normalizeJobError(error);
 
     return this.store.failJob({
-      jobId,
+      jobId: job.id,
+      fencingToken: job.fencingToken,
       workerId: this.workerId,
       retryable,
       errorCode: normalized.code,

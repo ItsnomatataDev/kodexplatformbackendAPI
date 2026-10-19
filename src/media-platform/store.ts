@@ -8,7 +8,6 @@ import type {
   MediaAsset,
   MediaJob,
   MediaVariant,
-  UpdateMediaAssetStatusInput,
   UpdateMediaVariantStatusInput,
   UpsertMediaVariantInput,
 } from './types.js';
@@ -22,18 +21,6 @@ export interface MediaPlatformStore {
 
   getAssetById(assetId: string): Promise<MediaAsset | null>;
 
-  updateAssetStatus(
-    input: UpdateMediaAssetStatusInput,
-  ): Promise<MediaAsset | null>;
-
-  // ----------------------------------------------------------
-  // Variants
-  // ----------------------------------------------------------
-
-  upsertVariant(
-    input: UpsertMediaVariantInput,
-  ): Promise<MediaVariant>;
-
   getVariantById(
     variantId: string,
   ): Promise<MediaVariant | null>;
@@ -42,13 +29,10 @@ export interface MediaPlatformStore {
     assetId: string,
   ): Promise<MediaVariant[]>;
 
-  updateVariantStatus(
-    input: UpdateMediaVariantStatusInput,
-  ): Promise<MediaVariant | null>;
-
-  // ----------------------------------------------------------
-  // Processing jobs
-  // ----------------------------------------------------------
+  getAssetForOrganization(organizationId: string, assetId: string): Promise<MediaAsset | null>;
+  createAssetAndJob(input: CreateMediaAssetInput): Promise<MediaAsset>;
+  enqueueForOrganization(organizationId: string, assetId: string): Promise<MediaJob | null>;
+  getJobsForAsset(organizationId: string, assetId: string): Promise<MediaJob[]>;
 
   enqueueJob(input: CreateMediaJobInput): Promise<MediaJob>;
 
@@ -85,4 +69,10 @@ export interface MediaPlatformStore {
   failJob(
     input: FailMediaJobInput,
   ): Promise<MediaJob | null>;
+}
+
+/** Processor-local drafts: these operations do not write shared database state. */
+export interface MediaVariantDraftStore {
+  upsertVariant(input: UpsertMediaVariantInput): Promise<MediaVariant>;
+  updateVariantStatus(input: UpdateMediaVariantStatusInput): Promise<MediaVariant | null>;
 }

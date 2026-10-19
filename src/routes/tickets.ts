@@ -56,6 +56,7 @@ function serializeTicket(ticket: TicketRecord) {
     userId: ticket.userId,
     createdBy: ticket.createdBy,
     assignedTo: ticket.assignedTo,
+    assignedAt: ticket.assignedAt?.toISOString() ?? null,
     requesterEmail: ticket.requesterEmail,
     externalName: ticket.externalName,
     externalCompany: ticket.externalCompany,

@@ -48,10 +48,26 @@ USER kode
 HEALTHCHECK NONE
 CMD ["node", "dist/content/playback-worker.js"]
 
+# Separate from the legacy Content Studio worker; opt-in deployment only.
+FROM media-worker AS media-platform-worker
+USER root
+RUN mkdir -p /scratch && chown 10001:10001 /scratch
+USER kode
+ENV TMPDIR=/scratch
+CMD ["node", "dist/media-platform/processing-worker.js"]
+
 FROM runtime AS media-auth
 ENV MEDIA_AUTH_PORT=3200
 EXPOSE 3200
 HEALTHCHECK NONE
 CMD ["node", "dist/media-platform/playback/auth-server.js"]
+
+# Opt-in independent authentication runtime; ordinary API remains the default final target.
+FROM runtime AS infrastructure
+ENV INFRA_ENABLED=false INFRA_PORT=3101 INFRA_HOST=0.0.0.0
+EXPOSE 3101
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:3101/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+CMD ["node", "dist/infrastructure/server.js"]
 
 FROM runtime AS api

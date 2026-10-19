@@ -439,7 +439,7 @@ export class PostgresContentStore implements ContentStore {
          AND client_id = $3
          AND status IS DISTINCT FROM 'archived'
          AND to_char(COALESCE(scheduled_at, created_at) AT TIME ZONE 'UTC', 'YYYY-MM') = $4
-       ORDER BY created_at DESC, id DESC
+       ORDER BY scheduled_at DESC NULLS LAST, created_at DESC, id DESC
        LIMIT 1`,
       [params.organizationId, params.officeId, params.clientId, params.monthKey],
     );

@@ -1,30 +1,16 @@
 import { createReadStream } from 'node:fs';
-import {
-  mkdir,
-  readdir,
-  readFile,
-  stat,
-} from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 
 import type { FileStorage } from '../../files/storage.js';
-import {
-  mediaHlsMasterObjectKey,
-  mediaHlsRenditionPrefix,
-} from '../object-keys.js';
-import type { MediaPlatformStore } from '../store.js';
-import type {
-  MediaAsset,
-  MediaVariant,
-} from '../types.js';
+import { mediaGenerationPrefix } from '../object-keys.js';
+import type { MediaVariantDraftStore } from '../store.js';
+import type { MediaAsset, MediaVariant } from '../types.js';
 import { runFfmpeg } from './ffmpeg.js';
 import type { StagedMediaSource } from './source.js';
 
-type RenditionName =
-  | '1080p'
-  | '720p'
-  | '480p';
+type RenditionName = '1080p' | '720p' | '480p';
 
 type RenditionDefinition = {
   name: RenditionName;
@@ -43,9 +29,10 @@ type PreparedRendition = RenditionDefinition & {
 
 export type ProcessAdaptiveHlsInput = {
   asset: MediaAsset;
+  generation: string;
   source: StagedMediaSource;
   storage: FileStorage;
-  store: MediaPlatformStore;
+  store: MediaVariantDraftStore;
   signal: AbortSignal;
 };
 
@@ -55,6 +42,8 @@ export type AdaptiveHlsResult = {
   renditionCount: number;
 };
 
+// Historical tier names are long-edge caps, not conventional vertical resolutions.
+// Keep the existing ladder; advertise actual dimensions in the master playlist.
 const RENDITIONS: RenditionDefinition[] = [
   {
     name: '1080p',
@@ -85,30 +74,17 @@ const RENDITIONS: RenditionDefinition[] = [
 export async function processAdaptiveHls(
   input: ProcessAdaptiveHlsInput,
 ): Promise<AdaptiveHlsResult> {
-  const {
-    asset,
-    source,
-    storage,
-    store,
-    signal,
-  } = input;
+  const { asset, generation, source, storage, store, signal } = input;
 
   if (!storage.putObjectStream) {
-    throw new Error(
-      'media_storage_stream_upload_not_supported',
-    );
+    throw new Error('media_storage_stream_upload_not_supported');
   }
 
   const sourceWidth = source.probe.width;
   const sourceHeight = source.probe.height;
 
-  if (
-    sourceWidth === null ||
-    sourceHeight === null
-  ) {
-    throw new Error(
-      'media_hls_source_dimensions_unknown',
-    );
+  if (sourceWidth === null || sourceHeight === null) {
+    throw new Error('media_hls_source_dimensions_unknown');
   }
 
   const renditions = selectRenditions(
@@ -118,9 +94,7 @@ export async function processAdaptiveHls(
   );
 
   if (renditions.length === 0) {
-    throw new Error(
-      'media_hls_no_supported_renditions',
-    );
+    throw new Error('media_hls_no_supported_renditions');
   }
 
   const variants: MediaVariant[] = [];
@@ -130,31 +104,17 @@ export async function processAdaptiveHls(
       throwAbortReason(signal);
     }
 
-    await mkdir(
-      rendition.directory,
-      { recursive: true },
-    );
+    await mkdir(rendition.directory, { recursive: true });
 
-    const playlistPath = join(
-      rendition.directory,
-      'index.m3u8',
-    );
+    const playlistPath = join(rendition.directory, 'index.m3u8');
 
-    const segmentPattern = join(
-      rendition.directory,
-      'segment_%05d.m4s',
-    );
+    const segmentPattern = join(rendition.directory, 'segment_%05d.m4s');
 
     const initFilename = 'init.mp4';
 
-    const objectPrefix =
-      mediaHlsRenditionPrefix(
-        asset.id,
-        rendition.name,
-      );
+    const objectPrefix = `${mediaGenerationPrefix(asset.id, generation)}/hls/${rendition.name}`;
 
-    const playlistObjectKey =
-      `${objectPrefix}/index.m3u8`;
+    const playlistObjectKey = `${objectPrefix}/index.m3u8`;
 
     const variant = await store.upsertVariant({
       assetId: asset.id,
@@ -178,75 +138,61 @@ export async function processAdaptiveHls(
           segmentPattern,
           initFilename,
           rendition,
-          hasAudio:
-            source.probe.audioCodec !== null,
+          hasAudio: source.probe.audioCodec !== null,
         }),
         signal,
       );
 
-      await validateRendition(
-        rendition.directory,
-      );
+      await validateRendition(rendition.directory);
 
-      /*
-       * Upload media objects before the rendition playlist.
-       * A playlist must never reference objects which have not
-       * reached object storage yet.
-       */
-      const uploadedBytes =
-        await uploadRenditionDirectory({
-          storage,
-          bucket: asset.originBucket,
-          objectPrefix,
-          directory: rendition.directory,
-          signal,
-        });
+      const uploadedBytes = await uploadRenditionDirectory({
+        storage,
+        bucket: asset.originBucket,
+        objectPrefix,
+        directory: rendition.directory,
+        signal,
+      });
 
-      const readyVariant =
-        await store.upsertVariant({
-          assetId: asset.id,
-          kind: `hls_${rendition.name}`,
-          width: rendition.width,
-          height: rendition.height,
-          bitrateBps: rendition.videoBitrate,
-          codec: 'h264',
-          container: 'hls',
-          bucket: asset.originBucket,
-          objectKey: playlistObjectKey,
-          sizeBytes: uploadedBytes,
-          status: 'ready',
-        });
+      const readyVariant = await store.upsertVariant({
+        assetId: asset.id,
+        kind: `hls_${rendition.name}`,
+        width: rendition.width,
+        height: rendition.height,
+        bitrateBps: rendition.videoBitrate,
+        codec: 'h264',
+        container: 'hls',
+        bucket: asset.originBucket,
+        objectKey: playlistObjectKey,
+        sizeBytes: uploadedBytes,
+        status: 'ready',
+      });
 
       variants.push(readyVariant);
     } catch (error) {
-      await store.updateVariantStatus({
-        variantId: variant.id,
-        status: 'failed',
-      }).catch(() => {});
+      await store
+        .updateVariantStatus({
+          variantId: variant.id,
+          status: 'failed',
+        })
+        .catch(() => {});
 
       throw error;
     }
   }
 
-  /*
-   * The master playlist is the publication boundary.
-   * It is uploaded only after every rendition and its segments
-   * are safely present in object storage.
-   */
   const master = buildMasterPlaylist(
     renditions,
     source.probe.audioCodec !== null,
   );
 
-  const masterObjectKey =
-    mediaHlsMasterObjectKey(asset.id);
+  const masterObjectKey = `${mediaGenerationPrefix(asset.id, generation)}/hls/master.m3u8`;
 
+  signal.throwIfAborted();
   await storage.putObject({
     bucket: asset.originBucket,
     objectKey: masterObjectKey,
     body: Buffer.from(master, 'utf8'),
-    contentType:
-      'application/vnd.apple.mpegurl',
+    contentType: 'application/vnd.apple.mpegurl',
   });
 
   return {
@@ -256,37 +202,19 @@ export async function processAdaptiveHls(
   };
 }
 
-function selectRenditions(
+export function selectRenditions(
   sourceWidth: number,
   sourceHeight: number,
   rootDirectory: string,
 ): PreparedRendition[] {
-  /*
-   * Treat the longest source dimension as the available
-   * resolution. This handles portrait video correctly:
-   *
-   *   1080 x 1920
-   *
-   * can still produce a 1080-class rendition while preserving
-   * its portrait aspect ratio.
-   */
-  const sourceLongEdge = Math.max(
-    sourceWidth,
-    sourceHeight,
-  );
+  const sourceLongEdge = Math.max(sourceWidth, sourceHeight);
 
   const selected = RENDITIONS.filter(
-    (rendition) =>
-      sourceLongEdge >= rendition.targetHeight,
+    (rendition) => sourceLongEdge >= rendition.targetHeight,
   );
 
-  /*
-   * Very small sources still need one rendition. We use the
-   * lowest profile but never upscale either dimension.
-   */
   if (selected.length === 0) {
-    const lowest =
-      RENDITIONS[RENDITIONS.length - 1];
+    const lowest = RENDITIONS[RENDITIONS.length - 1];
 
     const dimensions = fitWithinLongEdge(
       sourceWidth,
@@ -299,10 +227,7 @@ function selectRenditions(
         ...lowest,
         width: dimensions.width,
         height: dimensions.height,
-        directory: join(
-          rootDirectory,
-          `hls-${lowest.name}`,
-        ),
+        directory: join(rootDirectory, `hls-${lowest.name}`),
       },
     ];
   }
@@ -318,15 +243,11 @@ function selectRenditions(
       ...rendition,
       width: dimensions.width,
       height: dimensions.height,
-      directory: join(
-        rootDirectory,
-        `hls-${rendition.name}`,
-      ),
+      directory: join(rootDirectory, `hls-${rendition.name}`),
     };
   });
 }
-
-function fitWithinLongEdge(
+export function fitWithinLongEdge(
   sourceWidth: number,
   sourceHeight: number,
   targetLongEdge: number,
@@ -334,37 +255,20 @@ function fitWithinLongEdge(
   width: number;
   height: number;
 } {
-  const longEdge = Math.max(
-    sourceWidth,
-    sourceHeight,
-  );
+  const longEdge = Math.max(sourceWidth, sourceHeight);
 
-  const scale = Math.min(
-    1,
-    targetLongEdge / longEdge,
-  );
+  const scale = Math.min(1, targetLongEdge / longEdge);
 
   return {
-    width: evenDimension(
-      sourceWidth * scale,
-    ),
-    height: evenDimension(
-      sourceHeight * scale,
-    ),
+    width: evenDimension(sourceWidth * scale),
+    height: evenDimension(sourceHeight * scale),
   };
 }
 
-function evenDimension(
-  value: number,
-): number {
-  const rounded = Math.max(
-    2,
-    Math.round(value),
-  );
+export function evenDimension(value: number): number {
+  const rounded = Math.max(2, Math.round(value));
 
-  return rounded % 2 === 0
-    ? rounded
-    : rounded - 1;
+  return rounded % 2 === 0 ? rounded : rounded - 1;
 }
 
 function buildRenditionArgs(input: {
@@ -397,6 +301,8 @@ function buildRenditionArgs(input: {
 
     '-c:v',
     'libx264',
+    '-threads',
+    '2',
 
     '-preset',
     'fast',
@@ -472,88 +378,55 @@ function buildRenditionArgs(input: {
   return args;
 }
 
-async function validateRendition(
-  directory: string,
-): Promise<void> {
+async function validateRendition(directory: string): Promise<void> {
   const files = await readdir(directory);
 
   if (!files.includes('index.m3u8')) {
-    throw new Error(
-      'media_hls_playlist_missing',
-    );
+    throw new Error('media_hls_playlist_missing');
   }
 
   if (!files.includes('init.mp4')) {
-    throw new Error(
-      'media_hls_init_segment_missing',
-    );
+    throw new Error('media_hls_init_segment_missing');
   }
 
-  const mediaSegments = files.filter(
-    (filename) =>
-      filename.endsWith('.m4s'),
-  );
+  const mediaSegments = files.filter((filename) => filename.endsWith('.m4s'));
 
   if (mediaSegments.length === 0) {
-    throw new Error(
-      'media_hls_segments_missing',
-    );
+    throw new Error('media_hls_segments_missing');
   }
 
-  const playlist = await readFile(
-    join(directory, 'index.m3u8'),
-    'utf8',
-  );
+  const playlist = await readFile(join(directory, 'index.m3u8'), 'utf8');
 
   if (
     !playlist.includes('#EXTM3U') ||
     !playlist.includes('#EXT-X-MAP') ||
     !playlist.includes('.m4s')
   ) {
-    throw new Error(
-      'media_hls_playlist_invalid',
-    );
+    throw new Error('media_hls_playlist_invalid');
   }
 }
 
-async function uploadRenditionDirectory(
-  input: {
-    storage: FileStorage;
-    bucket: string;
-    objectPrefix: string;
-    directory: string;
-    signal: AbortSignal;
-  },
-): Promise<number> {
-  const {
-    storage,
-    bucket,
-    objectPrefix,
-    directory,
-    signal,
-  } = input;
+async function uploadRenditionDirectory(input: {
+  storage: FileStorage;
+  bucket: string;
+  objectPrefix: string;
+  directory: string;
+  signal: AbortSignal;
+}): Promise<number> {
+  const { storage, bucket, objectPrefix, directory, signal } = input;
 
   if (!storage.putObjectStream) {
-    throw new Error(
-      'media_storage_stream_upload_not_supported',
-    );
+    throw new Error('media_storage_stream_upload_not_supported');
   }
 
   const filenames = await readdir(directory);
 
   const mediaFiles = filenames
-    .filter(
-      (filename) =>
-        filename === 'init.mp4' ||
-        filename.endsWith('.m4s'),
-    )
+    .filter((filename) => filename === 'init.mp4' || filename.endsWith('.m4s'))
     .sort();
 
   const playlistFiles = filenames
-    .filter(
-      (filename) =>
-        filename.endsWith('.m3u8'),
-    )
+    .filter((filename) => filename.endsWith('.m3u8'))
     .sort();
 
   let totalBytes = 0;
@@ -569,12 +442,9 @@ async function uploadRenditionDirectory(
     totalBytes += await uploadFile({
       storage,
       bucket,
-      objectKey:
-        `${objectPrefix}/${filename}`,
+      objectKey: `${objectPrefix}/${filename}`,
       path: join(directory, filename),
-      contentType: contentTypeFor(
-        filename,
-      ),
+      contentType: contentTypeFor(filename),
     });
   }
 
@@ -589,57 +459,37 @@ async function uploadRenditionDirectory(
     totalBytes += await uploadFile({
       storage,
       bucket,
-      objectKey:
-        `${objectPrefix}/${filename}`,
+      objectKey: `${objectPrefix}/${filename}`,
       path: join(directory, filename),
-      contentType: contentTypeFor(
-        filename,
-      ),
+      contentType: contentTypeFor(filename),
     });
   }
 
   return totalBytes;
 }
 
-async function uploadFile(
-  input: {
-    storage: FileStorage;
-    bucket: string;
-    objectKey: string;
-    path: string;
-    contentType: string;
-  },
-): Promise<number> {
-  const {
-    storage,
-    bucket,
-    objectKey,
-    path,
-    contentType,
-  } = input;
+async function uploadFile(input: {
+  storage: FileStorage;
+  bucket: string;
+  objectKey: string;
+  path: string;
+  contentType: string;
+}): Promise<number> {
+  const { storage, bucket, objectKey, path, contentType } = input;
 
   if (!storage.putObjectStream) {
-    throw new Error(
-      'media_storage_stream_upload_not_supported',
-    );
+    throw new Error('media_storage_stream_upload_not_supported');
   }
 
   const fileStat = await stat(path);
 
-  if (
-    !fileStat.isFile() ||
-    fileStat.size <= 0
-  ) {
-    throw new Error(
-      `media_hls_output_invalid:${objectKey}`,
-    );
+  if (!fileStat.isFile() || fileStat.size <= 0) {
+    throw new Error(`media_hls_output_invalid:${objectKey}`);
   }
 
   const stream = createReadStream(path);
 
-  const webStream = Readable.toWeb(
-    stream,
-  ) as ReadableStream<Uint8Array>;
+  const webStream = Readable.toWeb(stream) as ReadableStream<Uint8Array>;
 
   await storage.putObjectStream({
     bucket,
@@ -652,17 +502,12 @@ async function uploadFile(
   return fileStat.size;
 }
 
-function contentTypeFor(
-  filename: string,
-): string {
+function contentTypeFor(filename: string): string {
   if (filename.endsWith('.m3u8')) {
     return 'application/vnd.apple.mpegurl';
   }
 
-  if (
-    filename.endsWith('.m4s') ||
-    filename === 'init.mp4'
-  ) {
+  if (filename.endsWith('.m4s') || filename === 'init.mp4') {
     return 'video/mp4';
   }
 
@@ -673,22 +518,14 @@ function buildMasterPlaylist(
   renditions: PreparedRendition[],
   hasAudio: boolean,
 ): string {
-  const lines = [
-    '#EXTM3U',
-    '#EXT-X-VERSION:7',
-  ];
+  const lines = ['#EXTM3U', '#EXT-X-VERSION:7'];
 
   for (const rendition of renditions) {
     const bandwidth =
-      rendition.videoBitrate +
-      (hasAudio ? rendition.audioBitrate : 0);
-
-    const codecs = hasAudio
-      ? 'avc1.4d401f,mp4a.40.2'
-      : 'avc1.4d401f';
+      rendition.maxRate + (hasAudio ? rendition.audioBitrate : 0);
 
     lines.push(
-      `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${rendition.width}x${rendition.height},CODECS="${codecs}"`,
+      `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${rendition.width}x${rendition.height}`,
       `${rendition.name}/index.m3u8`,
     );
   }
@@ -696,16 +533,12 @@ function buildMasterPlaylist(
   return `${lines.join('\n')}\n`;
 }
 
-function throwAbortReason(
-  signal: AbortSignal,
-): never {
+function throwAbortReason(signal: AbortSignal): never {
   const reason = signal.reason;
 
   if (reason instanceof Error) {
     throw reason;
   }
 
-  throw new Error(
-    'media_job_aborted',
-  );
+  throw new Error('media_job_aborted');
 }

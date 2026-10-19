@@ -38,9 +38,17 @@ Keep the existing backend API integration and make these focused changes in the 
 
 The frontend checkout was inspected but not edited during this backend task. Its existing after-18:00 Resume restriction remains until this follow-up is applied.
 
-## Release
+## Current VPS deployment finding — 2026-10-10
 
-Migration **0058_time_entry_auto_stop.sql must succeed before restarting this backend**. The previous handover release already applied migrations through 0057 on the VPS. No VPS changes were performed for this end-of-day fix.
+Live inspection at 19:59 Harare confirmed `dist/server.js` references `startAttendanceScheduler`, but the scheduler lacks `runTimeEntryAutoStop`, `dist/work/auto-stop.js` is missing, and `work.time_entries.auto_stopped_at` is absent. There are five open task timers (oldest start 2026-09-25 07:32:35.653 UTC), and zero open attendance sessions. This confirms missing task-auto-stop deployment; it does not establish a current attendance failure.
+
+The existing end-of-day implementation passed all nine real PostgreSQL test checks in a disposable database during this audit. A scoped release is packaged at `.local/kode-end-of-day-release.tar.gz`: source patch, existing-source backup manifest, canonical migration 0060, and an explicit transactional migration wrapper. Check patch compatibility before applying. The wrapper applies and records only 0060; live 0062 is already applied, and 0061 is unrelated.
+
+**Do not use the full migration command below for the current partial release.** Use the scoped wrapper, then apply the patch and build/restart only the API. On startup, overdue timers close at their historical Harare cutoff. The user completed the production rollout through their SSH session; see the live confirmation below.
+
+## Earlier release instructions (superseded for current VPS rollout)
+
+Migration **0060_time_entry_auto_stop.sql (formerly 0058) must succeed before restarting this backend**. The migration planner recognizes an existing `0058 / time_entry_auto_stop` ledger row without rerunning it or rewriting history. See the private CDN milestone-2 handoff before mixing release histories. The previous handover release already applied migrations through 0057 on the VPS. No VPS changes were performed for this end-of-day fix.
 
 Upload this release's source files from the local Mac; the manifest includes `src/server.ts` so the running API actually starts the scheduler:
 
@@ -80,3 +88,11 @@ DATABASE_NAME=kode_obligations_leave_test npm run test:end-of-day:postgres
 ```
 
 The test uses actual database triggers to simulate failed notification, session, and card-cache writes. Coverage includes exact cutoff timestamps, downtime catch-up, >500 records, concurrent jobs, rollback, stale updates, explicit resumed segments, presence-only and missing-profile users, suspended organizations, and read reconciliation. Test fixtures are removed afterward. A database connection failure fails this explicitly enabled command.
+
+## Live confirmation — 2026-10-10
+
+User-provided deployment output confirms migration 0060 committed, the scoped backend patch applied, the API image built successfully, and `kode-vps-api` became healthy. Image: `sha256:d840c01c2b1d03b076dd872f56104f55b30462c62b5c5e3c084244281cc05720`.
+
+Startup logged `End-of-day scheduler started` with `intervalMs: 60000`, cutoff `18:00 Africa/Harare`, and jobs `attendance` and `time_entries`. The same startup logged `Task timers automatically stopped.` with `stopped: 5`. The health endpoint returned 200. All five previously observed open task timers were caught up by the deployed job.
+
+There were zero open attendance sessions before deployment, so live attendance closure was not exercised in this rollout; PostgreSQL integration tests cover it. Browser display verification and observation at the next daily cutoff remain separate checks. The existing frontend after-18:00 Start/Resume restriction has not been changed by this backend release.

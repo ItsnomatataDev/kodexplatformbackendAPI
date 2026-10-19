@@ -389,3 +389,27 @@ test('never exposes the origin host in the authorization response', async () => 
     },
   );
 });
+
+test('cache identity is stable across token renewal and differs for distinct objects', async () => {
+  await withOriginServer({ async sign(input) {
+    return `http://minio:9000/content-review-assets/.media/v1/${input.assetId}/${input.objectPath}?X-Amz-Signature=${Math.random()}`;
+  } }, async (baseUrl) => {
+    const authorize = (uri: string) => fetch(`${baseUrl}/authorize`, {headers: {'X-Original-URI':uri}});
+    const first = await authorize(validUri());
+    const next = await authorize(validUri());
+    const other = await authorize(validUri().replace('master.m3u8','720p/index.m3u8'));
+    const key = first.headers.get('x-media-cache-key');
+    assert.match(key ?? '', /^[a-f0-9]{64}$/);
+    assert.equal(next.headers.get('x-media-cache-key'), key);
+    assert.notEqual(other.headers.get('x-media-cache-key'), key);
+  });
+});
+
+test('rejects a signer authority that does not match the edge Host', async () => {
+  await withOriginServer({async sign() { return 'http://other-origin:9000/private?X-Amz-Signature=hidden'; }}, async baseUrl => {
+    const response = await fetch(`${baseUrl}/authorize`, {headers: {'X-Original-URI':validUri()}});
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get('x-media-origin-uri'), null);
+    assert.equal(response.headers.get('x-media-cache-key'), null);
+  });
+});

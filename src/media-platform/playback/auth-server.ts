@@ -57,6 +57,7 @@ function requestUri(
 export function createMediaAuthServer(
   secret: string,
   originSigner?: MediaOriginSigner,
+  expectedOrigin = 'http://minio:9000',
 ) {
   if (!secret) {
     throw new Error(
@@ -107,16 +108,18 @@ export function createMediaAuthServer(
         const originUrl = await originSigner.sign({
           assetId: verification.assetId,
           objectPath: verification.objectPath,
+          ...(verification.generation ? {generation:verification.generation} : {}),
         });
 
         const parsedOriginUrl = new URL(originUrl);
 
         if (
-          parsedOriginUrl.protocol !== 'http:' &&
-          parsedOriginUrl.protocol !== 'https:'
+          parsedOriginUrl.origin !== expectedOrigin ||
+          parsedOriginUrl.username !== '' || parsedOriginUrl.password !== '' ||
+          parsedOriginUrl.hash !== ''
         ) {
           throw new Error(
-            'Origin signer returned an invalid protocol',
+            'Origin signer returned an unexpected authority',
           );
         }
 

@@ -1,0 +1,19 @@
+# PROPOSAL ONLY. Do not import/reload without separate routing approval.
+# Assumes Caddy runs on the VPS host; a container needs a reviewed shared
+# network and media-edge:8080 instead of host loopback.
+media.example.invalid {
+    log {
+        output discard
+    }
+    header {
+        -Server
+        Referrer-Policy no-referrer
+        X-Content-Type-Options nosniff
+    }
+    reverse_proxy 127.0.0.1:3100 {
+        transport http {
+            dial_timeout 5s
+            response_header_timeout 35s
+        }
+    }
+}

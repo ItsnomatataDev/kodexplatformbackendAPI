@@ -12,4 +12,4 @@ src/work/store.ts
 src/routes/attendance.ts
 src/routes/card-ecosystem.ts
 src/cli/end-of-day.ts
-migrations/0058_time_entry_auto_stop.sql
+migrations/0060_time_entry_auto_stop.sql

@@ -38,6 +38,9 @@ export type MediaAsset = {
   originObjectKey: string;
 
   status: MediaAssetStatus;
+  fencingToken: string;
+  hlsGeneration: string | null;
+  playbackGeneration: string | null;
 
   errorCode: string | null;
   errorMessage: string | null;
@@ -65,6 +68,7 @@ export type MediaVariant = {
   sizeBytes: number | null;
 
   status: MediaVariantStatus;
+  generation: string | null;
 
   createdAt: Date;
   updatedAt: Date;
@@ -87,6 +91,7 @@ export type MediaJob = {
   startedAt: Date | null;
   completedAt: Date | null;
 
+  fencingToken: string;
   leaseOwner: string | null;
   leaseExpiresAt: Date | null;
 
@@ -124,17 +129,21 @@ export type ClaimMediaJobInput = {
 };
 
 export type HeartbeatMediaJobInput = {
+  fencingToken: string;
   jobId: string;
   workerId: string;
   leaseMs: number;
 };
 
 export type CompleteMediaJobInput = {
+  fencingToken: string;
+  variants: UpsertMediaVariantInput[];
   jobId: string;
   workerId: string;
 };
 
 export type FailMediaJobInput = {
+  fencingToken: string;
   jobId: string;
   workerId: string;
   errorCode?: string | null;

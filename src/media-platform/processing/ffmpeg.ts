@@ -29,7 +29,7 @@ export async function runFfmpeg(
   signal: AbortSignal,
 ): Promise<void> {
   await new Promise<void>((resolve, reject) => {
-    const child = spawn('ffmpeg', args, {
+    const child = spawn('ffmpeg', ['-protocol_whitelist', 'file,pipe', ...args], {
       stdio: ['ignore', 'ignore', 'pipe'],
       signal,
     });
@@ -54,7 +54,7 @@ export async function runFfmpeg(
 
       reject(
         new Error(
-          `ffmpeg_failed:code=${code ?? 'null'}:signal=${exitSignal ?? 'null'}:${stderr.slice(-4000)}`,
+          `ffmpeg_failed:code=${code ?? 'null'}:signal=${exitSignal ?? 'null'}`,
         ),
       );
     });
@@ -112,7 +112,7 @@ async function runFfprobe(
   signal: AbortSignal,
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const child = spawn('ffprobe', args, {
+    const child = spawn('ffprobe', ['-protocol_whitelist', 'file,pipe', ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
       signal,
     });
@@ -145,7 +145,7 @@ async function runFfprobe(
 
       reject(
         new Error(
-          `ffprobe_failed:code=${code ?? 'null'}:signal=${exitSignal ?? 'null'}:${stderr.slice(-4000)}`,
+          `ffprobe_failed:code=${code ?? 'null'}:signal=${exitSignal ?? 'null'}`,
         ),
       );
     });

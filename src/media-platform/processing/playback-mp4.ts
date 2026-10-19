@@ -5,18 +5,19 @@ import { Readable } from 'node:stream';
 
 import { playbackEncodingArgs } from '../../content/playback.js';
 import type { FileStorage } from '../../files/storage.js';
-import type { MediaPlatformStore } from '../store.js';
+import type { MediaVariantDraftStore } from '../store.js';
 import type { MediaAsset, MediaVariant } from '../types.js';
-import { mediaPlaybackObjectKey } from '../object-keys.js';
+import { mediaGenerationPrefix } from '../object-keys.js';
 import { probeVideo } from './ffmpeg.js';
 import { runFfmpeg } from './ffmpeg.js';
 import type { StagedMediaSource } from './source.js';
 
 export type ProcessPlaybackMp4Input = {
   asset: MediaAsset;
+  generation: string;
   source: StagedMediaSource;
   storage: FileStorage;
-  store: MediaPlatformStore;
+  store: MediaVariantDraftStore;
   signal: AbortSignal;
 };
 
@@ -25,6 +26,7 @@ export async function processPlaybackMp4(
 ): Promise<MediaVariant> {
   const {
     asset,
+    generation,
     source,
     storage,
     store,
@@ -40,7 +42,7 @@ export async function processPlaybackMp4(
     'playback.mp4',
   );
 
-  const objectKey = mediaPlaybackObjectKey(asset.id);
+  const objectKey = `${mediaGenerationPrefix(asset.id, generation)}/playback/playback.mp4`;
 
   const variant = await store.upsertVariant({
     assetId: asset.id,
@@ -93,6 +95,7 @@ export async function processPlaybackMp4(
       fileStream,
     ) as ReadableStream<Uint8Array>;
 
+    signal.throwIfAborted();
     await storage.putObjectStream({
       bucket: asset.originBucket,
       objectKey,

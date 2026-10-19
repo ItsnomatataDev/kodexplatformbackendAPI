@@ -21,14 +21,18 @@ function iso(value: Date | null | undefined) {
 }
 
 function readObjectKey(raw: string | undefined | null) {
-  let value = (raw ?? '').trim();
-  if (!value || value.includes('..') || value.startsWith('/')) return '';
+  // Hono has already decoded the query once. Never trim or decode the key
+  // used for exact asset membership and storage lookup.
+  const value = raw ?? '';
+  const unsafe = (key: string) =>
+    !key || key.startsWith('/') || /[\\\x00-\x1f\x7f-\x9f]/.test(key) ||
+    key.split('/').some((segment) => segment === '.' || segment === '..');
+  if (unsafe(value)) return '';
   if (value.includes('%')) {
     try {
-      const decoded = decodeURIComponent(value);
-      if (decoded && !decoded.includes('..') && !decoded.startsWith('/')) {
-        value = decoded;
-      }
+      // Inspect residual encoding only; do not turn a literal %XX filename
+      // into a different object key. Hono tolerates malformed escapes.
+      if (unsafe(decodeURIComponent(value))) return '';
     } catch {
       return '';
     }

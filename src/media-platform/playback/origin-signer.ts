@@ -1,3 +1,4 @@
+import { mediaGenerationPrefix } from '../object-keys.js';
 import { Client } from 'minio';
 import { Agent } from 'node:https';
 
@@ -6,6 +7,7 @@ export const MEDIA_ORIGIN_URL_TTL_SECONDS = 60;
 export interface MediaOriginRequest {
   assetId: string;
   objectPath: string;
+  generation?: string;
 }
 
 export interface MediaOriginSigner {
@@ -23,7 +25,9 @@ interface PresignedGetObjectClient {
 export function mediaOriginObjectKey(
   assetId: string,
   objectPath: string,
+  generation?: string,
 ): string {
+  if (generation) return `${mediaGenerationPrefix(assetId,generation)}/${objectPath}`;
   return `.media/v1/${assetId}/${objectPath}`;
 }
 
@@ -52,6 +56,7 @@ export function createMediaOriginSigner(options: {
       const objectKey = mediaOriginObjectKey(
         input.assetId,
         input.objectPath,
+        input.generation,
       );
 
       return options.client.presignedGetObject(

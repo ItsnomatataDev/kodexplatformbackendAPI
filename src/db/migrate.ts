@@ -1,139 +1,53 @@
 import fs from 'node:fs/promises';
+import type { PoolClient } from 'pg';
 import path from 'node:path';
 import { env } from '../config/env.js';
 import { db } from './pool.js';
+import { migrationBody, planMigrations, type AppliedMigration } from './migration-plan.js';
 
-function parseMigrationFilename(file: string) {
-  const match = file.match(/^(\d{4})_([\w-]+)\.sql$/);
-
-  if (!match) {
-    throw new Error(`Invalid migration filename: ${file}`);
-  }
-
-  return {
-    version: match[1],
-    description: match[2],
-  };
-}
-
-function migrationsDirectory() {
-  return path.resolve(process.env.MIGRATIONS_DIR ?? path.resolve(process.cwd(), 'migrations'));
-}
-
-async function ensureMigrationTable() {
-  await db.query(`
-    CREATE SCHEMA IF NOT EXISTS platform;
-
-    CREATE TABLE IF NOT EXISTS platform.schema_migrations (
-      version VARCHAR(255) PRIMARY KEY,
-      description TEXT NOT NULL,
-      applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    );
-  `);
-}
-
-async function getAppliedMigrations() {
-  const result = await db.query<{ version: string }>(`
-    SELECT version
-    FROM platform.schema_migrations
-    ORDER BY version
-  `);
-
-  return new Set(result.rows.map((row) => row.version));
-}
-
-function assertConsecutiveVersions(files: string[]) {
-  files.forEach((file, index) => {
-    const expected = String(index + 1).padStart(4, '0');
-    const { version } = parseMigrationFilename(file);
-
-    if (version !== expected) {
-      throw new Error(
-        `Migration versions must be consecutive. Expected ${expected}_*.sql, found ${file}`,
-      );
+export async function applyMigrations(client: Pick<PoolClient, 'query'>, directory: string): Promise<string[]> {
+  const files = (await fs.readdir(directory)).filter(file => file.endsWith('.sql'));
+  if (!files.length) throw new Error('No SQL migrations found');
+  // Validate filenames before opening a connection or creating the ledger.
+  planMigrations(files, []);
+  try {
+    await client.query('SELECT pg_advisory_lock(71402820)');
+    await client.query(`CREATE SCHEMA IF NOT EXISTS platform;
+      CREATE TABLE IF NOT EXISTS platform.schema_migrations (
+        version VARCHAR(255) PRIMARY KEY, description TEXT NOT NULL,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
+    const history = await client.query<AppliedMigration>('SELECT version, description FROM platform.schema_migrations');
+    const pending = planMigrations(files, history.rows);
+    console.log(`Applying ${pending.length} migrations for APP_ENV=${env.appEnv}`);
+    for (const migration of pending) {
+      const sql = migrationBody(await fs.readFile(path.join(directory, migration.filename), 'utf8'));
+      await client.query('BEGIN');
+      try {
+        await client.query('SET LOCAL statement_timeout = 0');
+        await client.query(sql);
+        // Full filenames disambiguate new entries from existing numeric 0058 rows.
+        // Never UPDATE/DELETE or backdate an existing history entry.
+        await client.query('INSERT INTO platform.schema_migrations(version, description) VALUES ($1,$2)',
+          [migration.filename, migration.description]);
+        await client.query('COMMIT');
+        console.log(`Applied ${migration.filename}`);
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      }
     }
-  });
+    return pending.map(migration => migration.filename);
+  } finally {
+    await client.query('SELECT pg_advisory_unlock(71402820)').catch(() => {});
+  }
 }
 
 export async function runMigrations() {
-  console.log(`Applying migrations for APP_ENV=${env.appEnv}`);
-  console.log(`PostgreSQL TLS: ${env.database.ssl ? 'required' : 'disabled'}`);
-
-  await ensureMigrationTable();
-
-  const applied = await getAppliedMigrations();
-  const migrationsDir = migrationsDirectory();
-
-  const files = (await fs.readdir(migrationsDir))
-    .filter((file) => file.endsWith('.sql'))
-    .sort();
-
-  if (files.length === 0) {
-    throw new Error(`No SQL migrations found in ${migrationsDir}`);
+  const client = await db.connect();
+  try {
+    await applyMigrations(client, path.resolve(process.env.MIGRATIONS_DIR ?? 'migrations'));
+  } finally {
+    client.release();
+    await db.end();
   }
-
-  assertConsecutiveVersions(files);
-
-  const fileVersions = new Set(
-    files.map((file) => parseMigrationFilename(file).version),
-  );
-
-  for (const version of applied) {
-    if (!fileVersions.has(version)) {
-      throw new Error(
-        `Applied migration ${version} is missing from the migrations directory.`,
-      );
-    }
-  }
-
-  let appliedNow = 0;
-
-  for (const file of files) {
-    const { version, description } = parseMigrationFilename(file);
-
-    if (applied.has(version)) {
-      console.log(`Skipping ${file} (already applied)`);
-      continue;
-    }
-
-    const sql = await fs.readFile(path.join(migrationsDir, file), 'utf8');
-
-    console.log(`Applying ${file}...`);
-
-    const client = await db.connect();
-
-    try {
-      await client.query('BEGIN');
-      // Pool connections cancel statements after 30s. A migration file is one
-      // statement and must be allowed to finish.
-      await client.query('SET LOCAL statement_timeout = 0');
-      await client.query(sql);
-
-      await client.query(
-        `
-        INSERT INTO platform.schema_migrations
-          (version, description)
-        VALUES ($1, $2)
-        `,
-        [version, description],
-      );
-
-      await client.query('COMMIT');
-
-      appliedNow += 1;
-      console.log(`Applied ${file}`);
-    } catch (error) {
-      await client.query('ROLLBACK');
-      console.error(`Failed ${file}`);
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-
-  await db.end();
-
-  console.log(
-    `Database migrations complete. applied=${appliedNow} already_present=${applied.size} total=${files.length}`,
-  );
 }

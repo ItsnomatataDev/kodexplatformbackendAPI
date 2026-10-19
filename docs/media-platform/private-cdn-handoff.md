@@ -1,134 +1,162 @@
-# Private CDN audit and integration handoff
+# Private CDN engineering handoff — Milestone 1 archive
 
-Audit date: 2026-10-08. Branch: `fix/private-media-cdn-readiness`.
-Baseline: `1d88a0d`. Status: **blocked on missing implementation; not ready for frontend integration**.
+> Current implementation, migration reconciliation, fencing and API contract: [Milestone 2 handoff](milestone-2-handoff.md). The report below preserves Milestone 1 findings; its migration/worker/API blockers are superseded by that report.
 
-## Repository evidence
+2026-10-08 · branch `fix/private-media-cdn-readiness`
 
-The supplied deployment description does not match this checkout:
+**Local private-origin delivery verified; production/frontend readiness remains gated.** No VPS connection, deployment, production restart, data mutation, secret access, frontend change or replacement of the existing Content Studio playback implementation was performed.
 
-- `deploy/media-edge/nginx.conf` is absent; Compose has no media-edge or media-auth service.
-- `src/media-platform/` contains only a pre-existing untracked `playback/token.ts`.
-- No `media_platform` schema, job leases, variants, HLS encoder or origin signer exists here.
-- Migration `0058_time_entry_auto_stop.sql` belongs to time entries. There is no 0059. Do not overwrite or reuse migration numbers.
-- The media-worker Docker target runs `dist/content/playback-worker.js`: an MP4 scanning worker using a PostgreSQL session advisory lock, not leased media jobs.
-- API and worker use host networking. MinIO is on the Compose default network and publishes loopback ports. There is no Caddy service in this Compose file.
-- Existing Content Studio routes implement opaque media capabilities. They are not the proposed HMAC HLS contract.
+## Audit and changes
 
-No live VPS access, production mutation, migration, deployment, frontend change or secret inspection was performed. Existing password HTML edits and the untracked token implementation were preserved. Docker is available locally, but an invented substitute service would not validate the missing implementation.
+The initial audit found missing source. The user subsequently synchronized the VPS implementation; this document supersedes that initial missing-source assessment. Existing tests and documentation were reviewed before modification.
 
-Required input: the branch/commit or local source snapshot containing the deployed media-edge, media-auth, origin signer, schema, processor, and their tests. Reconcile it with this branch before implementing configuration against its real contract.
+| Files | Change/purpose |
+| --- | --- |
+| `deploy/media-edge/nginx.conf` | Docker runtime DNS for origin and auth; preserve signed URI and `Host: minio:9000`; GET/HEAD only; timeouts; sanitized logging; private authenticated cache; bounded storage; safe origin errors |
+| `deploy/media-edge/Dockerfile` | Prepare cache directory ownership for UID 101 on a read-only container |
+| `docker-compose.vps.yml` | Build edge image, dedicated cache volume, edge CPU/memory/PID limits, dedicated read-only media-auth credential variables |
+| `src/media-platform/playback/auth-server.ts` | Hash canonical origin authority/path for cache identity; require signer authority matching the edge; bounded incoming HTTP requests; generic signing errors without raw exception text |
+| `src/media-platform/playback/auth-server.test.ts` | Cache identity and authority mismatch regression tests, preserving existing cases |
+| `src/media-platform/processing/adaptive-hls.ts` | Correct landscape 1080p dimensions (previously 1080 pixels on the long edge); use peak configured bandwidth; omit inaccurate hard-coded codec-level declaration; cap encoder threads; check abort before master publication |
+| `src/media-platform/processing/ffmpeg.ts` | Allow only file/pipe protocols for input probing/encoding; suppress raw FFmpeg error text that could contain source data |
+| `src/media-platform/processing-worker.ts` | Abort work when lease heartbeat cannot be renewed, instead of continuing indefinitely through DB errors |
+| `tests/media-cdn/` | Disposable MinIO/Nginx/auth/FFmpeg/PostgreSQL integration harness with synthetic credentials and cleanup |
+| `tests/vps-deployment.test.mjs` | Add new media variables to existing dummy Compose credentials; no real env file is read |
+| `package.json` | Add `test:media` and `test:media:integration` commands |
+| `deploy/media-edge/Caddyfile.example` | Unapplied future host-Caddy media routing proposal |
 
-## Changes and local validation
+The imported Dockerfile still starts the legacy Content worker for `media-worker`; it was deliberately not repointed. The new processing worker is not wired into that service. Imported migrations were not modified or applied outside the disposable test database.
 
-Added `tests/media-playback-token.test.ts`: round trip, UUID normalization, asset/expiry/signature tampering, key mismatch, expiry boundary, malformed identifiers and expiry values. This exercises only the supplied token helper, not HTTP authorization or tenant ownership.
+## Delivery and authorization contract
 
-Run:
+`createMediaPlaybackUrl({ assetId, secret, now?, ttlSeconds?, basePath? })` creates a path with the following shape (placeholders, never a real capability):
+
+```text
+/media/v1/{unixExpiry}/{HMAC-SHA256-base64url}/{assetUuid}/hls/master.m3u8
+```
+
+Default lifetime is one hour. The signature covers `v1`, normalized UUID and expiry separated by newlines. Expiry is exclusive. It authorizes the asset's supported HLS children, not an arbitrary bucket/path. Relative links preserve the signed path prefix. Supported children are `1080p`, `720p`, `480p` rendition `index.m3u8`, `init.mp4`, and `segment_00000.m4s`-style five-digit segments. Queries, encoded path tricks and unsupported suffixes are rejected by the strict verifier.
+
+Edge makes an internal GET `/authorize` with `X-Original-URI`; media-auth verifies the HMAC and returns a 60-second MinIO presigned GET URI in an internal response header. Object mapping is `content-review-assets/.media/v1/{assetUuid}/{objectPath}`. Origin authority is `http://minio:9000`; changing it requires a coordinated signer/edge change. The edge proxies the URI unchanged with the matching Host. Client HEAD uses a signed origin GET, with Nginx omitting the response body. Browser requests never receive the MinIO URL or signer headers.
+
+The edge serves 403 for denied capabilities, 404 for missing objects, 405 for unsupported methods, 416 for invalid ranges, and generic 502 for auth/origin service failures. It strips origin XML error bodies and redirects. A generic 416 currently omits the origin Content-Range header; successful 206 responses retain range headers. `/health` proves process liveness only.
+
+The API remains the control plane. No HLS bytes were added to API routes.
+
+## Cache design and tradeoffs
+
+Authentication runs in Nginx's access phase on **every** request, before cache lookup, including HIT. Auth responses are never cached. Missing cache identities bypass caching. Cache identity is SHA-256 of the signer-produced origin authority plus canonical object path, including bucket and full key; signature/expiry changes do not fragment cache. The signer cannot choose a different authority. Client-supplied cache or signing headers are not forwarded.
+
+Only full successful 200 responses are stored. Range requests bypass cache and are not stored. Errors are not cached. No stale serving is enabled. Locking reduces duplicate fills. Origin cache metadata is ignored so it cannot lengthen freshness or trigger internal redirects. Browser responses are `private, no-store`; bearer links should also be excluded from frontend analytics, error reports and browser history where possible.
+
+**All objects currently have a conservative 30-second TTL.** Master/rendition playlists and segments use fixed keys that retries can overwrite. Calling these segments immutable or giving them a day-long TTL would be unsafe. Once publication uses immutable generation keys and is fenced, use short playlist TTLs and longer segment/init TTLs. Even the current short TTL can mix generations during reprocessing: do not reprocess a published asset ID until this is fixed.
+
+Cache metadata is bounded to 16 MiB, disk target 2 GiB, inactive eviction 24 hours; the dedicated volume is writable under UID 101. Eviction is asynchronous, so monitor free disk and use external filesystem quotas if hard limits are required. No eviction/load benchmark was performed. Edge uses one worker, 0.5 CPU, 256 MiB and 64 PIDs. Performance tuning requires representative load.
+
+Access logs contain only status, method, byte count, timing, cache status and upstream address. Nginx error logs are disabled because even error-level messages can include bearer paths and SigV4 URLs. This sacrifices detailed production diagnostics: use status/latency/health monitoring, and reproduce errors locally with disposable credentials. Never enable verbose request logging on real traffic without redaction.
+
+References: [Nginx variable proxy resolution and caching](https://nginx.org/en/docs/http/ngx_http_proxy_module.html), [auth subrequests](https://nginx.org/en/docs/http/ngx_http_auth_request_module.html).
+
+## Isolation, credentials and dependencies
+
+Media-auth remains on the internal `media-private` network with no host port and needs no MinIO network access: presigning uses a fixed region locally. Edge joins that network plus the existing default network to reach MinIO; its host publication stays loopback-only (`127.0.0.1:3100`). Existing MinIO networking and credentials used by other services were not changed. The default network is shared with other infrastructure; stronger dedicated origin segmentation is a future coordinated change.
+
+Provision separate `MEDIA_ORIGIN_ACCESS_KEY` and `MEDIA_ORIGIN_SECRET_KEY` for media-auth, with only `s3:GetObject` on `arn:aws:s3:::content-review-assets/.media/v1/*`. No root, listing, writes, deletes or public bucket policy. Integration tests use this exact policy. Never send real credentials to chat or copy them into fixtures. Generate a strong independent playback secret (at least 32 random bytes) in operator-managed secret storage. Compose environment variables remain visible to privileged Docker operators; Docker/file secret integration is not implemented.
+
+Rotation: deploy new read-only origin credentials to auth, verify delivery, then revoke old credentials. Playback signing supports only one active secret; changing it invalidates all outstanding links immediately, including cached requests. Graceful overlapping signing-key rotation is not implemented. Coordinate issuer/auth rotation and grant renewal; do not silently broaden verification.
+
+`npm audit --omit=dev` reported 4 moderate findings: MinIO and transitive `decode-uri-component`, `query-string`, `stream-json`; no high/critical findings in that report. Suggested automated remediation downgrades MinIO across a major version; it was not applied without compatibility review. Container image tags remain mutable and should be pinned to reviewed digests for a release. FFmpeg build success is not an OS vulnerability audit.
+
+## Validation
+
+Run from the repository:
 
 ```sh
-node --import tsx --test tests/media-playback-token.test.ts
 npm run typecheck
+npm run build
+npm run test:media
 npm test
+npm run test:media:integration
 ```
 
-Results are recorded below after execution. These checks cannot establish CDN readiness.
+The integration command requires a local Unix-socket Docker context, rejects `DOCKER_HOST`, uses a unique Compose project and `--env-file /dev/null`, publishes no ports, and removes only its disposable project/volumes on exit. It never touches the VPS stack. It builds actual production code/images and uses a GetObject-only origin principal. Do not enable shell tracing. Test failures suppress unknown error details to avoid printing capability URLs.
 
-## Repair design once source is available
+Verified locally:
 
-For the reported variable origin proxy, put these directives in the edge `http` or `server` context on a Docker user-defined network:
+- 58 playback/token/auth/signer unit tests passed.
+- TypeScript typecheck and build passed.
+- Real FFmpeg encoded a 1920x1080 source into all three HLS renditions; real MinIO stored and authorized every object; real Nginx delivered master, rendition playlists, init files and segments byte-for-byte with correct MIME types.
+- 88 HTTP/processing checks passed, including relative child URLs, cache MISS/HIT, wrong/expired/malformed tokens, actual token expiry after warming, Range 206 and 416, HEAD, anonymous origin denial, reader write denial, and no caching of missing-object errors.
+- Sanitized edge logs showed denied requests had no origin upstream; no bearer paths/SigV4 strings appeared.
+- Stopping auth denied access to a warm cache with 502.
+- Real PostgreSQL 17 tests passed for concurrent claims, heartbeat, wrong/stale-owner rejection, lease expiry recovery and exhausted retries.
+- Existing Compose fixture initially failed due to missing new dummy media variables; after fixing that fixture, its four tests passed. Final `npm test`: 251 passed, 10 skipped, zero failures (261 total).
 
-```nginx
-resolver 127.0.0.11 valid=30s ipv6=off;
-resolver_timeout 5s;
-```
+The database test applies only the media SQL in a fresh database with minimal FK prerequisite tables. It does **not** validate the repository-wide migration sequence or full worker lifecycle. Browser playback, CORS, audio/portrait/variable-frame-rate coverage, DNS container-recreation recovery, load, eviction and production delivery remain unverified.
 
-Keep the original signed URI byte-for-byte, including escaping and query ordering; never append client arguments. Set the upstream Host to the exact authority signed by media-auth (including port). If that authority is `minio:9000`, use `proxy_set_header Host minio:9000`. Do not apply this assumption to an unseen signer. Sign the actual GET/HEAD method, or deliberately normalize HEAD to a signed GET and verify that behavior. Reject arbitrary upstream hosts, bucket selection, traversal, duplicate token parameters, encoded separators and unexpected object suffixes before origin access.
+## Release blockers and remaining work
 
-Nginx documents runtime name resolution for variable proxy targets in its [proxy module](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_pass). Its [auth request module](https://nginx.org/en/docs/http/ngx_http_auth_request_module.html) permits access on a successful auth subrequest; denial must run before cache serving too.
+1. **Migration collision:** both `0058_time_entry_auto_stop.sql` and `0058_media_platform.sql` exist. The migration runner requires consecutive unique numbers and tracks only the version. Reconcile deployed migration history through an operator-reviewed plan before running any migrations. No safe renumbering can be inferred from this checkout alone.
+2. **Publication fencing:** DB completion is owner/expiry fenced, but variant/status/object writes are not. Duplicate jobs can overwrite the same keys; stale uploads already in flight can complete after lease loss. Add immutable generation/attempt keys and transactional publication, with recovery/cleanup tests. Current heartbeat abort is defense in depth, not complete fencing.
+3. **Worker integration/resources:** Compose starts the legacy worker, not `processing-worker.js`. Introduce a separately reviewed service rather than replacing legacy playback. The existing worker's 4 GiB tmpfs ceiling exceeds its 1.5 GiB memory limit; 2 GiB sources plus derivatives can OOM. Size disk-backed scratch and CPU/thread budgets for representative workloads. FFmpeg protocol restriction blocks network fetches, but file access still needs container isolation. Thumbnail/metadata jobs are intentionally unimplemented.
+4. **API control plane absent:** media asset/job store methods and URL helper exist, but no mounted media-platform create/status/grant routes exist. Tenant-checked grant issuance must precede frontend integration. The edge is bearer-only and does not consult asset deletion, tenant membership or session revocation; cached objects remain accessible with an unexpired valid grant even after deletion. Define revocation semantics before launch.
+5. **Browser delivery:** actual native Safari/HLS player tests and an explicit allowed-origin CORS policy are still required for a distinct public media hostname. No wildcard CORS or temporary bypass was introduced.
+6. **Operational validation:** least-privilege production principal provisioning, key rotation rehearsal, disk quotas/monitoring, rate/load limits, dependency review and image digests remain release gates.
 
-HLS relative children do not inherit a master URL query token. Inspect the actual implementation: use a scoped path capability, deliberately rewritten child URLs, or a browser-compatible cookie scheme. Do not simply attach a query signature to the master and assume child requests are authorized. Scope every child to the authorized asset and immutable generation.
+## Proposed deployment (approval required; not executed)
 
-## Proposed cache and security policy (not implemented)
+Treat delivery-only rollout and worker/API/schema rollout as separate changes. The commands below are for an authorized operator after blockers relevant to that rollout are resolved; they are not instructions to migrate or restart API.
 
-- Authenticate every GET/HEAD, including cache hits; never cache auth responses or serve stale authorization. Auth outage fails closed.
-- Key by trusted origin namespace, bucket, full canonical object key and immutable generation. Exclude short-lived signatures only after successful authorization. Test cross-tenant and cross-asset separation.
-- Cache successful VOD masters/renditions for 30 seconds initially; immutable versioned init/segments for 24 hours, inactive eviction after 7 days. Never cache 401/403/404/5xx or partial 206 responses initially. Bypass cache for Range requests until tested; verify 206/416, Content-Range and If-Range semantics.
-- Start with a 2 GiB disk cache and 16 MiB metadata zone; use a dedicated writable cache volume and tmpfs for PID/temp directories with a read-only root filesystem. Nginx eviction is asynchronous: disk headroom and a volume quota/monitoring are still needed.
-- Use cache locking to limit origin stampedes. Keep browser responses `Cache-Control: private, no-store` initially; server caching must be configured separately. This costs browser reuse but preserves request-time authorization. Already downloaded bytes cannot be revoked.
-- Hide origin signing headers, redirects, storage error XML and SigV4 query strings. Return generic failures. Do not expose the origin URL through debug headers.
-- Access logs must omit URI, query, Referer, cookies and authorization. Nginx error logs can include request/upstream URLs even at error severity: validate a redacting sink or disable request-bearing error output; lowering verbosity alone is insufficient.
-- Dedicated media-auth credentials: GetObject only on the playback prefix, no root credentials, list/write/delete/admin grants. Worker gets separately scoped read/write credentials. Keep MinIO private and generic service settings unchanged.
-- Separate edge/auth networking; no public auth or origin ports. Edge needs only auth and origin reachability. Provision secrets independently of broad API env files. Plan overlapping verification keys with a bounded retirement window; signer currently has no key identifier or rotation implementation.
-- Initial edge limits: 0.5 CPU, 256 MiB, 128 PIDs; tune under load. Suggested connect timeout 5s, read timeout 30s, bounded auth timeout. Test capacity and large MP4 buffering before adopting.
-- Inspect real job lease renewal, retry limits, fencing, shutdown and orphan cleanup. Crash/restart and two-worker tests must prove stale workers cannot publish over newer jobs. The existing advisory-lock worker does not establish these guarantees.
-
-## Future Caddy routing
-
-The following is a separate proposed site block, **not an applied configuration**. Replace the reserved hostname and confirm Caddy's actual topology first. `media-edge:8080` assumes a future shared Docker network and listening port; host Caddy requires a separately reviewed loopback upstream instead.
-
-```caddyfile
-media.example.invalid {
-    header {
-        -Server
-        Referrer-Policy no-referrer
-        X-Content-Type-Options nosniff
-    }
-    reverse_proxy media-edge:8080
-}
-```
-
-Do not enable URI-bearing access logs for capability routes. Review global error logging/redaction too. No API playback route changes. Cross-origin browser use requires an explicit approved frontend origin, Vary: Origin where applicable, GET/HEAD/OPTIONS policy, and exposed Range headers; verify Safari native HLS and the frontend's chosen HLS player before enabling the site.
-
-## Controlled deployment and rollback gates
-
-Do not execute deployment commands against this incomplete checkout. Once real code is reconciled and isolated end-to-end tests pass, seek explicit infrastructure deployment approval.
-
-1. Record deployed commit, image digests, edge/auth configuration and network topology in restricted operator storage. Never print `.env.vps`, `docker compose config`, container environment or signed URLs.
-2. Review migration identity collisions and service-specific secrets. No migration is authorized by this handoff. Build/test the reconciled commit in an isolated Compose project with disposable private MinIO, PostgreSQL, auth and edge containers.
-3. Test actual HTTP delivery using an in-process client that retains capabilities only in memory and prints status, MIME, cache status and byte comparisons. Avoid curl command lines, verbose HTTP logs and shell tracing with signed URLs.
-4. After approval and confirming these service names exist, validate syntax and recreate only the two delivery services, never the API or generic data services:
+1. Save current edge/auth image digests and reviewed source/config snapshots to restricted operator storage. Record cache volume names, old credential references and the old Compose file. Do not capture expanded config or environment dumps in logs.
+2. Provision the read-only media origin principal via the approved secret-management process. Set the new media-only variables on the host without exposing values. Preserve generic MinIO settings.
+3. Run all local validation above; review the two edge/auth services and migration collision. Do not run `npm run migrate` in this state.
+4. After explicit infrastructure approval, on the VPS with the reviewed source:
 
 ```sh
 cd /opt/kode-platform
+docker compose --env-file .env.vps -f docker-compose.vps.yml --profile media config --quiet
+docker compose --env-file .env.vps -f docker-compose.vps.yml --profile media build media-auth media-edge
 docker compose --env-file .env.vps -f docker-compose.vps.yml --profile media run --rm --no-deps media-edge nginx -t
 docker compose --env-file .env.vps -f docker-compose.vps.yml --profile media up -d --no-deps media-auth media-edge
 ```
 
-These are conditional operator commands, not runnable deployment instructions for the current checkout. Supply the actual integration runner from the recovered implementation before approving rollout. Do not use syntax success or `/health` as release evidence.
+A previously created root-owned cache volume may require an approved one-time permission repair; use the new dedicated volume by default. Do not repurpose shared volumes. Auth/edge updates can temporarily fail closed; schedule an appropriate delivery maintenance window. No API, legacy worker, PostgreSQL, Redis or MinIO recreation is included.
 
-5. Repeat the matrix below on the private edge. Public Caddy routing is a separate approval/change after private validation. Monitor aggregate errors, auth latency, cache hit rate, disk and origin traffic without capabilities in telemetry.
-6. Rollback: restore only captured edge/auth config and pinned images, then recreate those services with `--no-deps`. If a separately approved Caddy block was enabled, remove that block and validate/reload Caddy. Keep original API routes, MinIO objects, database and volumes intact. Version the cache namespace when object mapping changes; never prune Docker or remove shared volumes.
+5. Validate actual private edge HTTP with a controlled existing fixture and a client that keeps signed paths in memory: all renditions/children, MIME/bytes, warm-cache expiry/denial and Range. Record only statuses/check names. The included integration runner is intentionally hard-wired to disposable fixtures and **must not** be pointed at production (it creates/deletes fixture objects).
+6. Public routing is a separate approval. Review `deploy/media-edge/Caddyfile.example` against the real Caddy topology. It assumes host Caddy and uses loopback port 3100. Resolve CORS and logging first; validate Caddy config before any separately approved reload. Do not touch the current Content Studio route.
 
-## Frontend API contract to finalize
+## Rollback
 
-There is no implemented private-CDN API contract in this checkout. Do not code the frontend against invented endpoint names. The recovered control plane must document:
+Before rollout, prepare a small rollback Compose override with captured immutable edge/auth image references. Keep the previous Compose/env references and Nginx config together: the old auth image expects the old credential variable names. Restore only those reviewed delivery files/references, then recreate only edge/auth with `--no-deps --no-build` using the captured image override. Validate actual HTTP, not just health. Roll back a separately approved media Caddy block independently if applicable.
 
-- Asset create/upload/finalize endpoints, tenant authorization, size/type limits, idempotency, and upload expiry.
-- Asset status response: stable ID, queued/processing/ready/failed state, processing error code, available renditions, duration/dimensions and immutable generation.
-- Playback issuance endpoint: authenticated tenant ownership check, ready-state handling, HTTPS master URL, absolute expiry, renewal behavior and allowed delivery methods. Responses containing capabilities must be no-store.
-- How child playlists/segments carry authorization, CORS/cookie requirements, session revocation policy, rotation and clock skew.
-- Errors for unauthenticated/forbidden/not-found/not-ready/rate-limit/unavailable, retry guidance and correlation IDs without secrets.
+No schema rollback, object deletion, volume removal, generic credential rotation, API restart or Docker prune is part of rollback. Leave the new cache volume intact; use a new cache namespace/volume when object mapping semantics change. Reverting DNS to the known-broken config reintroduces 502, so prefer retaining the tested DNS-only correction in a reviewed fallback image/config.
 
-API issues metadata and playback grants; edge delivers all HLS bytes. Existing Content Studio capability endpoints remain unchanged.
+## Frontend backend contract and readiness checklist
 
-## Exact readiness evidence checklist
+Implemented delivery contract is above. The following control-plane surface is **required/proposed, not mounted endpoints**:
 
-All currently unverified for the private CDN unless explicitly stated:
+| Operation | Required behavior |
+| --- | --- |
+| Create/upload/finalize asset | Authenticated organization scope, source ownership, size/type limits, idempotency, upload expiry; return stable asset ID |
+| Read asset status | Tenant authorization; status, available variants/dimensions/duration, supported processing failures; no raw internal exception messages |
+| Issue/renew playback grant | Tenant ownership and ready-state check; return `{ assetId, playbackUrl, expiresAt }` with HTTPS edge URL and Unix-seconds expiry; no-store response; never return secret or origin URL |
+| Delete/revoke | Define whether existing grants expire naturally or are checked against revocation state before cache access |
 
-- [ ] Actual implementation recovered; migration numbering reconciled.
-- [ ] Valid master and 1080p/720p/480p playlists return 200; parse and recursively fetch all relative children.
-- [ ] Init and segments match uploaded bytes; MIME types are correct (playlists application/vnd.apple.mpegurl, MPEG-TS video/mp2t or fMP4 video/mp4 as appropriate).
-- [ ] Browser playback/seeking works in Safari and the chosen MSE player; no origin URLs or credentials are observable.
-- [ ] Missing/invalid/expired/tampered and cross-asset tokens fail cold AND warm; origin request counts stay unchanged on rejection.
-- [ ] Anonymous MinIO reads remain denied; no public bucket policy.
-- [ ] First request MISS, second HIT; expiry is still denied after warming. Distinct buckets/assets/generations never collide.
-- [ ] Auth failures and origin errors are uncached; auth outages fail closed even for warm objects.
-- [ ] Range/HEAD/If-Range/416 verified, with correct length and content headers.
-- [ ] Origin DNS IP changes recover; signed authority and escaped URI verified against real MinIO.
-- [ ] Read-only filesystem, cache capacity/eviction, concurrency, timeouts and worker recovery tested.
-- [ ] Logging checked under denial, origin outage and malformed paths; no secrets/capabilities leak.
-- [ ] Least-privilege credentials, network isolation and rotation exercised.
-- [ ] Existing playback regression tests pass; no API video streaming added for HLS.
-- [ ] Approved deployment/rollback rehearsed; public routing separately approved.
+Specify exact endpoint names and error envelope when implementing the routes. Require 401/403/404 distinctions, not-ready handling, 429/retry guidance, renewal ahead of expiry and correlation IDs without URLs. The frontend must never generate signatures, derive origin keys or stream HLS through the Kode API.
 
-Do not declare production readiness until these HTTP and operational checks have recorded results.
+- [x] Local private-origin HTTP delivery, all HLS object types, correct MIME/bytes/relative paths.
+- [x] Local authorization before cache hits, expired/invalid denial, no origin access for denial.
+- [x] Private bucket and read-only signer credentials exercised locally.
+- [x] Bounded cache configured on read-only container with writable dedicated volume.
+- [x] Local FFmpeg encoding and PostgreSQL job lease behaviors exercised.
+- [ ] Migration histories reconciled without changing already-applied semantics.
+- [ ] Publication fencing/immutable generations and full worker crash recovery validated.
+- [ ] Separate new-worker deployment and scratch-memory sizing reviewed.
+- [ ] Tenant-authorized asset/status/playback grant API implemented and tested.
+- [ ] Revocation and signing-key rotation semantics agreed and tested.
+- [ ] Browser HLS/CORS/audio/portrait compatibility verified.
+- [ ] DNS recreation, cache eviction/load, dependency and operational review complete.
+- [ ] Approved delivery deployment/rollback rehearsed and actual production private-edge HTTP verified.
+- [ ] Public media routing separately reviewed and approved.
+
+**Do not label the backend frontend-ready until the unchecked gates are resolved.**

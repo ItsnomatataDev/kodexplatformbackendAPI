@@ -4,6 +4,7 @@ const DEFAULT_PLAYBACK_TTL_SECONDS = 60 * 60;
 
 export interface CreateMediaPlaybackUrlInput {
   assetId: string;
+  generation?: string;
   secret: string;
   basePath?: string;
   ttlSeconds?: number;
@@ -55,13 +56,14 @@ export function createMediaPlaybackUrl(
     {
       assetId: input.assetId,
       expiresAt,
+      generation: input.generation,
     },
     input.secret,
   );
 
   const assetId = input.assetId.toLowerCase();
   const basePath = normalizeBasePath(
-    input.basePath ?? '/media/v1',
+    input.basePath ?? (input.generation ? '/media/v2' : '/media/v1'),
   );
 
   return {
@@ -70,6 +72,6 @@ export function createMediaPlaybackUrl(
     signature,
     path:
       `${basePath}/${expiresAt}/${signature}/` +
-      `${assetId}/hls/master.m3u8`,
+      `${assetId}/${input.generation ? `${input.generation}/` : ''}hls/master.m3u8`,
   };
 }

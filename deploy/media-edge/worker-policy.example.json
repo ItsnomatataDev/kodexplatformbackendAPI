@@ -1,0 +1,8 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect":"Allow","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::content-review-assets/*"]},
+    {"Effect":"Allow","Action":["s3:PutObject"],"Resource":["arn:aws:s3:::content-review-assets/.media/v2/*"]},
+    {"Effect":"Deny","Action":["s3:DeleteObject","s3:DeleteObjectVersion"],"Resource":["arn:aws:s3:::content-review-assets/.media/v2/*"]}
+  ]
+}

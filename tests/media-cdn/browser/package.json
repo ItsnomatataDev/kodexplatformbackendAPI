@@ -1,0 +1,1 @@
+{"name":"kode-private-cdn-browser-tests","private":true,"type":"module","dependencies":{"playwright":"1.58.2","hls.js":"1.6.15"}}

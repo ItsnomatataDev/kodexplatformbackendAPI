@@ -1,0 +1,67 @@
+# Stage B + B.1 review manifest — no production deployment authorized
+# Paths are relative to their named repository.
+# Shared dirty files Dockerfile/package.json contain earlier unrelated changes; stage only the infrastructure hunks.
+# Do not include existing media, ticket, attendance, password, or ObligationBanner changes.
+
+[kode-platform]
+# Modified existing: Dockerfile, package.json, package-lock.json, tests/authentication.test.ts.
+# All other backend entries below were created for Stage B or B.1.
+Dockerfile
+deploy/infrastructure/.gitignore
+deploy/infrastructure/Caddyfile.example
+deploy/infrastructure/compose.example.yml
+deploy/infrastructure/infrastructure.env.example
+deploy/infrastructure/roles.example.sql
+deploy/infrastructure/provisioning.env.example
+deploy/infrastructure/nginx-rate-limit.example.conf
+deploy/infrastructure/check-readiness.mjs
+deploy/infrastructure/retention.example.sql
+docs/architecture/infrastructure-control-center-stage-b.md
+docs/architecture/infrastructure-control-center-stage-b1.md
+scripts/deploy/build-infrastructure-release.py
+migrations/0063_infrastructure_authentication.sql
+package-lock.json
+package.json
+src/cli/infrastructure-accounts.ts
+src/infrastructure/agent/contracts.ts
+src/infrastructure/app.ts
+src/infrastructure/audit/events.ts
+src/infrastructure/auth/passwords.ts
+src/infrastructure/auth/ingress.ts
+src/infrastructure/auth/provisioning.ts
+src/infrastructure/auth/service.ts
+src/infrastructure/authorization/permissions.ts
+src/infrastructure/config.ts
+src/infrastructure/crypto/secrets.ts
+src/infrastructure/database/contracts.ts
+src/infrastructure/db/pool.ts
+src/infrastructure/server.ts
+tests/authentication.test.ts
+tests/infrastructure-browser/.gitignore
+tests/infrastructure-browser/package-lock.json
+tests/infrastructure-browser/package.json
+tests/infrastructure-browser/run.mjs
+tests/infrastructure-postgres.test.ts
+tests/infrastructure-ordinary-fixture.ts
+tests/infrastructure.test.ts
+docs/architecture/infrastructure-control-center-stage-b-files.txt
+
+[ITsNomatataWorkSpace]
+# Modified existing: src/App.tsx, src/app/router/AppRouter.tsx, Sidebar.tsx, vite.config.ts.
+# All src/features/infrastructure files are new.
+src/App.tsx
+src/app/router/AppRouter.tsx
+src/components/dashboard/components/Sidebar.tsx
+src/features/infrastructure/InfrastructureRoutes.tsx
+src/features/infrastructure/auth/InfrastructureProvider.tsx
+src/features/infrastructure/auth/InfrastructureRoute.tsx
+src/features/infrastructure/components/AuthFrame.tsx
+src/features/infrastructure/components/InfrastructureLayout.tsx
+src/features/infrastructure/pages/InfrastructureDashboardPage.tsx
+src/features/infrastructure/pages/InfrastructureEnrollmentPage.tsx
+src/features/infrastructure/pages/InfrastructureLoginPage.tsx
+src/features/infrastructure/pages/InfrastructureMfaPage.tsx
+src/features/infrastructure/pages/InfrastructureSessionPage.tsx
+src/features/infrastructure/services/infrastructureClient.ts
+src/features/infrastructure/types.ts
+vite.config.ts

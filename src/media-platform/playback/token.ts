@@ -8,11 +8,13 @@ const TOKEN_VERSION = 'v1';
 export interface MediaPlaybackTokenPayload {
   assetId: string;
   expiresAt: number;
+  generation?: string;
 }
 
 export interface VerifyMediaPlaybackTokenInput {
   assetId: string;
   expiresAt: number;
+  generation?: string;
   signature: string;
   secret: string;
   now?: number;
@@ -48,7 +50,9 @@ function assertExpiry(expiresAt: number): void {
 function signingPayload(
   assetId: string,
   expiresAt: number,
+  generation?: string,
 ): string {
+  if (generation !== undefined) return `v2\n${assetId}\n${generation}\n${expiresAt}`;
   return `${TOKEN_VERSION}\n${assetId}\n${expiresAt}`;
 }
 
@@ -56,9 +60,10 @@ function sign(
   assetId: string,
   expiresAt: number,
   secret: string,
+  generation?: string,
 ): string {
   return createHmac('sha256', secret)
-    .update(signingPayload(assetId, expiresAt), 'utf8')
+    .update(signingPayload(assetId, expiresAt, generation), 'utf8')
     .digest('base64url');
 }
 
@@ -68,6 +73,7 @@ export function createMediaPlaybackSignature(
 ): string {
   assertAssetId(payload.assetId);
   assertExpiry(payload.expiresAt);
+  if (payload.generation !== undefined && !/^[1-9][0-9]{0,18}$/.test(payload.generation)) throw new Error('Invalid media generation');
 
   if (!secret) {
     throw new Error('Media playback signing secret is required');
@@ -77,6 +83,7 @@ export function createMediaPlaybackSignature(
     payload.assetId.toLowerCase(),
     payload.expiresAt,
     secret,
+    payload.generation,
   );
 }
 
@@ -113,7 +120,7 @@ export function verifyMediaPlaybackSignature(
     };
   }
 
-  if (!input.secret || !input.signature) {
+  if (!input.secret || !input.signature || (input.generation !== undefined && !/^[1-9][0-9]{0,18}$/.test(input.generation))) {
     return {
       valid: false,
       reason: 'invalid_signature',
@@ -124,6 +131,7 @@ export function verifyMediaPlaybackSignature(
     input.assetId.toLowerCase(),
     input.expiresAt,
     input.secret,
+    input.generation,
   );
 
   const expectedBuffer = Buffer.from(expected, 'utf8');

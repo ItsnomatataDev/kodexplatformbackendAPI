@@ -1,3 +1,5 @@
+import { createMediaPlatformRoutes, type MediaControlPlaneStore } from './routes/media-platform.js';
+import { PostgresMediaPlatformStore } from './media-platform/postgres-store.js';
 import './types/hono.js';
 import { Hono } from 'hono';
 import { env } from './config/env.js';
@@ -121,6 +123,8 @@ export type CreateAppOptions = {
   attendance?: AttendanceStore;
   chat?: ChatStore;
   content?: ContentStore;
+  mediaPlatform?: MediaControlPlaneStore;
+  mediaPlayback?: { secret: string; publicBaseUrl: string };
   files?: FileStorage;
   trustedProxyIps?: string[];
   limits?: Partial<HttpLimits>;
@@ -267,6 +271,11 @@ export function createApp(options: CreateAppOptions = {}) {
       directory: organizationDirectory,
     }),
   );
+  api.route('/media-platform', createMediaPlatformRoutes({
+    store: options.mediaPlatform ?? new PostgresMediaPlatformStore(), content, files,
+    playbackSecret: options.mediaPlayback?.secret ?? process.env.MEDIA_PLAYBACK_SIGNING_SECRET,
+    publicBaseUrl: options.mediaPlayback?.publicBaseUrl ?? process.env.MEDIA_PLAYBACK_PUBLIC_BASE_URL,
+  }));
   api.route('/kodex', createKodexRoutes({ files, chat }));
   api.route('/leave', createLeaveRoutes({ store: leave }));
   api.route(

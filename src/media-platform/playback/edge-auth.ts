@@ -15,6 +15,7 @@ export type MediaEdgeRequestVerification =
       assetId: string;
       expiresAt: number;
       objectPath: string;
+      generation?: string;
     }
   | {
       valid: false;
@@ -47,7 +48,9 @@ function invalid(
 export function verifyMediaEdgeRequest(
   input: VerifyMediaEdgeRequestInput,
 ): MediaEdgeRequestVerification {
-  const match = MEDIA_PATH.exec(input.uri);
+  const v2 = /^\/media\/v2\/([0-9]+)\/([A-Za-z0-9_-]{43})\/([0-9a-fA-F-]{36})\/([1-9][0-9]{0,18})\/(hls\/.+)$/.exec(input.uri);
+  const match = v2 ? [v2[0],v2[1],v2[2],v2[3],v2[5]] : MEDIA_PATH.exec(input.uri);
+  const generation = v2?.[4];
 
   if (!match) {
     return invalid('invalid_path');
@@ -72,6 +75,7 @@ export function verifyMediaEdgeRequest(
       signature,
       secret: input.secret,
       now: input.now,
+      generation,
     });
 
   if (!verification.valid) {
@@ -87,5 +91,6 @@ export function verifyMediaEdgeRequest(
     assetId: verification.assetId,
     expiresAt: verification.expiresAt,
     objectPath,
+    ...(generation ? { generation } : {}),
   };
 }

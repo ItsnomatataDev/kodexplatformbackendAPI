@@ -1,20 +1,3 @@
-/**
- * Copy Content Studio media bytes from legacy Supabase Storage into MinIO,
- * then rewrite file_url to the Kode media proxy.
- *
- * Covers content.schedule_assets and content.client_media.
- *
- * Put the service role key in kode-platform `.env` (gitignored):
- *   LEGACY_STORAGE_URL=https://…supabase.co
- *   LEGACY_STORAGE_SERVICE_ROLE_KEY=…
- *
- * Then run:
- *   npm run migrate:content-studio-media
- *   npm run migrate:content-studio-media -- --apply
- *   npm run migrate:content-studio-media -- --apply --allow-missing
- *
- * `--allow-missing` exits 0 when Supabase returns 400/404 for deleted objects.
- */
 import { db } from '../../src/db/pool.js';
 import { env } from '../../src/config/env.js';
 import { CONTENT_REVIEW_ASSETS_BUCKET } from '../../src/content/buckets.js';
@@ -71,10 +54,6 @@ function mediaProxyUrl(objectKey: string) {
 }
 
 function needsMigration(fileUrl: string) {
-  // Always process rows with a storage_path. migrateRow skips the upload when
-  // MinIO already has the object, and still rewrites legacy Supabase URLs.
-  // Proxy URLs alone must not skip — an earlier cutover rewrote file_url without
-  // copying bytes, which left review/edit media 404ing.
   void fileUrl;
   return true;
 }
@@ -91,7 +70,7 @@ async function loadRows(): Promise<MediaRow[]> {
       SELECT id, storage_path, file_url, mime_type, file_name
       FROM content.schedule_assets
       WHERE storage_path IS NOT NULL
-        AND btrim(storage_path) <> ''
+      AND btrim(storage_path) <> ''
       ORDER BY created_at ASC
     `,
   );
@@ -187,8 +166,6 @@ async function migrateRow(
   const proxyUrl = mediaProxyUrl(objectKey);
 
   if (!uploadedKeys.has(objectKey)) {
-    // Prefer HEAD — getObject downloads the whole body and times out on large
-    // videos when migrating over an SSH tunnel.
     const existing = files.headObject
       ? await files.headObject(CONTENT_REVIEW_ASSETS_BUCKET, objectKey)
       : await files.getObject(CONTENT_REVIEW_ASSETS_BUCKET, objectKey);

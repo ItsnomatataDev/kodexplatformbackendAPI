@@ -101,6 +101,8 @@ test('staff can create, list, assign, and comment on tickets in their organizati
   assert.equal(created.ticket.organizationId, orgA);
   assert.equal(created.ticket.userId, userA);
   assert.equal(created.ticket.assignedTo, userC);
+  assert.equal(created.ticket.assignedName, 'Casey Requester');
+  assert.ok(Number.isFinite(Date.parse(created.ticket.assignedAt)));
   assert.equal(created.ticket.status, 'assigned');
   assert.match(created.ticket.ticketNumber, /^SD-/);
 
@@ -129,6 +131,7 @@ test('staff can create, list, assign, and comment on tickets in their organizati
     }),
   );
   assert.equal(unassigned.ticket.assignedTo, null);
+  assert.equal(unassigned.ticket.assignedAt, null);
   assert.equal(unassigned.ticket.status, 'open');
 
   const detail = await json(
