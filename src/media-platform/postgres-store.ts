@@ -1,4 +1,5 @@
 import { mediaGenerationPrefix } from './object-keys.js';
+import { mediaImageObjectPath } from './playback/image-object.js';
 import { db } from '../db/pool.js';
 import { withTransaction } from '../db/transaction.js';
 
@@ -184,6 +185,65 @@ export class PostgresMediaPlatformStore implements MediaPlatformStore {
         `INSERT INTO media_platform.jobs(asset_id,job_type)
         SELECT $1,'adaptive_hls' WHERE NOT EXISTS(SELECT 1 FROM media_platform.jobs WHERE asset_id=$1)`,
         [asset.id],
+      );
+      return asset;
+    });
+  }
+
+  async createReadyImageAsset(
+    input: CreateMediaAssetInput,
+  ): Promise<MediaAsset> {
+    return withTransaction(async (client) => {
+      const inserted = await client.query<AssetRow>(
+        `INSERT INTO media_platform.assets
+        (organization_id,uploaded_by,original_filename,mime_type,size_bytes,origin_bucket,origin_object_key)
+        VALUES($1,$2,$3,$4,$5,$6,$7)
+        ON CONFLICT (origin_bucket,origin_object_key) DO UPDATE SET updated_at=media_platform.assets.updated_at
+        WHERE media_platform.assets.organization_id=EXCLUDED.organization_id
+          AND media_platform.assets.status <> 'deleted'
+          AND media_platform.assets.mime_type LIKE 'image/%'
+        RETURNING *`,
+        [
+          input.organizationId,
+          input.uploadedBy ?? null,
+          input.originalFilename,
+          input.mimeType,
+          input.sizeBytes,
+          input.originBucket,
+          input.originObjectKey,
+        ],
+      );
+      if (!inserted.rows[0]) throw new Error('media_source_conflict');
+      const existing = mapAsset(inserted.rows[0]);
+      if (existing.playbackGeneration) return existing;
+      const published = await client.query<AssetRow>(
+        `UPDATE media_platform.assets AS a
+         SET fencing_token=v.token,
+             playback_generation=CAST(v.token AS text),
+             status='ready',error_code=NULL,error_message=NULL,updated_at=clock_timestamp()
+         FROM (SELECT nextval('media_platform.fencing_tokens') AS token) v
+         WHERE a.id=$1 AND a.playback_generation IS NULL AND a.status <> 'deleted'
+         RETURNING a.*`,
+        [existing.id],
+      );
+      const asset = published.rows[0] ? mapAsset(published.rows[0]) : existing;
+      const imagePath = mediaImageObjectPath(asset.mimeType);
+      if (!asset.playbackGeneration || !imagePath) return asset;
+      await client.query(
+        `INSERT INTO media_platform.variants
+        (asset_id,kind,width,height,bitrate_bps,codec,container,bucket,object_key,size_bytes,status,generation)
+        SELECT $1,'image_original',NULL,NULL,NULL,NULL,'image',$2,$3,$4,'ready',$5
+        WHERE NOT EXISTS (
+          SELECT 1 FROM media_platform.variants
+          WHERE asset_id=$1 AND generation=$5 AND kind='image_original'
+        )`,
+        [
+          asset.id,
+          asset.originBucket,
+          `${mediaGenerationPrefix(asset.id, asset.playbackGeneration)}/${imagePath}`,
+          asset.sizeBytes,
+          asset.playbackGeneration,
+        ],
       );
       return asset;
     });

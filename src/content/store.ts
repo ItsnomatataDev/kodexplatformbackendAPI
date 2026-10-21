@@ -340,6 +340,11 @@ export type ContentStore = {
     assetId: string,
   ): Promise<ContentScheduleAssetRecord | null>;
   createUploadedAsset(input: CreateScheduleAssetInput, clientId: string | null): Promise<ContentScheduleAssetRecord>;
+  finalizeResumableScheduleAsset(
+    input: CreateScheduleAssetInput & { id: string },
+    clientId: string | null,
+    mediaRecordId: string,
+  ): Promise<ContentScheduleAssetRecord>;
   createAsset(input: CreateScheduleAssetInput): Promise<ContentScheduleAssetRecord>;
   updateAsset(
     organizationId: string,
@@ -371,6 +376,9 @@ export type ContentStore = {
     mediaId: string,
   ): Promise<ContentClientMediaRecord | null>;
   createClientMedia(input: CreateClientMediaInput): Promise<ContentClientMediaRecord>;
+  finalizeResumableClientMedia(
+    input: CreateClientMediaInput & { id: string },
+  ): Promise<ContentClientMediaRecord>;
   deleteClientMedia(
     organizationId: string,
     mediaId: string,

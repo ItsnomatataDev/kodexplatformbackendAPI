@@ -44,6 +44,45 @@ export type PutObjectStreamInput = {
   contentLength: number;
 };
 
+export type MultipartPart = {
+  partNumber: number;
+  sizeBytes: number;
+  etag: string;
+};
+
+export interface MultipartFileStorage {
+  initiateMultipartUpload(
+    bucket: string,
+    objectKey: string,
+    contentType: string,
+  ): Promise<string>;
+  putMultipartPartStream(input: {
+    bucket: string;
+    objectKey: string;
+    uploadId: string;
+    partNumber: number;
+    body: ReadableStream<Uint8Array>;
+    contentLength: number;
+  }): Promise<{ etag: string }>;
+  listMultipartParts(
+    bucket: string,
+    objectKey: string,
+    uploadId: string,
+  ): Promise<MultipartPart[]>;
+  completeMultipartUpload(
+    bucket: string,
+    objectKey: string,
+    uploadId: string,
+    parts: MultipartPart[],
+  ): Promise<void>;
+  abortMultipartUpload(
+    bucket: string,
+    objectKey: string,
+    uploadId: string,
+  ): Promise<void>;
+  findMultipartUpload?(bucket: string, objectKey: string): Promise<string | null>;
+}
+
 export interface FileStorage {
   putObject(input: PutObjectInput): Promise<void>;
   putObjectStream?(input: PutObjectStreamInput): Promise<void>;

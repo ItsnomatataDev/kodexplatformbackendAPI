@@ -20,6 +20,7 @@ import { createSessionAuth } from './session-auth.js';
 const userA = '11111111-1111-1111-1111-111111111111';
 const userB = '22222222-2222-2222-2222-222222222222';
 const userC = '33333333-3333-3333-3333-333333333333';
+const deletedUser = '44444444-4444-4444-4444-444444444444';
 const orgA = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const orgB = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 const officeA = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
@@ -123,8 +124,10 @@ function createDirectoryApp(
   resolve: (userId: string) => Promise<AuthContext>,
   store: MemoryOrganizationDirectoryStore,
   profiles = new Map<string, PublicProfile>([[userA, emptyProfile()]]),
+  sendInvitation: (email: string, organizationName: string) => Promise<void> = async () => {},
 ) {
   return createApp({
+    sendOrganizationInvitation: sendInvitation,
     auth: {
       verifier: tokenService,
       resolveAuthContext: resolve,
@@ -734,4 +737,109 @@ test('PATCH /api/me updates person fields and cannot escalate org, office, or ro
 
   assert.equal(profiles.get(userA)?.fullName, 'Ada Lovelace');
   assert.equal(updated.user.accountStatus, 'active');
+});
+
+
+test('employee invitation sends email and retries without activating the pending account', async () => {
+  const store = new MemoryOrganizationDirectoryStore();
+  seedDirectory(store);
+  const sent: string[][] = [];
+  let fail = true;
+  const app = createDirectoryApp(async () => authContext(), store, undefined, async (email, name) => {
+    if (fail) throw new Error('SMTP secret detail must not be exposed');
+    sent.push([email, name]);
+  });
+  const authorization = await bearer(userA);
+  const invite = () => app.request('/api/organization/members/invite', {
+    method: 'POST', headers: { authorization, 'content-type': 'application/json' },
+    body: JSON.stringify({ email: ' New.Person@example.com ', fullName: 'New Person', roleKey: 'media_team' }),
+  });
+  const failed = await invite();
+  assert.equal(failed.status, 503);
+  const error = await failed.json();
+  assert.equal(error.error.code, 'INVITATION_EMAIL_FAILED');
+  assert.doesNotMatch(JSON.stringify(error), /SMTP secret/);
+  const pending = await store.findUserByEmail('new.person@example.com');
+  assert.equal(pending?.accountStatus, 'pending');
+  fail = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await invite();
+    assert.equal(response.status, 201);
+    const result = await response.json();
+    assert.equal(result.status, 'invite_created');
+    assert.equal(result.emailStatus, 'sent');
+    assert.equal(result.userId, pending?.userId);
+    assert.equal((await store.getMember(orgA, result.userId))?.status, 'pending');
+    assert.equal((await store.findUserByEmail('new.person@example.com'))?.accountStatus, 'pending');
+  }
+  assert.deepEqual(sent, Array(2).fill(['new.person@example.com', (await store.getOrganization(orgA))!.name]));
+});
+
+test('invitation rejects invalid addresses and unauthorized callers without sending email', async () => {
+  const store = new MemoryOrganizationDirectoryStore();
+  seedDirectory(store);
+  let sends = 0;
+  const sender = async () => { sends++; };
+  const app = createDirectoryApp(async () => authContext(), store, undefined, sender);
+  const authorization = await bearer(userA);
+  for (const email of ['invalid', 'a@example.com\r\nBcc: other@example.com', 'a b@example.com']) {
+    const response = await app.request('/api/organization/members/invite', {
+      method: 'POST', headers: { authorization, 'content-type': 'application/json' },
+      body: JSON.stringify({ email, roleKey: 'media_team' }),
+    });
+    assert.equal(response.status, 400);
+  }
+  const employeeApp = createDirectoryApp(async () => authContext({ membership: {
+    roleKey: 'media_team', isAdminRole: false, isManagerRole: false,
+  } }), store, undefined, sender);
+  const forbidden = await employeeApp.request('/api/organization/members/invite', {
+    method: 'POST', headers: { authorization, 'content-type': 'application/json' },
+    body: JSON.stringify({ email: 'person@example.com', roleKey: 'media_team' }),
+  });
+  assert.equal(forbidden.status, 403);
+  assert.equal(sends, 0);
+});
+
+test('deleted members appear when the directory requests inactive accounts', async () => {
+  const store = new MemoryOrganizationDirectoryStore();
+  seedDirectory(store);
+  store.seedMember({
+    userId: deletedUser,
+    email: 'deleted@example.com',
+    fullName: 'Deleted User',
+    avatarUrl: null,
+    jobTitle: null,
+    department: null,
+    username: null,
+    employeeCode: null,
+    roleKey: 'media_team',
+    officeId: officeA,
+    status: 'removed',
+    accountStatus: 'deleted',
+    organizationId: orgA,
+  });
+  const app = createDirectoryApp(async () => authContext(), store);
+  const authorization = await bearer(userA);
+
+  const activeResponse = await app.request('/api/organization/members', {
+    headers: { authorization },
+  });
+  const inactiveResponse = await app.request(
+    '/api/organization/members?includeInactive=true',
+    { headers: { authorization } },
+  );
+  const active = await activeResponse.json();
+  const inactive = await inactiveResponse.json();
+
+  assert.equal(
+    active.members.some((member: { userId: string }) => member.userId === deletedUser),
+    false,
+  );
+  assert.equal(
+    inactive.members.some(
+      (member: { userId: string; accountStatus: string }) =>
+        member.userId === deletedUser && member.accountStatus === 'deleted',
+    ),
+    true,
+  );
 });

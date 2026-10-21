@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { chromium } from 'playwright';
 import { createMediaPlaybackUrl } from '../../../dist/media-platform/playback/url.js';
+import { issuePlaybackGrant } from '../grants.mjs';
 
 // Separate test page only. No application frontend changes, traces, screenshots,
 // raw network logs or persisted grants. Restrict execution to the local fixture.
@@ -33,7 +34,13 @@ try {
     else if(path.endsWith('/init.mp4'))responses.init++;
     else if(path.endsWith('.m4s'))responses.segment++;
   });
-  const grant=(ttlSeconds=60)=>edge+createMediaPlaybackUrl({assetId:'0c8176a7-87c6-4f97-bf09-6c1fcf32acce',generation:'900000',secret:'local-test-playback-key',ttlSeconds}).path;
+  const secret='local-test-playback-key';
+  const grant=(ttlSeconds=60)=>edge+createMediaPlaybackUrl({assetId:'0c8176a7-87c6-4f97-bf09-6c1fcf32acce',generation:'900000',secret,ttlSeconds}).path;
+  async function granted(ttlSeconds=60) {
+    const url=grant(ttlSeconds);
+    await issuePlaybackGrant(new URL(url).pathname, secret);
+    return url;
+  }
   await page.goto('http://127.0.0.1:43181');
   const playback=await page.evaluate(async url=>{
     const video=document.querySelector('video');video.muted=true;
@@ -46,28 +53,28 @@ try {
       player.on(Hls.Events.MANIFEST_PARSED,()=>{video.play().catch(()=>finish({passed:false,reason:'play rejected'}));});
       player.loadSource(url);player.attachMedia(video);
     });
-  },grant());
+  },await granted());
   assert.equal(playback.passed,true,'actual HLS decoding and advancing playback');
   assert.ok(playback.width>0 && playback.height>0);
   for(const [kind,count] of Object.entries(responses))assert.ok(count>0,`${kind} requested by browser player`);
-  const short=grant(2);
+  const short=await granted(2);
   assert.equal(await page.evaluate(async url=>(await fetch(url)).status,short),200);
   await new Promise(resolve=>setTimeout(resolve,2200));
   for(const suffix of ['master.m3u8','480p/index.m3u8','480p/init.mp4','480p/segment_00000.m4s']) {
     assert.equal(await page.evaluate(async url=>(await fetch(url)).status,short.replace('master.m3u8',suffix)),403,'expired grant readable as 403 via CORS');
   }
-  assert.equal(await page.evaluate(async url=>(await fetch(url)).status,grant()),200,'new grant restores access');
+  assert.equal(await page.evaluate(async url=>(await fetch(url)).status,await granted()),200,'new grant restores access');
   const range=await page.evaluate(async url=>{
     const response=await fetch(url,{headers:{Range:'bytes=0-15','If-Range':'"fixture-nonmatching-etag"'}});
     return {status:response.status,bytes:(await response.arrayBuffer()).byteLength};
-  },grant().replace('master.m3u8','480p/segment_00000.m4s'));
+  },(await granted()).replace('master.m3u8','480p/segment_00000.m4s'));
   assert.ok([200,206].includes(range.status) && range.bytes>0,'allowed preflight plus range request');
   assert.equal(await page.evaluate(async url=>{
     try{await fetch(url,{headers:{'X-Unapproved':'x'}});return false;}catch{return true;}
-  },grant()),true,'unapproved preflight header blocked');
+  },await granted()),true,'unapproved preflight header blocked');
   await page.goto('http://127.0.0.1:43182');
-  assert.equal(await page.evaluate(async url=>{try{await fetch(url);return false;}catch{return true;}},grant()),true,'disallowed browser origin blocked');
-  assert.equal(await page.evaluate(async url=>{try{await fetch(url,{headers:{'If-Range':'x'}});return false;}catch{return true;}},grant()),true,'disallowed preflight blocked');
+  assert.equal(await page.evaluate(async url=>{try{await fetch(url);return false;}catch{return true;}},await granted()),true,'disallowed browser origin blocked');
+  assert.equal(await page.evaluate(async url=>{try{await fetch(url,{headers:{'If-Range':'x'}});return false;}catch{return true;}},await granted()),true,'disallowed preflight blocked');
   console.log(`Browser Chrome ${browser.version()}: HLS decoding, master/rendition/init/segments, grant expiry/renewal, allowed and denied CORS/preflight passed`);
 } catch {
   console.error('Browser verification FAILED (details suppressed to keep bearer URLs out of logs). Requires local Chrome and npm ci --prefix tests/media-cdn/browser.');

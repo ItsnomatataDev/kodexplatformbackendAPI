@@ -1008,7 +1008,8 @@ export class PostgresItStore {
       // Soft-delete equivalent — never hard-delete auth rows from war room.
       await db.query(
         `UPDATE identity.users
-         SET account_status = 'deleted', is_active = FALSE, updated_at = NOW()
+         SET account_status = 'deleted', is_active = FALSE,
+             deleted_at = COALESCE(deleted_at, NOW()), updated_at = NOW()
          WHERE id = $1`,
         [targetUserId],
       );
@@ -1021,6 +1022,12 @@ export class PostgresItStore {
              updated_at = NOW()
          WHERE user_id = $1`,
         [targetUserId, actorUserId, reason],
+      );
+      await db.query(
+        `UPDATE identity.password_reset_tokens
+         SET used_at = NOW()
+         WHERE user_id = $1 AND used_at IS NULL`,
+        [targetUserId],
       );
       await db.query(
         `UPDATE organizations.memberships
@@ -1084,7 +1091,8 @@ export class PostgresItStore {
     } else if (action === 'reactivate') {
       await db.query(
         `UPDATE identity.users
-         SET account_status = 'active', is_active = TRUE, updated_at = NOW()
+         SET account_status = 'active', is_active = TRUE,
+             deleted_at = NULL, updated_at = NOW()
          WHERE id = $1`,
         [targetUserId],
       );
@@ -1110,7 +1118,8 @@ export class PostgresItStore {
     } else if (action === 'soft_delete') {
       await db.query(
         `UPDATE identity.users
-         SET account_status = 'deleted', is_active = FALSE, updated_at = NOW()
+         SET account_status = 'deleted', is_active = FALSE,
+             deleted_at = COALESCE(deleted_at, NOW()), updated_at = NOW()
          WHERE id = $1`,
         [targetUserId],
       );
@@ -1123,6 +1132,12 @@ export class PostgresItStore {
              updated_at = NOW()
          WHERE user_id = $1`,
         [targetUserId, actorUserId, reason],
+      );
+      await db.query(
+        `UPDATE identity.password_reset_tokens
+         SET used_at = NOW()
+         WHERE user_id = $1 AND used_at IS NULL`,
+        [targetUserId],
       );
       await db.query(
         `UPDATE organizations.memberships

@@ -3,6 +3,7 @@ import { Client } from 'minio';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createMediaPlaybackUrl } from '../../dist/media-platform/playback/url.js';
+import { issuePlaybackGrant } from './grants.mjs';
 import { processAdaptiveHls } from '../../dist/media-platform/processing/adaptive-hls.js';
 import { probeVideo } from '../../dist/media-platform/processing/ffmpeg.js';
 
@@ -15,7 +16,10 @@ const generation = '900000';
 const secret = 'local-test-playback-key';
 let checks = 0;
 function check(value, label) { assert.ok(value, label); checks++; }
-async function request(path, options) { return fetch(`http://media-edge:8080${path}`, options); }
+async function request(path, options) {
+  await issuePlaybackGrant(path, secret);
+  return fetch(`http://media-edge:8080${path}`, options);
+}
 async function main() {
   if (process.env.TEST_PHASE === 'auth-outage') {
     const path = createMediaPlaybackUrl({assetId,generation,secret}).path;

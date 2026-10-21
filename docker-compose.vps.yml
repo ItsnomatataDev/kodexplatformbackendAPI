@@ -43,6 +43,9 @@ services:
       retries: 10
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
+    networks:
+      - default
+      - media-private
 
   minio:
     image: pgsty/minio:latest
@@ -62,6 +65,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    networks:
+      - default
+      - media-private
 
   api:
     build:
@@ -86,6 +92,24 @@ services:
       minio:
         condition: service_started
 
+  content-studio-upload-maintenance:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: content-studio-upload-maintenance
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env.vps
+    environment:
+      APP_ENV: staging
+      NODE_ENV: staging
+      CONTENT_STUDIO_UPLOAD_MAINTENANCE_INTERVAL_SECONDS: 300
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
 
   media-worker:
     profiles: [media]
@@ -116,6 +140,8 @@ services:
         condition: service_started
 
   media-platform-worker:
+    # Slice 3: start exactly one worker after auth/edge canary, never --profile media.
+    # docker compose --env-file .env.vps -f docker-compose.vps.yml up -d --no-deps --scale media-platform-worker=1 media-platform-worker
     profiles: [media-processing]
     build:
       context: .
@@ -145,6 +171,7 @@ services:
     security_opt: [no-new-privileges:true]
 
   media-auth:
+    # Slice 2 canary: up -d --no-deps media-auth media-edge only, after real MEDIA_ORIGIN_* exist.
     profiles: [media]
     build:
       context: .
@@ -152,14 +179,22 @@ services:
       target: media-auth
     restart: unless-stopped
     environment:
+      APP_ENV: staging
       MEDIA_AUTH_PORT: 3200
       MEDIA_PLAYBACK_SIGNING_SECRET: ${MEDIA_PLAYBACK_SIGNING_SECRET:?MEDIA_PLAYBACK_SIGNING_SECRET is required}
       MEDIA_ORIGIN_ENDPOINT: http://minio:9000
       MEDIA_ORIGIN_BUCKET: content-review-assets
       MEDIA_ORIGIN_ACCESS_KEY: ${MEDIA_ORIGIN_ACCESS_KEY:?Dedicated read-only media origin key required}
       MEDIA_ORIGIN_SECRET_KEY: ${MEDIA_ORIGIN_SECRET_KEY:?Dedicated read-only media origin secret required}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?}
+      REDIS_TLS: "false"
     networks:
       - media-private
+    depends_on:
+      redis:
+        condition: service_healthy
     read_only: true
     tmpfs:
       - /tmp:size=67108864,mode=1777

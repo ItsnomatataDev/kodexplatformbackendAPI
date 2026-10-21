@@ -4,6 +4,9 @@ import type { AddressInfo } from 'node:net';
 
 import { createMediaPlaybackSignature } from './token.js';
 import { createMediaAuthServer } from './auth-server.js';
+import { MemoryPlaybackGrantStore } from './redis-grant.js';
+import { verifyMediaEdgeRequest } from './edge-auth.js';
+import { ServiceUnavailableError } from '../../http/errors.js';
 
 const SECRET = 'test-only-media-playback-secret';
 
@@ -13,25 +16,52 @@ const ASSET_ID =
 const NOW = Math.floor(Date.now() / 1000);
 const EXPIRES_AT = NOW + 3600;
 
-function validUri(): string {
-  const signature = createMediaPlaybackSignature(
-    {
-      assetId: ASSET_ID,
-      expiresAt: EXPIRES_AT,
-    },
-    SECRET,
-  );
+const VALID_SIGNATURE = createMediaPlaybackSignature(
+  {
+    assetId: ASSET_ID,
+    expiresAt: EXPIRES_AT,
+  },
+  SECRET,
+);
 
+function validUri(): string {
   return (
-    `/media/v1/${EXPIRES_AT}/${signature}/` +
+    `/media/v1/${EXPIRES_AT}/${VALID_SIGNATURE}/` +
     `${ASSET_ID}/hls/master.m3u8`
   );
 }
 
+const ORG_ID = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+const USER_ID = '11111111-1111-1111-1111-111111111111';
+
+async function issueGrant(
+  store: MemoryPlaybackGrantStore,
+  uri: string,
+) {
+  const verified = verifyMediaEdgeRequest({ uri, secret: SECRET });
+  if (!verified.valid) return;
+  await store.issue(
+    {
+      signature: verified.signature,
+      assetId: verified.assetId,
+      generation: verified.generation ?? null,
+      organizationId: ORG_ID,
+      userId: USER_ID,
+      expiresAt: verified.expiresAt,
+    },
+    300_000,
+  );
+}
+
 async function withServer(
-  callback: (baseUrl: string) => Promise<void>,
+  callback: (baseUrl: string, grants: MemoryPlaybackGrantStore) => Promise<void>,
+  grants = new MemoryPlaybackGrantStore(),
+  options: { issue?: boolean } = {},
 ): Promise<void> {
-  const server = createMediaAuthServer(SECRET);
+  if (options.issue !== false) {
+    await issueGrant(grants, validUri());
+  }
+  const server = createMediaAuthServer(SECRET, undefined, 'http://minio:9000', grants);
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
@@ -47,6 +77,7 @@ async function withServer(
 
     await callback(
       `http://127.0.0.1:${address.port}`,
+      grants,
     );
   } finally {
     await new Promise<void>((resolve, reject) => {
@@ -166,9 +197,13 @@ async function withOriginServer(
   },
   callback: (baseUrl: string) => Promise<void>,
 ): Promise<void> {
+  const grants = new MemoryPlaybackGrantStore();
+  await issueGrant(grants, validUri());
   const server = createMediaAuthServer(
     SECRET,
     signer,
+    'http://minio:9000',
+    grants,
   );
 
   await new Promise<void>((resolve, reject) => {
@@ -412,4 +447,55 @@ test('rejects a signer authority that does not match the edge Host', async () =>
     assert.equal(response.headers.get('x-media-origin-uri'), null);
     assert.equal(response.headers.get('x-media-cache-key'), null);
   });
+});
+
+test('denies a valid HMAC when the Redis grant is missing', async () => {
+  const grants = new MemoryPlaybackGrantStore();
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/authorize`, {
+      headers: { 'X-Original-URI': validUri() },
+    });
+    assert.equal(response.status, 403);
+  }, grants, { issue: false });
+});
+
+test('denies playback after the user grant is revoked', async () => {
+  await withServer(async (baseUrl, grants) => {
+    const allowed = await fetch(`${baseUrl}/authorize`, {
+      headers: { 'X-Original-URI': validUri() },
+    });
+    assert.equal(allowed.status, 204);
+    await grants.revokeUser(USER_ID);
+    const denied = await fetch(`${baseUrl}/authorize`, {
+      headers: { 'X-Original-URI': validUri() },
+    });
+    assert.equal(denied.status, 403);
+  });
+});
+
+test('fails closed when grant storage is unavailable', async () => {
+  const grants = {
+    async issue() {},
+    async get() {
+      throw new ServiceUnavailableError('MEDIA_PLAYBACK_UNAVAILABLE');
+    },
+    async revokeUser() {},
+  };
+  const server = createMediaAuthServer(SECRET, undefined, 'http://minio:9000', grants);
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  try {
+    const address = server.address() as AddressInfo;
+    const response = await fetch(`http://127.0.0.1:${address.port}/authorize`, {
+      headers: { 'X-Original-URI': validUri() },
+    });
+    assert.equal(response.status, 503);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

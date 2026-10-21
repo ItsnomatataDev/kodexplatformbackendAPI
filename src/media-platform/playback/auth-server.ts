@@ -11,6 +11,12 @@ import {
   createMinioOriginClient,
   type MediaOriginSigner,
 } from './origin-signer.js';
+import {
+  createRedisPlaybackGrantStore,
+  type PlaybackGrantStore,
+} from './redis-grant.js';
+import { ServiceUnavailableError } from '../../http/errors.js';
+import type { AppEnvironment } from '../../config/environments.js';
 
 const DEFAULT_PORT = 3200;
 
@@ -58,6 +64,7 @@ export function createMediaAuthServer(
   secret: string,
   originSigner?: MediaOriginSigner,
   expectedOrigin = 'http://minio:9000',
+  grants?: PlaybackGrantStore,
 ) {
   if (!secret) {
     throw new Error(
@@ -91,6 +98,27 @@ export function createMediaAuthServer(
     if (!verification.valid) {
       send(response, 403);
       return;
+    }
+
+    if (grants) {
+      try {
+        const grant = await grants.get(verification.signature);
+        if (
+          !grant ||
+          grant.assetId !== verification.assetId ||
+          (grant.generation ?? undefined) !== verification.generation ||
+          grant.expiresAt <= Math.floor(Date.now() / 1000)
+        ) {
+          send(response, 403);
+          return;
+        }
+      } catch (error) {
+        send(
+          response,
+          error instanceof ServiceUnavailableError ? 503 : 403,
+        );
+        return;
+      }
     }
 
     response.setHeader(
@@ -186,9 +214,26 @@ function main(): void {
     bucket: minioBucket,
   });
 
+  const appEnv = (process.env.APP_ENV ?? 'staging') as AppEnvironment;
+  if (appEnv !== 'development' && appEnv !== 'staging' && appEnv !== 'production') {
+    throw new Error('APP_ENV is required for media playback grants.');
+  }
+  const redisPort = Number(process.env.REDIS_PORT ?? '6379');
+  const grants = createRedisPlaybackGrantStore({
+    appEnv,
+    host: process.env.REDIS_HOST ?? '127.0.0.1',
+    port: Number.isInteger(redisPort) ? redisPort : 6379,
+    username: process.env.REDIS_USERNAME || undefined,
+    password: process.env.REDIS_PASSWORD || undefined,
+    tls: process.env.REDIS_TLS === 'true',
+    rejectUnauthorized: true,
+  });
+
   const server = createMediaAuthServer(
     secret,
     originSigner,
+    'http://minio:9000',
+    grants,
   );
 
   server.listen(port, '0.0.0.0', () => {

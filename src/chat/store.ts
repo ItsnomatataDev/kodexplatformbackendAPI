@@ -137,6 +137,7 @@ export type CreateGroupConversationInput = {
 };
 
 export interface ChatStore {
+  canReadLegacyAttachment(organizationId: string, userId: string, objectKey: string): Promise<boolean>;
   listConversations(
     input: ListConversationsInput,
   ): Promise<{ conversations: ChatConversationRecord[]; hasMore: boolean }>;

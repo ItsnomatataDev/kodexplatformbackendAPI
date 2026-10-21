@@ -463,7 +463,31 @@ export class PostgresOrganizationDirectoryStore
           userId,
           membershipId,
           message:
-            'Invite created. The user can sign up with this email and will be linked to your organization.',
+            'Invitation saved. The employee must set up their password and receive account approval.',
+        };
+      }
+
+      if (['deleted', 'rejected', 'suspended'].includes(existing.accountStatus)) {
+        throw new ConflictError(
+          'ACCOUNT_REQUIRES_RESTORE',
+          'This account is deleted, rejected, or suspended. Restore or approve it through the employee account workflow before sending an invitation.',
+        );
+      }
+      
+      // Retrying an invitation must not activate an account awaiting approval.
+      if (existing.accountStatus === 'pending' || existing.accountStatus === 'pending_approval') {
+        const pending = await client.query<{ id: string }>(
+          `SELECT id FROM organizations.memberships
+           WHERE organization_id = $1 AND user_id = $2 AND status = 'pending'`,
+          [input.organizationId, existing.userId],
+        );
+        if (!pending.rows[0]) {
+          throw new ConflictError('ACCOUNT_PENDING', 'This account is awaiting approval. Manage it through the approval workflow.');
+        }
+        return {
+          status: 'invite_created', userId: existing.userId,
+          membershipId: pending.rows[0].id,
+          message: 'Invitation saved. Account approval is still required.',
         };
       }
 

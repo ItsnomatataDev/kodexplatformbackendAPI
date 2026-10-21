@@ -146,6 +146,20 @@ function orderedPair(a: string, b: string): [string, string] {
 }
 
 export class PostgresChatStore implements ChatStore {
+  async canReadLegacyAttachment(organizationId: string, userId: string, objectKey: string) {
+    const urls = ['chat-images', 'chat-attachments'].flatMap(bucket => [
+      `/api/chat/media?bucket=${bucket}&objectKey=${encodeURIComponent(objectKey)}`,
+      `/api/chat/media/${bucket}/${objectKey}`,
+    ]);
+    const result = await db.query(`SELECT 1 FROM chat.messages m
+      JOIN chat.conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = $2
+      WHERE m.organization_id = $1 AND m.is_deleted = FALSE
+        AND (m.expires_at IS NULL OR m.expires_at > NOW())
+        AND m.attachment_url = ANY($3::text[]) LIMIT 1`,
+    [organizationId, userId, urls]);
+    return result.rows.length > 0;
+  }
+
   async listConversations(input: ListConversationsInput) {
     const limit = listLimit(input.limit);
     const result = await db.query<ConversationRow>(

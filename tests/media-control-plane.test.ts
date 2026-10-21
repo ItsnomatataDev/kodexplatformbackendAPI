@@ -6,8 +6,9 @@ import type { MediaAsset, MediaJob, MediaVariant } from '../src/media-platform/t
 import type { ContentStore } from '../src/content/store.js';
 import { MemoryFileStorage } from '../src/files/memory-storage.js';
 import { CONTENT_REVIEW_ASSETS_BUCKET } from '../src/content/buckets.js';
-import { UnauthorizedError } from '../src/http/errors.js';
+import { ServiceUnavailableError, UnauthorizedError } from '../src/http/errors.js';
 import { verifyMediaEdgeRequest } from '../src/media-platform/playback/edge-auth.js';
+import { MemoryPlaybackGrantStore } from '../src/media-platform/playback/redis-grant.js';
 import { authContext, orgA, orgB, sessionAuth, tokenService, userA } from './work-harness.js';
 const id='12345678-1234-4123-8123-123456789abc';
 const secret='local-test-only-playback-key-with-32-bytes';
@@ -27,20 +28,22 @@ async function fixture() {
     async getJobsForAsset() { return [job]; },
     async getVariantsByAssetId() { return [variant]; },
     async enqueueForOrganization(org,assetId) { if (org!==orgA || assetId!==id) return null; enqueues++; return {...job,status:'queued'}; },
+    async createReadyImageAsset() { throw new Error('media_source_conflict'); },
   };
+  const grants=new MemoryPlaybackGrantStore();
   const files=new MemoryFileStorage();
   await files.putObject({bucket:CONTENT_REVIEW_ASSETS_BUCKET,objectKey:asset.originObjectKey,body:Buffer.from('video'),contentType:'video/mp4'});
   const head=files.headObject.bind(files);
   files.headObject=async (...args)=>{originReads++; return head(...args);};
   const app=createApp({mediaPlatform:store,files,
-    mediaPlayback:{secret,publicBaseUrl:'https://media.example.invalid'},
+    mediaPlayback:{secret,publicBaseUrl:'https://media.example.invalid',grants},
     content:{async findMediaOwnership(org,key) { return org===orgA && key===asset.originObjectKey; }} as ContentStore,
     auth:{verifier:tokenService,resolveAuthContext:async()=>context,
       requireActiveSession:async(s,u)=>{if(!active) throw new UnauthorizedError(); return sessionAuth.requireActiveSession(s,u);}}});
   const {authorization}=await sessionAuth.issueBearer(userA);
   const request=(path='',method='GET',body?:unknown)=>app.request(`/api/media-platform/assets${path}`,{
     method,headers:{authorization,'content-type':'application/json'},...(body === undefined ? {} : {body:JSON.stringify(body)})});
-  return {app,asset,request,revoke:()=>{context.membership.permissions={};},revokeSession:()=>{active=false;},
+  return {app,asset,grants,request,revoke:()=>{context.membership.permissions={};},revokeSession:()=>{active=false;},
     otherTenant:()=>{context={...context,membership:{...context.membership,organizationId:orgB},organization:{...context.organization,organizationId:orgB}};},
     readOnly:()=>{context.membership.permissions={content_studio:{read:true}};},counts:()=>({registrations,originReads,enqueues})};
 }
@@ -70,7 +73,10 @@ test('permissions and sessions are resolved again for every grant request',async
   const initial=await f.request(`/${id}/playback`,'POST'); assert.equal(initial.status,200);
   const grant=await initial.json() as {playbackUrl:string;expiresAt:number};
   const verified=verifyMediaEdgeRequest({uri:new URL(grant.playbackUrl).pathname,secret});
-  assert.ok(verified.valid); if(verified.valid) assert.equal(verified.generation,'17');
+  assert.ok(verified.valid); if(verified.valid) {
+    assert.equal(verified.generation,'17');
+    assert.equal((await f.grants.get(verified.signature))?.assetId,id);
+  }
   assert.ok(grant.expiresAt <= Math.floor(Date.now()/1000)+300);
   f.revoke();
   for (const [path,method] of [[`/${id}`,'GET'],[`/${id}/variants`,'GET'],[`/${id}/process`,'POST'],[`/${id}/playback`,'POST'],['','POST']]) {
@@ -95,4 +101,79 @@ test('all mounted control-plane routes require existing Bearer session authentic
   for(const [path,method] of [['','POST'],[`/${id}`,'GET'],[`/${id}/variants`,'GET'],[`/${id}/process`,'POST'],[`/${id}/playback`,'POST']]) {
     assert.equal((await f.app.request(`/api/media-platform/assets${path}`,{method})).status,401);
   }
+});
+test('fails closed when playback grant storage is unavailable',async()=>{
+  const asset: MediaAsset={id,organizationId:orgA,uploadedBy:userA,originalFilename:'source.mp4',mimeType:'video/mp4',
+    sizeBytes:5,originBucket:CONTENT_REVIEW_ASSETS_BUCKET,originObjectKey:`${orgA}/private-source.mp4`,status:'ready',
+    fencingToken:'17',hlsGeneration:'17',playbackGeneration:null,errorCode:null,errorMessage:null,createdAt:new Date(),updatedAt:new Date()};
+  const grants={
+    async issue(){throw new ServiceUnavailableError('MEDIA_PLAYBACK_UNAVAILABLE');},
+    async get(){return null;},
+    async revokeUser(){},
+  };
+  const app=createApp({
+    mediaPlatform:{
+      async createAssetAndJob(){return asset;},
+      async createReadyImageAsset(){throw new Error('media_source_conflict');},
+      async getAssetForOrganization(org,assetId){return org===orgA && assetId===id ? asset : null;},
+      async getJobsForAsset(){return [];},
+      async getVariantsByAssetId(){return [];},
+      async enqueueForOrganization(){return null;},
+    },
+    files:new MemoryFileStorage(),
+    mediaPlayback:{secret,publicBaseUrl:'https://media.example.invalid',grants},
+    content:{async findMediaOwnership(){return true;}} as unknown as ContentStore,
+    auth:{verifier:tokenService,resolveAuthContext:async()=>authContext({membership:{isAdminRole:false,permissions:{content_studio:{read:true,manage:true}}}}),
+      requireActiveSession:async(s,u)=>sessionAuth.requireActiveSession(s,u)},
+  });
+  const {authorization}=await sessionAuth.issueBearer(userA);
+  const response=await app.request(`/api/media-platform/assets/${id}/playback`,{
+    method:'POST',headers:{authorization,'content-type':'application/json'},
+  });
+  assert.equal(response.status,503);
+});
+test('registers an owned image onto the signed original path without an HLS job',async()=>{
+  const imageKey=`${orgA}/photo.jpg`;
+  const jpeg=Buffer.from([0xff,0xd8,0xff,0xdb,0x00,0x43,0x00,0xff,0xd9]);
+  let published: MediaAsset | null=null;
+  const files=new MemoryFileStorage();
+  await files.putObject({bucket:CONTENT_REVIEW_ASSETS_BUCKET,objectKey:imageKey,body:jpeg,contentType:'image/jpeg'});
+  const grants=new MemoryPlaybackGrantStore();
+  const app=createApp({
+    mediaPlatform:{
+      async createAssetAndJob(){throw new Error('hls-not-for-images');},
+      async createReadyImageAsset(input){
+        published={id,organizationId:orgA,uploadedBy:userA,originalFilename:'photo.jpg',mimeType:input.mimeType,
+          sizeBytes:input.sizeBytes,originBucket:input.originBucket,originObjectKey:input.originObjectKey,status:'ready',
+          fencingToken:'9',hlsGeneration:null,playbackGeneration:'9',errorCode:null,errorMessage:null,createdAt:new Date(),updatedAt:new Date()};
+        return published;
+      },
+      async getAssetForOrganization(org,assetId){return org===orgA && assetId===id ? published : null;},
+      async getJobsForAsset(){return [];},
+      async getVariantsByAssetId(){return [];},
+      async enqueueForOrganization(){return null;},
+    },
+    files,
+    mediaPlayback:{secret,publicBaseUrl:'https://media.example.invalid',grants},
+    content:{async findMediaOwnership(org: string,key: string){return org===orgA && key===imageKey;}} as unknown as ContentStore,
+    auth:{verifier:tokenService,resolveAuthContext:async()=>authContext({membership:{isAdminRole:false,permissions:{content_studio:{read:true,manage:true}}}}),
+      requireActiveSession:async(s,u)=>sessionAuth.requireActiveSession(s,u)},
+  });
+  const {authorization}=await sessionAuth.issueBearer(userA);
+  const created=await app.request('/api/media-platform/assets',{
+    method:'POST',headers:{authorization,'content-type':'application/json'},
+    body:JSON.stringify({sourceObjectKey:imageKey}),
+  });
+  assert.equal(created.status,202);
+  const body=await created.json() as {asset:{playbackReady:boolean;mimeType:string}};
+  assert.equal(body.asset.playbackReady,true);
+  assert.equal(body.asset.mimeType,'image/jpeg');
+  const copied=await files.getObject(CONTENT_REVIEW_ASSETS_BUCKET,`.media/v2/${id}/9/image/original.jpg`);
+  assert.ok(copied);
+  const playback=await app.request(`/api/media-platform/assets/${id}/playback`,{
+    method:'POST',headers:{authorization,'content-type':'application/json'},
+  });
+  assert.equal(playback.status,200);
+  const grant=await playback.json() as {playbackUrl:string};
+  assert.match(grant.playbackUrl,/\/image\/original\.jpg$/);
 });

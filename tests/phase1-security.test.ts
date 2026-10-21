@@ -192,6 +192,8 @@ const tightPolicies = {
   attachment: { limit: 1, windowSeconds: 60 },
   attachmentOrg: { limit: 100, windowSeconds: 60 },
   attachmentIp: { limit: 100, windowSeconds: 60 },
+  uploadSession: { limit: 10, windowSeconds: 60 },
+  uploadPart: { limit: 1000, windowSeconds: 60 },
   payslipBatch: { limit: 100, windowSeconds: 60 },
   payslipBatchOrg: { limit: 100, windowSeconds: 60 },
   payslipBatchIp: { limit: 100, windowSeconds: 60 },

@@ -47,12 +47,13 @@ test('accepts a valid HLS master playlist', () => {
     now: NOW,
   });
 
-  assert.deepEqual(result, {
-    valid: true,
-    assetId: ASSET_ID,
-    expiresAt: EXPIRES_AT,
-    objectPath: 'hls/master.m3u8',
-  });
+  assert.equal(result.valid, true);
+  if (result.valid) {
+    assert.equal(result.assetId, ASSET_ID);
+    assert.equal(result.expiresAt, EXPIRES_AT);
+    assert.equal(result.objectPath, 'hls/master.m3u8');
+    assert.match(result.signature, /^[A-Za-z0-9_-]{43}$/);
+  }
 });
 
 test('accepts a valid HLS rendition playlist', () => {
@@ -62,12 +63,10 @@ test('accepts a valid HLS rendition playlist', () => {
     now: NOW,
   });
 
-  assert.deepEqual(result, {
-    valid: true,
-    assetId: ASSET_ID,
-    expiresAt: EXPIRES_AT,
-    objectPath: 'hls/1080p/index.m3u8',
-  });
+  assert.equal(result.valid, true);
+  if (result.valid) {
+    assert.equal(result.objectPath, 'hls/1080p/index.m3u8');
+  }
 });
 
 test('accepts a valid HLS init segment', () => {
@@ -310,6 +309,24 @@ test('rejects malformed HLS segment names', () => {
     valid: false,
     reason: 'invalid_path',
   });
+});
+
+test('accepts a signed original image on the v2 generation path', () => {
+  const generation = '17';
+  const signature = createMediaPlaybackSignature(
+    { assetId: ASSET_ID, expiresAt: EXPIRES_AT, generation },
+    SECRET,
+  );
+  const result = verifyMediaEdgeRequest({
+    uri: `/media/v2/${EXPIRES_AT}/${signature}/${ASSET_ID}/${generation}/image/original.jpg`,
+    secret: SECRET,
+    now: NOW,
+  });
+  assert.equal(result.valid, true);
+  if (result.valid) {
+    assert.equal(result.objectPath, 'image/original.jpg');
+    assert.equal(result.generation, generation);
+  }
 });
 
 test('rejects playback MP4 through the HLS edge route', () => {

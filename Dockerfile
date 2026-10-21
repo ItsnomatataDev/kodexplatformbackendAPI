@@ -70,4 +70,9 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:3101/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "dist/infrastructure/server.js"]
 
+FROM runtime AS content-studio-upload-maintenance
+HEALTHCHECK NONE
+ENV CONTENT_STUDIO_UPLOAD_MAINTENANCE_INTERVAL_SECONDS=300
+CMD ["node", "dist/content/resumable/run-maintenance.js"]
+
 FROM runtime AS api

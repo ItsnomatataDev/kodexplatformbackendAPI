@@ -2,6 +2,7 @@ import type { EmailDeliveryConfig } from '../config/email-delivery.js';
 import { logger } from '../config/logger.js';
 import {
   buildPasswordResetEmail,
+  buildInvitationEmail,
   firstNameFrom,
 } from '../email/branded-templates.js';
 import { sendSmtpMail, type SmtpMail } from './smtp-transport.js';
@@ -13,7 +14,14 @@ export type PasswordResetEmail = {
   expiresMinutes?: number;
 };
 
+export type InvitationEmail = Omit<PasswordResetEmail, 'resetToken'> & {
+  organizationName: string;
+  resetToken?: string;
+  requiresApproval?: boolean;
+};
+
 export interface EmailSender {
+  sendInvitation(message: InvitationEmail): Promise<void>;
   sendPasswordReset(message: PasswordResetEmail): Promise<void>;
 }
 
@@ -47,6 +55,10 @@ export function passwordResetDeliveryLogFields(to: string) {
 }
 
 export class UnconfiguredEmailSender implements EmailSender {
+  async sendInvitation(_message: InvitationEmail): Promise<void> {
+    throw new EmailDeliveryError('Invitation email delivery is not configured.');
+  }
+
   async sendPasswordReset(message: PasswordResetEmail): Promise<void> {
     logger.warn(
       passwordResetDeliveryLogFields(message.to),
@@ -60,6 +72,11 @@ export class UnconfiguredEmailSender implements EmailSender {
 
 export class CapturingEmailSender implements EmailSender {
   lastReset: PasswordResetEmail | undefined;
+  lastInvitation: InvitationEmail | undefined;
+
+  async sendInvitation(message: InvitationEmail): Promise<void> {
+    this.lastInvitation = message;
+  }
 
   async sendPasswordReset(message: PasswordResetEmail): Promise<void> {
     this.lastReset = message;
@@ -77,6 +94,31 @@ export class SmtpEmailSender implements EmailSender {
       passwordResetTtlSeconds?: number;
     },
   ) {}
+
+  async sendInvitation(message: InvitationEmail): Promise<void> {
+    const appUrl = (this.options.appPublicUrl ?? '').replace(/\/+$/, '');
+    if (!appUrl || !/^https?:\/\//i.test(appUrl)) {
+      throw new EmailDeliveryError('APP_PUBLIC_URL is required to send invitation links.');
+    }
+    const setupUrl = message.resetToken
+      ? `${appUrl}/reset-password?type=invite&token=${encodeURIComponent(message.resetToken)}`
+      : `${appUrl}/login`;
+    const branded = buildInvitationEmail({
+      firstName: message.firstName ?? firstNameFrom(message.to),
+      organizationName: message.organizationName,
+      existingAccount: !message.resetToken,
+      requiresApproval: message.requiresApproval,
+      setupUrl,
+      expiresMinutes: message.expiresMinutes ?? Math.max(1, Math.round((this.options.passwordResetTtlSeconds ?? 1800) / 60)),
+      appUrl,
+    });
+    try {
+      await this.options.deliver({ to: message.to, ...branded });
+    } catch {
+      // Do not expose SMTP responses, recipients, or setup tokens in logs.
+      throw new EmailDeliveryError('Invitation email could not be sent.');
+    }
+  }
 
   async sendPasswordReset(message: PasswordResetEmail): Promise<void> {
     const appPublicUrl = (this.options.appPublicUrl ?? '').replace(/\/+$/, '');

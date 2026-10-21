@@ -4,6 +4,7 @@ import { logger } from '../config/logger.js';
 import { redisClientOptions } from '../auth/rate-limit-redis.js';
 import type { ChatRealtimeEnvelope } from './events.js';
 import { conversationChannel } from './events.js';
+import { ChatPresence } from './presence.js';
 
 export type ChatSocketClient = {
   send: (data: string) => void;
@@ -23,6 +24,7 @@ export class ChatRealtimeHub {
   private publisher: RedisClientType | null = null;
   private subscriber: RedisClientType | null = null;
   private started = false;
+  readonly presence = new ChatPresence(() => this.publisher);
 
   async start() {
     if (this.started) return;

@@ -2,6 +2,7 @@ import { createHash, createHmac } from 'node:crypto';
 import https from 'node:https';
 import { Readable } from 'node:stream';
 import { env } from '../config/env.js';
+import { logger } from '../config/logger.js';
 import { ServiceUnavailableError } from '../http/errors.js';
 import type {
   FileStorage,
@@ -354,7 +355,26 @@ export class MinioFileStorage implements FileStorage {
         },
         { streamBody: options?.streamBody === true },
       );
-    } catch {
+    } catch (error: unknown) {
+      const failure = error && typeof error === 'object'
+        ? error as { name?: unknown; code?: unknown; cause?: unknown }
+        : null;
+      const cause = failure?.cause && typeof failure.cause === 'object'
+        ? failure.cause as { name?: unknown; code?: unknown }
+        : null;
+      const safe = (value: unknown): string =>
+        typeof value === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(value)
+          ? value
+          : 'unknown';
+
+      logger.error({
+        operation: method,
+        errorName: safe(failure?.name),
+        errorCode: safe(failure?.code),
+        causeName: safe(cause?.name),
+        causeCode: safe(cause?.code),
+      }, 'Object storage transport failed');
+
       throw new ServiceUnavailableError(
         'OBJECT_STORAGE_UNAVAILABLE',
         'Object storage is unavailable.',

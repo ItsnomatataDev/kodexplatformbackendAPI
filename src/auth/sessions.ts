@@ -35,6 +35,7 @@ export type SessionServiceConfig = {
   withTransaction?: <T>(
     work: (client?: TransactionClient) => Promise<T>,
   ) => Promise<T>;
+  onUserRevoked?: (userId: string) => Promise<void>;
 };
 
 export type IssuedCredentials = {
@@ -196,6 +197,7 @@ export class SessionService {
         ipAddress: meta.ipAddress,
         userAgent: meta.userAgent,
       });
+      await this.config.onUserRevoked?.(session.userId);
     }
 
     return revoked;
@@ -222,6 +224,7 @@ export class SessionService {
         ipAddress: meta.ipAddress,
         userAgent: meta.userAgent,
       });
+      await this.config.onUserRevoked?.(userId);
     }
 
     return count;

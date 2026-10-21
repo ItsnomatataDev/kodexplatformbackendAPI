@@ -7,6 +7,7 @@ export interface CreateMediaPlaybackUrlInput {
   generation?: string;
   secret: string;
   basePath?: string;
+  objectPath?: string;
   ttlSeconds?: number;
   now?: number;
 }
@@ -62,6 +63,7 @@ export function createMediaPlaybackUrl(
   );
 
   const assetId = input.assetId.toLowerCase();
+  const objectPath = input.objectPath ?? 'hls/master.m3u8';
   const basePath = normalizeBasePath(
     input.basePath ?? (input.generation ? '/media/v2' : '/media/v1'),
   );
@@ -72,6 +74,6 @@ export function createMediaPlaybackUrl(
     signature,
     path:
       `${basePath}/${expiresAt}/${signature}/` +
-      `${assetId}/${input.generation ? `${input.generation}/` : ''}hls/master.m3u8`,
+      `${assetId}/${input.generation ? `${input.generation}/` : ''}${objectPath}`,
   };
 }

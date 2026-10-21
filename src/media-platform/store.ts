@@ -31,6 +31,7 @@ export interface MediaPlatformStore {
 
   getAssetForOrganization(organizationId: string, assetId: string): Promise<MediaAsset | null>;
   createAssetAndJob(input: CreateMediaAssetInput): Promise<MediaAsset>;
+  createReadyImageAsset(input: CreateMediaAssetInput): Promise<MediaAsset>;
   enqueueForOrganization(organizationId: string, assetId: string): Promise<MediaJob | null>;
   getJobsForAsset(organizationId: string, assetId: string): Promise<MediaJob[]>;
 

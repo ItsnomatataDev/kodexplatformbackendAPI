@@ -52,11 +52,16 @@ import {
   generatePortalToken,
   hashClientPin,
 } from '../content/pin.js';
+import { createResumableUploadRoutes } from '../content/resumable/routes.js';
+import { ResumableUploadService } from '../content/resumable/service.js';
+import type { UploadSessionRepository } from '../content/resumable/types.js';
 
 export type ContentStudioRouteDependencies = {
   store: ContentStore;
   files: FileStorage;
   directory: OrganizationDirectoryStore;
+  resumableUploadService?: ResumableUploadService;
+  uploadSessionRepository?: UploadSessionRepository;
 };
 
 const CONTENT_STUDIO_BLOCKED_OFFICE_SLUGS = new Set(['three-little-birds']);
@@ -404,6 +409,18 @@ export function createContentStudioRoutes(
 ) {
   const routes = new Hono();
   const capabilities = env.appEnv === 'development' ? mediaCapabilityStore : sharedMediaCapabilityStore();
+
+  if (dependencies.resumableUploadService && dependencies.uploadSessionRepository) {
+    routes.route(
+      '/uploads',
+      createResumableUploadRoutes({
+        service: dependencies.resumableUploadService,
+        repository: dependencies.uploadSessionRepository,
+        content: dependencies.store,
+        directory: dependencies.directory,
+      }),
+    );
+  }
 
   routes.get('/clients', async (c) => {
     const auth = getAuth(c);

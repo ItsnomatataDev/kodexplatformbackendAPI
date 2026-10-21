@@ -8,11 +8,12 @@ export function supabaseConfig() {
     process.env.SUPABASE_URL ??
     'https://zirftywinscopzuuwdlg.supabase.co'
   ).replace(/\/+$/, '');
-  const key = (
-    process.env.LEGACY_STORAGE_SERVICE_ROLE_KEY ??
-    process.env.SUPABASE_SERVICE_ROLE_KEY ??
-    ''
-  ).trim();
+  const key = [
+    process.env.LEGACY_STORAGE_SERVICE_ROLE_KEY,
+    process.env.SUPABASE_SERVICE_ROLE_KEY,
+  ]
+    .map((candidate) => candidate?.trim() ?? '')
+    .find(Boolean) ?? '';
   if (!key) {
     throw new Error(
       'Set LEGACY_STORAGE_SERVICE_ROLE_KEY or SUPABASE_SERVICE_ROLE_KEY.',
