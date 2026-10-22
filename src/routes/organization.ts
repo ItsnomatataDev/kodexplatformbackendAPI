@@ -8,7 +8,7 @@ import { ForbiddenError, NotFoundError, ServiceUnavailableError, ValidationError
 import type { FileStorage } from '../files/storage.js';
 import { streamStoredMedia } from '../content/media-stream.js';
 import { readListQuery } from '../http/list-query.js';
-import { isKodeOperatingRoleKey } from '../organizations/role-model.js';
+import { isKodeOperatingRoleKey, pickDirectoryRoleKey } from '../organizations/role-model.js';
 import { rejectTenancyOverrides } from '../organizations/http.js';
 import type { OrganizationDirectoryStore } from '../organizations/store.js';
 import { PROFILE_PICTURES_BUCKET } from '../organizations/buckets.js';
@@ -182,7 +182,12 @@ export function createOrganizationRoutes(
     }
     const fullName =
       readOptionalString(body.fullName ?? body.full_name, 'fullName', 200) ?? '';
-    const roleKey = readOperatingRoleKey(body.roleKey ?? body.role);
+    const requestedRole = readOptionalString(body.roleKey ?? body.role, 'roleKey', 64) ?? '';
+    const operatingRoles = await dependencies.store.listOperatingRoles(organizationId);
+    const roleKey = pickDirectoryRoleKey(operatingRoles, requestedRole, { allowAdmin: true });
+    if (!roleKey) {
+      throw new ValidationError('The selected role is not available.', { field: 'roleKey' });
+    }
     const officeRaw = body.officeId ?? body.office_id;
     const officeId =
       officeRaw === undefined || officeRaw === null

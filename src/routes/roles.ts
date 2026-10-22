@@ -25,6 +25,7 @@ export function createRoleRoutes(dependencies: RoleRouteDependencies) {
         roleLabel: role.roleLabel,
         isAdminRole: role.isAdminRole,
         isManagerRole: role.isManagerRole,
+        isDefaultSignupRole: Boolean(role.isDefaultSignupRole),
       })),
     });
   });

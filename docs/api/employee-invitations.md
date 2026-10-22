@@ -3,8 +3,8 @@
 The Employees page in ITsNomatataWorkSpace calls
 `POST /api/organization/members/invite` through the Kode directory client.
 Previously this endpoint saved a pending user and membership without sending
-email, and returned misleading signup instructions. Kode has no public signup
-endpoint.
+email, and returned misleading signup instructions. Public self-serve signup is
+`POST /auth/signup` and still requires administrator approval.
 
 ## Updated behavior
 

@@ -114,8 +114,15 @@ export class SmtpEmailSender implements EmailSender {
     });
     try {
       await this.options.deliver({ to: message.to, ...branded });
-    } catch {
-      // Do not expose SMTP responses, recipients, or setup tokens in logs.
+    } catch (error) {
+      logger.warn(
+        {
+          template: 'workspace_invitation',
+          toDomain: emailDomain(message.to),
+          err: error instanceof Error ? error.message : String(error),
+        },
+        'Invitation email delivery failed.',
+      );
       throw new EmailDeliveryError('Invitation email could not be sent.');
     }
   }

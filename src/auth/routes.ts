@@ -7,6 +7,7 @@ import { rejectClientUserOverride } from './account.js';
 import { rejectClientOrganizationOverride } from '../authorization/organization.js';
 import { LoginService } from './login.js';
 import { PasswordService } from './password-service.js';
+import type { SignupService } from './signup.js';
 import { SessionService } from './sessions.js';
 import {
   clearAuthCookies,
@@ -29,6 +30,7 @@ export type AuthRouteDependencies = {
   login: LoginService;
   sessions: SessionService;
   passwords: PasswordService;
+  signup?: SignupService;
   rateLimiter: RateLimiter;
   cookies: CookieSettings;
 };
@@ -74,6 +76,70 @@ export function createAuthRoutes(dependencies: AuthRouteDependencies) {
       maxAge: dependencies.cookies.refreshMaxAgeSeconds,
     });
     return c.json({ csrf_token: token });
+  });
+
+  routes.get('/signup/options', async (c) => {
+    if (!dependencies.signup) {
+      throw new ServiceUnavailableError(
+        'SIGNUP_UNAVAILABLE',
+        'Account signup is not available.',
+      );
+    }
+    const organizationId = c.req.query('organization_id') ?? c.req.query('organizationId');
+    const organizationSlug = c.req.query('organization_slug') ?? c.req.query('organizationSlug') ?? c.req.query('org');
+    const host = c.req.query('host');
+    if (!organizationId && !organizationSlug && !host) {
+      throw new ValidationError('organization_id, organization_slug, or host is required.');
+    }
+    return c.json(await dependencies.signup.options({
+      organizationId: organizationId || undefined,
+      organizationSlug: organizationSlug || undefined,
+      host: host || undefined,
+    }));
+  });
+
+  routes.post('/signup', async (c) => {
+    if (!dependencies.signup) {
+      throw new ServiceUnavailableError(
+        'SIGNUP_UNAVAILABLE',
+        'Account signup is not available.',
+      );
+    }
+    const meta = requestMeta(c);
+    await enforceRateLimit(
+      dependencies.rateLimiter,
+      `signup:ip:${meta.ipAddress ?? 'unknown'}`,
+      8,
+      900,
+    );
+
+    const body = await readJson(c);
+    const email = readString(body.email);
+    const password = readString(body.password);
+    const fullName = readString(body.fullName) ?? readString(body.full_name);
+    if (!email || !password || !fullName) {
+      throw new ValidationError('Email, password, and full name are required.');
+    }
+
+    await enforceRateLimit(
+      dependencies.rateLimiter,
+      `signup:email:${email.trim().toLowerCase()}`,
+      3,
+      900,
+    );
+
+    const created = await dependencies.signup.signup({
+      email,
+      password,
+      fullName,
+      roleKey: readString(body.roleKey) ?? readString(body.role),
+      organizationId: readString(body.organizationId) ?? readString(body.organization_id),
+      organizationSlug: readString(body.organizationSlug) ?? readString(body.organization_slug),
+      officeId: readString(body.officeId) ?? readString(body.office_id),
+      officeSlug: readString(body.officeSlug) ?? readString(body.office_slug),
+      host: readString(body.host),
+    });
+    return c.json(created, 201);
   });
 
   routes.post('/login', async (c) => {

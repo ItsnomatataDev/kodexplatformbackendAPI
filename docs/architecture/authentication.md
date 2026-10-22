@@ -22,6 +22,8 @@ See also `docs/architecture/core-engineering-standards.md`.
 
 | Method | Path | Auth |
 |---|---|---|
+| `POST` | `/auth/signup` | Public (rate limited) |
+| `GET` | `/auth/signup/options` | Public |
 | `POST` | `/auth/login` | Public (rate limited) |
 | `POST` | `/auth/refresh` | Refresh token (rate limited) |
 | `POST` | `/auth/logout` | Access token |

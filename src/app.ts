@@ -9,6 +9,7 @@ import {createDefaultAuthDependencies, createDefaultAuthLifecycle,createDefaultM
 import { createAuthMiddleware } from './auth/middleware.js';
 import type { AuthDependencies } from './auth/middleware.js';
 import { createAuthRoutes, type AuthRouteDependencies } from './auth/routes.js';
+import { SignupService } from './auth/signup.js';
 import type { RateLimiter } from './auth/rate-limit.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { requestContext } from './middleware/request-context.js';
@@ -250,7 +251,17 @@ export function createApp(options: CreateAppOptions = {}) {
   });
 
   app.route('/health', health);
-  app.route('/auth', createAuthRoutes(authLifecycle));
+  const signup =
+    authLifecycle.signup ??
+    new SignupService({
+      store: organizationDirectory,
+      resolveByHost: async (host) => {
+        const resolved = await branding.resolveOrganizationByHost(host);
+        if (!resolved) return null;
+        return organizationDirectory.getOrganization(resolved.id);
+      },
+    });
+  app.route('/auth', createAuthRoutes({ ...authLifecycle, signup }));
 
   const api = new Hono();
   const apiAuth = createAuthMiddleware(authDependencies);

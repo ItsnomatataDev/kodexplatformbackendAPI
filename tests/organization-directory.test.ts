@@ -775,6 +775,34 @@ test('employee invitation sends email and retries without activating the pending
   assert.deepEqual(sent, Array(2).fill(['new.person@example.com', (await store.getOrganization(orgA))!.name]));
 });
 
+test('employee and missing roles map onto an operating role and still send invitation email', async () => {
+  const store = new MemoryOrganizationDirectoryStore();
+  seedDirectory(store);
+  const sent: string[] = [];
+  const app = createDirectoryApp(async () => authContext(), store, undefined, async (email) => {
+    sent.push(email);
+  });
+  const authorization = await bearer(userA);
+  const invited = await json(
+    await app.request('/api/organization/members/invite', {
+      method: 'POST',
+      headers: { authorization, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        email: 'mapped.role@example.com',
+        fullName: 'Mapped Role',
+        roleKey: 'employee',
+      }),
+    }),
+  );
+  assert.equal(invited.status, 'invite_created');
+  assert.equal(invited.emailStatus, 'sent');
+  assert.deepEqual(sent, ['mapped.role@example.com']);
+  const member = await store.getMember(orgA, invited.userId);
+  assert.ok(member);
+  assert.equal(KODE_OPERATING_ROLE_KEYS.includes(member.roleKey as typeof KODE_OPERATING_ROLE_KEYS[number]), true);
+  assert.notEqual(member.roleKey, 'employee');
+});
+
 test('invitation rejects invalid addresses and unauthorized callers without sending email', async () => {
   const store = new MemoryOrganizationDirectoryStore();
   seedDirectory(store);

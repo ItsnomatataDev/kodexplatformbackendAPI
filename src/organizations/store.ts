@@ -45,6 +45,7 @@ export type OrganizationRoleRecord = {
   isAdminRole: boolean;
   isManagerRole: boolean;
   isActive: boolean;
+  isDefaultSignupRole?: boolean;
 };
 
 export type DirectoryUserLookup = {
@@ -68,6 +69,23 @@ export type InviteMemberResult = {
   userId: string;
   membershipId: string;
   message: string;
+};
+
+export type CreateSelfSignupInput = {
+  organizationId: string;
+  email: string;
+  fullName: string;
+  roleKey: string;
+  officeId?: string | null;
+  passwordHash: string;
+};
+
+export type CreateSelfSignupResult = {
+  userId: string;
+  membershipId: string;
+  organizationId: string;
+  roleKey: string;
+  email: string;
 };
 
 export type ApproveMemberInput = {
@@ -103,6 +121,7 @@ export type OrganizationDirectoryStore = {
   getOrganization(
     organizationId: string,
   ): Promise<OrganizationRecord | null>;
+  getOrganizationBySlug(slug: string): Promise<OrganizationRecord | null>;
   listMembers(
     organizationId: string,
     options?: ListMembersOptions,
@@ -130,6 +149,7 @@ export type OrganizationDirectoryStore = {
     emailNormalized: string,
   ): Promise<DirectoryUserLookup | null>;
   inviteMember(input: InviteMemberInput): Promise<InviteMemberResult>;
+  createSelfSignup(input: CreateSelfSignupInput): Promise<CreateSelfSignupResult>;
   approveMember(input: ApproveMemberInput): Promise<OrganizationMemberRecord>;
   rejectMember(input: RejectMemberInput): Promise<OrganizationMemberRecord>;
   updateMemberAccess(

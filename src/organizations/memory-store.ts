@@ -6,6 +6,8 @@ import { ConflictError, NotFoundError, ValidationError } from '../http/errors.js
 import { KODE_OPERATING_ROLE_KEYS } from './role-model.js';
 import type {
   ApproveMemberInput,
+  CreateSelfSignupInput,
+  CreateSelfSignupResult,
   DirectoryUserLookup,
   InviteMemberInput,
   InviteMemberResult,
@@ -88,6 +90,14 @@ export class MemoryOrganizationDirectoryStore
     organizationId: string,
   ): Promise<OrganizationRecord | null> {
     return this.organizations.find((row) => row.id === organizationId) ?? null;
+  }
+
+  async getOrganizationBySlug(slug: string): Promise<OrganizationRecord | null> {
+    const normalized = slug.trim().toLowerCase();
+    return (
+      this.organizations.find((row) => row.slug.toLowerCase() === normalized) ??
+      null
+    );
   }
 
   async listMembers(
@@ -331,6 +341,67 @@ export class MemoryOrganizationDirectoryStore
       userId: existing.userId,
       membershipId: existingMembership?.membershipId ?? membershipId,
       message: 'User linked successfully and marked active.',
+    };
+  }
+
+  async createSelfSignup(
+    input: CreateSelfSignupInput,
+  ): Promise<CreateSelfSignupResult> {
+    const emailNormalized = normalizeEmail(input.email);
+    if (!emailNormalized) {
+      throw new ValidationError('Email is required.');
+    }
+    const existing = await this.findUserByEmail(emailNormalized);
+    if (existing) {
+      throw new ConflictError(
+        'ACCOUNT_EXISTS',
+        'An account with this email already exists. Sign in or ask an administrator to invite you.',
+      );
+    }
+    const role = await this.getRoleByKey(input.organizationId, input.roleKey);
+    if (!role) {
+      throw new ValidationError('The selected role is not available.');
+    }
+    if (input.officeId) {
+      const office = await this.getOffice(input.organizationId, input.officeId);
+      if (!office?.isActive) {
+        throw new ValidationError(
+          'Selected office was not found in this organization.',
+        );
+      }
+    }
+    const userId = randomUUID();
+    const membershipId = randomUUID();
+    this.users.push({
+      userId,
+      email: emailNormalized,
+      emailNormalized,
+      accountStatus: 'pending_approval',
+      isActive: false,
+      fullName: input.fullName.trim() || null,
+    });
+    this.members.push({
+      organizationId: input.organizationId,
+      membershipId,
+      userId,
+      email: emailNormalized,
+      fullName: input.fullName.trim() || null,
+      avatarUrl: null,
+      jobTitle: null,
+      department: null,
+      username: null,
+      employeeCode: null,
+      roleKey: role.roleKey,
+      officeId: input.officeId ?? null,
+      status: 'pending',
+      accountStatus: 'pending_approval',
+    });
+    return {
+      userId,
+      membershipId,
+      organizationId: input.organizationId,
+      roleKey: role.roleKey,
+      email: emailNormalized,
     };
   }
 
