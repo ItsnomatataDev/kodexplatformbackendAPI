@@ -15,6 +15,7 @@ import { createDefaultAuthLifecycle } from '../auth/defaults.js';
 export type ItRouteDependencies = {
   store: PostgresItStore;
   passwords?: PasswordService;
+  onUserAccessRevoked?: (userId: string) => Promise<void>;
 };
 
 const INM_OFFICE_SLUGS = new Set(['its-no-matata', 'itsnomatata']);
@@ -365,6 +366,9 @@ export function createItRoutes(dependencies: ItRouteDependencies) {
       newRole: (body.newRole ?? body.new_role ?? null) as string | null,
       reason: (body.reason ?? null) as string | null,
     });
+    if (action === 'suspend' || action === 'soft_delete' || action === 'hard_delete_auth_user') {
+      await dependencies.onUserAccessRevoked?.(targetUserId);
+    }
     return c.json(result);
   });
 

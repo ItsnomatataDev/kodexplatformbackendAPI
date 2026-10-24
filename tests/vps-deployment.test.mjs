@@ -40,7 +40,7 @@ test('authoritative VPS file renders fixed HOST despite conflicting env_file and
     const source = readFileSync(new URL('../docker-compose.vps.yml', import.meta.url), 'utf8');
     writeFileSync(join(dir, 'docker-compose.vps.yml'), source);
     // Synthetic credentials only. Never read the developer or VPS secret file.
-    writeFileSync(join(dir, '.env.vps'), 'HOST=127.0.0.1\nPORT=9999\nDATABASE_PASSWORD=test\nREDIS_PASSWORD=test\nMINIO_ACCESS_KEY=test\nMINIO_SECRET_KEY=test\n');
+    writeFileSync(join(dir, '.env.vps'), 'HOST=127.0.0.1\nPORT=9999\nDATABASE_PASSWORD=test\nREDIS_PASSWORD=test\nMINIO_ACCESS_KEY=test\nMINIO_SECRET_KEY=test\nMEDIA_PLAYBACK_SIGNING_SECRET=local-test-playback-key\nMEDIA_ORIGIN_ACCESS_KEY=local-test-reader\nMEDIA_ORIGIN_SECRET_KEY=local-test-reader-password\n');
     const render = () => JSON.parse(execFileSync('docker', ['compose', '--env-file', '.env.vps', '-f', 'docker-compose.vps.yml', 'config', '--format', 'json'], {
       cwd: dir, encoding: 'utf8', env: { ...process.env, HOST: '127.0.0.1', PORT: '9999' }, stdio: ['ignore', 'pipe', 'pipe'],
     }));

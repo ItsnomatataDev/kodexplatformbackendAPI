@@ -1,0 +1,35 @@
+# REVIEW EXAMPLE ONLY: standalone additive project; never automatically merged with the live stack.
+# Requires an explicitly approved database address/network and same-origin HTTPS proxy.
+services:
+  infrastructure:
+    profiles: [infrastructure]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      target: infrastructure
+    env_file: ./infrastructure.env
+    environment:
+      INFRA_HOST: 0.0.0.0
+      INFRA_PORT: 3101
+      INFRA_TOKEN_KEY_FILE: /run/secrets/infra_token_key
+      INFRA_MFA_KEYS_FILE: /run/secrets/infra_mfa_keys
+    secrets: [infra_token_key, infra_mfa_keys]
+    ports: ["127.0.0.1:3101:3101"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.0
+    restart: unless-stopped
+secrets:
+  infra_token_key:
+    file: ./secrets/token-key
+  infra_mfa_keys:
+    file: ./secrets/mfa-keyring.json
+# Release acceptance (run ONLY after separate deployment authorization):
+# docker compose ... up -d --wait infrastructure
+# docker compose ... exec -T infrastructure node -e \
+#   'fetch("http://127.0.0.1:3101/health/ready").then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))'
+# Alternatively pipe check-readiness.mjs to `exec -T infrastructure node --input-type=module`.
+# Container HEALTHCHECK is liveness only: temporary DB outages must not trigger restarts.

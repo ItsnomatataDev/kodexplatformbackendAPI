@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { TransactionClient } from '../db/transaction.js';
 import { logger } from '../config/logger.js';
 import { UnauthorizedError } from '../http/errors.js';
-import { emailDomain, EmailDeliveryError } from './email.js';
+import { emailDomain, EmailDeliveryError, type InvitationEmail } from './email.js';
 import { publishAuthEvent } from './events.js';
 import { hashPassword, validatePassword, verifyPassword } from './passwords.js';
 import { normalizeEmail } from './login.js';
@@ -24,6 +24,7 @@ export type PasswordServiceConfig = {
     firstName?: string;
     expiresMinutes: number;
   }) => Promise<void>;
+  sendInvitationEmail?: (input: InvitationEmail) => Promise<void>;
   resolveFirstName?: (userId: string, email: string) => Promise<string | null>;
   withTransaction?: <T>(
     work: (client?: TransactionClient) => Promise<T>,
@@ -96,6 +97,36 @@ export class PasswordService {
     email: string,
     meta: RequestMeta = {},
   ): Promise<void> {
+    return this.issuePasswordLink(email, meta);
+  }
+
+  async requestInvitation(email: string, organizationName: string): Promise<void> {
+    if (!this.config.sendInvitationEmail) {
+      throw new EmailDeliveryError('Invitation email delivery is not configured.');
+    }
+    const identity = await this.config.store.findLoginIdentityByEmail(normalizeEmail(email));
+    if (!identity?.email || identity.deletedAt ||
+      ['deleted', 'rejected', 'suspended'].includes(identity.accountStatus)) {
+      throw new EmailDeliveryError('This account is not eligible for an invitation.');
+    }
+    if (identity.passwordHash && identity.accountStatus === 'active') {
+      const firstName = await this.config.resolveFirstName?.(identity.userId, identity.email);
+      await this.config.sendInvitationEmail({
+        to: identity.email,
+        organizationName,
+        firstName: firstName ?? undefined,
+        requiresApproval: identity.accountStatus !== 'active',
+      });
+      return;
+    }
+    return this.issuePasswordLink(email, {}, organizationName);
+  }
+
+  private async issuePasswordLink(
+    email: string,
+    meta: RequestMeta,
+    organizationName?: string,
+  ): Promise<void> {
     const identity = await this.config.store.findLoginIdentityByEmail(
       normalizeEmail(email),
     );
@@ -107,7 +138,13 @@ export class PasswordService {
       userAgent: meta.userAgent,
     });
 
-    if (!identity || !identity.email) {
+    if (
+      !identity ||
+      !identity.email ||
+      identity.deletedAt ||
+      identity.accountStatus === 'deleted'
+    ) {
+      if (organizationName !== undefined) throw new EmailDeliveryError('Invitation account was not found.');
       return;
     }
 
@@ -130,28 +167,34 @@ export class PasswordService {
       1,
       Math.round(this.config.passwordResetTtlSeconds / 60),
     );
-    const resolvedFirstName = this.config.resolveFirstName
-      ? await this.config.resolveFirstName(identity.userId, identity.email)
-      : null;
-
     try {
-      await this.config.sendPasswordResetEmail({
+      const resolvedFirstName = this.config.resolveFirstName
+        ? await this.config.resolveFirstName(identity.userId, identity.email)
+        : null;
+      const message = {
         to: identity.email,
         resetToken,
         firstName: resolvedFirstName ?? undefined,
         expiresMinutes,
-      });
+      };
+      if (organizationName !== undefined) {
+        await this.config.sendInvitationEmail!({
+          ...message, organizationName, requiresApproval: identity.accountStatus !== 'active',
+        });
+      } else {
+        await this.config.sendPasswordResetEmail(message);
+      }
     } catch (error) {
       // Burn the undelivered token so it cannot be used later.
       await this.config.store.markPasswordResetTokenUsed(tokenId, new Date());
       if (!(error instanceof EmailDeliveryError)) {
         logger.warn(
           {
-            template: 'password_reset',
+            template: organizationName === undefined ? 'password_reset' : 'workspace_invitation',
             toDomain: emailDomain(identity.email),
             err: error instanceof Error ? error.message : String(error),
           },
-          'Password reset email delivery failed.',
+          'Password link email delivery failed.',
         );
       }
       throw error instanceof EmailDeliveryError
@@ -195,8 +238,18 @@ export class PasswordService {
     const identity = await this.config.store.findLoginIdentityById(
       record.userId,
     );
+    if (
+      !identity ||
+      identity.deletedAt ||
+      identity.accountStatus === 'deleted'
+    ) {
+      throw new UnauthorizedError(
+        'INVALID_RESET_TOKEN',
+        'The password reset token is not valid.',
+      );
+    }
 
-    validatePassword(newPassword, identity?.email ?? null);
+    validatePassword(newPassword, identity.email);
     const passwordHash = await hashPassword(newPassword);
     const usedAt = new Date();
 

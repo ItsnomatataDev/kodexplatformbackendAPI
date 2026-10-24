@@ -439,7 +439,7 @@ export class PostgresContentStore implements ContentStore {
          AND client_id = $3
          AND status IS DISTINCT FROM 'archived'
          AND to_char(COALESCE(scheduled_at, created_at) AT TIME ZONE 'UTC', 'YYYY-MM') = $4
-       ORDER BY created_at DESC, id DESC
+       ORDER BY scheduled_at DESC NULLS LAST, created_at DESC, id DESC
        LIMIT 1`,
       [params.organizationId, params.officeId, params.clientId, params.monthKey],
     );
@@ -710,6 +710,93 @@ export class PostgresContentStore implements ContentStore {
     });
   }
 
+  async finalizeResumableScheduleAsset(
+    input: CreateScheduleAssetInput & { id: string },
+    clientId: string | null,
+    mediaRecordId: string,
+  ) {
+    return withTransaction(async (query) => {
+      const media = clientId
+        ? await this.insertResumableClientMedia(
+            { ...input, id: mediaRecordId, clientId },
+            query,
+          )
+        : null;
+      const asset = await this.insertResumableScheduleAsset(
+        { ...input, libraryMediaId: media?.id ?? null },
+        query,
+      );
+      return asset;
+    });
+  }
+
+  private async insertResumableScheduleAsset(
+    input: CreateScheduleAssetInput & { id: string },
+    query: Pick<TransactionClient, 'query'>,
+  ) {
+    const inserted = await query.query<AssetRow>(
+      `INSERT INTO content.schedule_assets (
+         id, schedule_id, organization_id, office_id, library_media_id, uploaded_by,
+         file_name, file_url, storage_path, bucket, mime_type, asset_type,
+         heading, caption, is_selected, crop_x, crop_y, crop_zoom,
+         sort_order, display_slot, original_size_bytes, stored_size_bytes,
+         compression_status, web_playback_status, expires_at
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+         $19,$20,$21,$22,$23,$24,$25
+       )
+       ON CONFLICT (id) DO NOTHING
+       RETURNING *`,
+      [
+        input.id,
+        input.scheduleId,
+        input.organizationId,
+        input.officeId,
+        input.libraryMediaId ?? null,
+        input.uploadedBy,
+        input.fileName,
+        input.fileUrl,
+        input.storagePath,
+        input.bucket,
+        input.mimeType ?? null,
+        input.assetType,
+        input.heading ?? null,
+        input.caption ?? null,
+        input.isSelected ?? true,
+        input.cropX ?? 50,
+        input.cropY ?? 50,
+        input.cropZoom ?? 1,
+        input.sortOrder ?? 0,
+        input.displaySlot ?? 0,
+        input.originalSizeBytes ?? null,
+        input.storedSizeBytes ?? null,
+        input.compressionStatus ?? 'not_applicable',
+        input.webPlaybackStatus ?? null,
+        input.expiresAt ?? null,
+      ],
+    );
+    if (inserted.rows[0]) return mapAsset(inserted.rows[0]);
+    const existing = await query.query<AssetRow>(
+      `SELECT * FROM content.schedule_assets WHERE id = $1 FOR UPDATE`,
+      [input.id],
+    );
+    const row = existing.rows[0];
+    if (
+      !row ||
+      row.organization_id !== input.organizationId ||
+      row.schedule_id !== input.scheduleId ||
+      row.storage_path !== input.storagePath ||
+      row.bucket !== input.bucket ||
+      row.library_media_id !== (input.libraryMediaId ?? null)
+    ) {
+      throw new ConflictError(
+        'CONTENT_UPLOAD_FINALIZATION_CONFLICT',
+        'The upload metadata conflicts with an existing asset.',
+      );
+    }
+    return mapAsset(row);
+  }
+
   async updateAsset(
     organizationId: string,
     assetId: string,
@@ -869,6 +956,68 @@ export class PostgresContentStore implements ContentStore {
       ],
     );
     return mapMedia(result.rows[0]!);
+  }
+
+  async finalizeResumableClientMedia(
+    input: CreateClientMediaInput & { id: string },
+  ) {
+    return this.insertResumableClientMedia(input, db);
+  }
+
+  private async insertResumableClientMedia(
+    input: CreateClientMediaInput & { id: string },
+    query: Pick<TransactionClient, 'query'>,
+  ) {
+    const inserted = await query.query<MediaRow>(
+      `INSERT INTO content.client_media (
+         id, client_id, organization_id, office_id, uploaded_by,
+         file_name, file_url, storage_path, bucket, mime_type, asset_type, label,
+         original_size_bytes, stored_size_bytes, compression_status,
+         web_playback_status, expires_at
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
+       )
+       ON CONFLICT (id) DO NOTHING
+       RETURNING *`,
+      [
+        input.id,
+        input.clientId,
+        input.organizationId,
+        input.officeId,
+        input.uploadedBy,
+        input.fileName,
+        input.fileUrl,
+        input.storagePath,
+        input.bucket,
+        input.mimeType ?? null,
+        input.assetType,
+        input.label ?? null,
+        input.originalSizeBytes ?? null,
+        input.storedSizeBytes ?? null,
+        input.compressionStatus ?? 'not_applicable',
+        input.webPlaybackStatus ?? null,
+        input.expiresAt ?? null,
+      ],
+    );
+    if (inserted.rows[0]) return mapMedia(inserted.rows[0]);
+    const existing = await query.query<MediaRow>(
+      `SELECT * FROM content.client_media WHERE id = $1 FOR UPDATE`,
+      [input.id],
+    );
+    const row = existing.rows[0];
+    if (
+      !row ||
+      row.organization_id !== input.organizationId ||
+      row.client_id !== input.clientId ||
+      row.storage_path !== input.storagePath ||
+      row.bucket !== input.bucket
+    ) {
+      throw new ConflictError(
+        'CONTENT_UPLOAD_FINALIZATION_CONFLICT',
+        'The upload metadata conflicts with an existing library item.',
+      );
+    }
+    return mapMedia(row);
   }
 
   async deleteClientMedia(organizationId: string, mediaId: string) {

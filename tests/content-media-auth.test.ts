@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { Hono } from 'hono';
 import { createApp } from '../src/app.js';
 import { CONTENT_REVIEW_ASSETS_BUCKET } from '../src/content/buckets.js';
 import { MediaCapabilityStore, mediaCapabilityStore } from '../src/content/media-capability.js';
@@ -266,5 +267,111 @@ test('one issued URL supports sequential ranges and forward/backward seeking', a
     assert.equal(response.status, 416);
     assert.equal(response.headers.get('content-range'), `bytes */${body.length}`);
     assert.equal(await response.text(), '');
+  }
+});
+
+async function previewFixture(key: string, options: { attached?: boolean; expired?: boolean } = {}) {
+  const files = new MemoryFileStorage();
+  await files.putObject({ bucket: CONTENT_REVIEW_ASSETS_BUCKET, objectKey: key, body, contentType: 'video/mp4' });
+  const reads: string[][] = [];
+  const getStream = files.getObjectStream.bind(files);
+  files.getObjectStream = async (bucket, objectKey, range) => {
+    reads.push([bucket, objectKey, range ?? '']);
+    return getStream(bucket, objectKey, range);
+  };
+  const content = {
+    async getScheduleByReviewToken(token: string) {
+      return token === 'review-token' ? {
+        id: 'schedule', organizationId: orgA,
+        expiresAt: new Date(Date.now() + (options.expired ? -60_000 : 60_000)),
+      } : null;
+    },
+    async listAssetsForSchedules(organizationId: string, ids: string[]) {
+      assert.equal(organizationId, orgA);
+      assert.deepEqual(ids, ['schedule']);
+      return options.attached === false ? [] : [{ storagePath: key }];
+    },
+  } as unknown as ContentStore;
+  return { app: createApp({ content, files }), reads };
+}
+
+const previewPath = '/api/content-studio/preview/media';
+for (const filename of [
+  '688f291a-b065-4320-acdd-677ca7cc9e3d-Sophie How i see the team..mp4',
+  'ordinary.mp4', "spaces & punctuation + # ? (final)!'—.mp4",
+  'literal%20name.mp4', 'trailing.mp4 ',
+]) {
+  test(`preview preserves exact key and streams full/open-ended range: ${filename}`, async () => {
+    const key = `${orgA}/schedule/${filename}`;
+    const { app, reads } = await previewFixture(key);
+    for (const range of [undefined, 'bytes=0-']) {
+      const query = new URLSearchParams({ reviewToken: 'review-token', objectKey: key });
+      const response = await app.request(`${previewPath}?${query}`, { headers: range ? { range } : {} });
+      assert.equal(response.status, range ? 206 : 200);
+      assert.equal(response.headers.get('content-type'), 'video/mp4');
+      assert.equal(response.headers.get('cache-control'), 'private, no-store');
+      assert.equal(response.headers.get('accept-ranges'), 'bytes');
+      assert.equal(response.headers.get('content-length'), String(body.length));
+      assert.equal(response.headers.get('content-range'), range ? `bytes 0-${body.length - 1}/${body.length}` : null);
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), body);
+      assert.deepEqual(reads.at(-1), [CONTENT_REVIEW_ASSETS_BUCKET, key, range ?? '']);
+    }
+  });
+}
+
+for (const rawKey of [
+  `${orgA}/../clip.mp4`, `${orgA}/./clip.mp4`,
+  `${orgA}/%2e%2E%2fclip.mp4`, `${orgA}/%252e%252e%252fclip.mp4`,
+  `/${orgA}/clip.mp4`, `%2F${orgA}/clip.mp4`,
+  `${orgA}/folder%5Cclip.mp4`, `${orgA}/folder%255Cclip.mp4`,
+  `${orgA}/bad%00.mp4`, `${orgA}/bad%0A.mp4`, `${orgA}/bad%7F.mp4`,
+  `${orgA}/bad%.mp4`, `${orgA}/bad%2.mp4`, `${orgA}/bad%GG.mp4`,
+  `${orgA}/bad%C3%28.mp4`,
+]) {
+  test(`preview rejects unsafe or malformed query key: ${rawKey}`, async () => {
+    const { app, reads } = await previewFixture(rawKey);
+    const response = await app.request(`${previewPath}?reviewToken=review-token&objectKey=${rawKey}`);
+    assert.equal(response.status, 400);
+    assert.deepEqual(reads, []);
+  });
+}
+
+for (const scenario of ['organization', 'unattached', 'expired', 'invalid', 'missing'] as const) {
+  test(`preview retains authorization: ${scenario}`, async () => {
+    const key = `${scenario === 'organization' ? orgB : orgA}/schedule/video.mp4`;
+    const { app, reads } = await previewFixture(key, {
+      attached: scenario !== 'unattached', expired: scenario === 'expired',
+    });
+    const query = new URLSearchParams({ objectKey: key,
+      reviewToken: scenario === 'missing' ? '' : scenario === 'invalid' ? 'wrong-token' : 'review-token',
+    });
+    const response = await app.request(`${previewPath}?${query}`, { headers: { range: 'bytes=0-' } });
+    assert.equal(response.status, scenario === 'missing' ? 400 : 404);
+    assert.deepEqual(reads, []);
+  });
+}
+
+test('preview does not decode or trim a requested key into an attached asset', async () => {
+  const key = `${orgA}/schedule/space name.mp4`;
+  const { app, reads } = await previewFixture(key);
+  for (const requested of [key.replace(' ', '%20'), `${key} `]) {
+    const query = new URLSearchParams({ reviewToken: 'review-token', objectKey: requested });
+    assert.equal((await app.request(`${previewPath}?${query}`)).status, 404);
+  }
+  assert.deepEqual(reads, []);
+});
+
+
+test('Hono query parsing decodes once and preserves malformed escapes for validation', async () => {
+  const app = new Hono();
+  app.get('/', (c) => c.json({ key: c.req.query('objectKey') }));
+  for (const [raw, parsed] of [
+    ['space+name%2B.mp4', 'space name+.mp4'],
+    ['%2520.mp4', '%20.mp4'],
+    ['%2e%2e%2fclip.mp4', '../clip.mp4'],
+    ['bad%GG%20name.mp4', 'bad%GG name.mp4'],
+    ['bad%C3%28.mp4', 'bad%C3%28.mp4'],
+  ]) {
+    assert.deepEqual(await (await app.request(`/?objectKey=${raw}`)).json(), { key: parsed });
   }
 });

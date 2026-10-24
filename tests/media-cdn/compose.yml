@@ -1,0 +1,115 @@
+services:
+  minio:
+    image: pgsty/minio:latest
+    command: server /data
+    volumes:
+      - ../../deploy/media-edge/worker-policy.example.json:/policies/media-worker.json:ro
+    environment:
+      MINIO_ROOT_USER: local-test-admin
+      MINIO_ROOT_PASSWORD: local-test-admin-password
+    healthcheck:
+      test: [CMD, mc, ready, local]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  redis:
+    image: redis:8-alpine
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    ports:
+      - "127.0.0.1::6379"
+  media-auth:
+    build:
+      context: ../..
+      target: media-auth
+    environment:
+      APP_ENV: development
+      MEDIA_PLAYBACK_SIGNING_SECRET: local-test-playback-key
+      MEDIA_ORIGIN_ENDPOINT: http://minio:9000
+      MEDIA_ORIGIN_BUCKET: content-review-assets
+      MEDIA_ORIGIN_ACCESS_KEY: local-test-reader
+      MEDIA_ORIGIN_SECRET_KEY: local-test-reader-password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_TLS: "false"
+    depends_on:
+      redis:
+        condition: service_healthy
+  media-edge:
+    build:
+      context: ../../deploy/media-edge
+    user: "101:101"
+    entrypoint: [nginx, -g, "daemon off;"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:size=67108864,mode=1777
+    volumes:
+      - ../../deploy/media-edge/nginx.conf:/etc/nginx/nginx.conf:ro
+      - cache:/var/cache/nginx/media
+      - ./cors.conf:/etc/nginx/media-cors.conf:ro
+    ports:
+      - "127.0.0.1::8080"
+    depends_on:
+      - media-auth
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/health]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  test:
+    build:
+      context: ../..
+      target: media-platform-worker
+    user: root
+    entrypoint: [node, /app/tests/media-cdn/run.mjs]
+    volumes:
+      - ./run.mjs:/app/tests/media-cdn/run.mjs:ro
+      - ./grants.mjs:/app/tests/media-cdn/grants.mjs:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+      media-edge:
+        condition: service_healthy
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: kode_cdn_test
+      POSTGRES_USER: fixture
+      POSTGRES_PASSWORD: fixture-password
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U fixture -d kode_cdn_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  job-test:
+    build:
+      context: ../..
+      target: media-platform-worker
+    network_mode: service:postgres
+    entrypoint: [node, /app/tests/media-cdn/jobs.mjs]
+    environment:
+      APP_ENV: development
+      NODE_ENV: development
+      HOST: 127.0.0.1
+      DATABASE_HOST: 127.0.0.1
+      DATABASE_NAME: kode_cdn_test
+      DATABASE_USER: fixture
+      DATABASE_PASSWORD: fixture-password
+      AUTH_TOKEN_SECRET: local-test-only-authentication-key-32chars
+      LOG_LEVEL: silent
+    volumes:
+      - ./jobs.mjs:/app/tests/media-cdn/jobs.mjs:ro
+      - ./migrations.mjs:/app/tests/media-cdn/migrations.mjs:ro
+      - ./worker-lifecycle.mjs:/app/tests/media-cdn/worker-lifecycle.mjs:ro
+      - ../../scripts/media-platform:/app/scripts/media-platform:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  cache:

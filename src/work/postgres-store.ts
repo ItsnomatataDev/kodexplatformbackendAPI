@@ -1,5 +1,10 @@
 import { listLimit, listOffset, pageOf } from '../db/list-bounds.js';
 import { db } from '../db/pool.js';
+import { type TransactionClient, withTransaction } from '../db/transaction.js';
+import { ConflictError } from '../http/errors.js';
+import { runTimeEntryAutoStop } from './auto-stop.js';
+import { autoClockOutBoundary, secondsBetween } from '../attendance/harare.js';
+import { END_OF_DAY_TIME } from '../attendance/end-of-day.js';
 import type {
   AssigneeRecord,
   AttachmentRecord,
@@ -558,6 +563,7 @@ type TimeEntryRow = {
   note: string | null;
   started_at: Date | null;
   ended_at: Date | null;
+  auto_stopped_at: Date | null;
   is_billable: boolean;
   created_at: Date;
   updated_at: Date;
@@ -571,12 +577,12 @@ type TimeEntryRow = {
 
 const TIME_ENTRY_RETURNING = `
   id, card_id, organization_id, user_id, created_by, seconds, note, started_at, ended_at,
-  is_billable, created_at, updated_at
+  is_billable, auto_stopped_at, created_at, updated_at
 `;
 const TIME_ENTRY_COLUMNS = `
   entry.id, entry.card_id, entry.organization_id, entry.user_id, entry.created_by,
   entry.seconds, entry.note, entry.started_at, entry.ended_at, entry.is_billable,
-  entry.created_at, entry.updated_at
+  entry.auto_stopped_at, entry.created_at, entry.updated_at
 `;
 
 function mapTimeEntry(row: TimeEntryRow): TimeEntryRecord {
@@ -590,6 +596,7 @@ function mapTimeEntry(row: TimeEntryRow): TimeEntryRecord {
     note: row.note,
     startedAt: row.started_at,
     endedAt: row.ended_at,
+    autoStoppedAt: row.auto_stopped_at ?? null,
     isBillable: row.is_billable,
     deletedAt: null,
     createdAt: row.created_at,
@@ -2182,6 +2189,7 @@ export class PostgresBoardStore implements WorkStore {
   }
 
   async listTimeEntriesByCard(organizationId: string, cardId: string) {
+    await runTimeEntryAutoStop(new Date(), { organizationId, cardId });
     const result = await db.query<TimeEntryRow>(
       `
         SELECT ${TIME_ENTRY_COLUMNS}
@@ -2200,6 +2208,8 @@ export class PostgresBoardStore implements WorkStore {
   }
 
   async listTimeEntries(input: ListTimeEntriesInput) {
+    await runTimeEntryAutoStop(new Date(), { organizationId: input.organizationId,
+      userId: input.userId ?? undefined, cardId: input.cardId ?? undefined });
     const limit = Math.min(Math.max(input.limit ?? 200, 1), 2000);
     const result = await db.query<TimeEntryRow>(
       `
@@ -2261,6 +2271,7 @@ export class PostgresBoardStore implements WorkStore {
   }
 
   async getTimeEntryById(organizationId: string, timeEntryId: string) {
+    await runTimeEntryAutoStop(new Date(), { organizationId });
     const result = await db.query<TimeEntryRow>(
       `
         SELECT ${TIME_ENTRY_COLUMNS}
@@ -2315,8 +2326,13 @@ export class PostgresBoardStore implements WorkStore {
         input.isBillable ?? null,
       ],
     );
-    const entry = result.rows[0] ? mapTimeEntry(result.rows[0]) : null;
+    let entry = result.rows[0] ? mapTimeEntry(result.rows[0]) : null;
     if (entry) {
+      await runTimeEntryAutoStop(new Date(), { organizationId: input.organizationId, cardId: input.cardId });
+      const persisted = await db.query<TimeEntryRow>(
+        `SELECT ${TIME_ENTRY_RETURNING} FROM work.time_entries WHERE id = $1`, [entry.id],
+      );
+      entry = mapTimeEntry(persisted.rows[0]!);
       await this.refreshTrackedSeconds(input.organizationId, input.cardId);
       const card = await this.getCardById(input.organizationId, input.cardId);
       if (card) {
@@ -2347,25 +2363,57 @@ export class PostgresBoardStore implements WorkStore {
     if (input.endedAt !== undefined) assign('ended_at', input.endedAt);
     if (input.isBillable !== undefined) assign('is_billable', input.isBillable);
     values.push(organizationId, timeEntryId);
-    const result = await db.query<TimeEntryRow>(
-      `
-        UPDATE work.time_entries entry
-        SET ${sets.join(', ')}
-        FROM work.cards card
-        WHERE entry.organization_id = $${index}
-          AND entry.id = $${index + 1}
-          AND entry.deleted_at IS NULL
-          AND card.id = entry.card_id
-          AND card.organization_id = entry.organization_id
-        RETURNING ${TIME_ENTRY_COLUMNS}
-      `,
-      values,
-    );
-    const entry = result.rows[0] ? mapTimeEntry(result.rows[0]) : null;
-    if (entry) {
-      await this.refreshTrackedSeconds(organizationId, entry.cardId);
+    let rejectedPatch = false;
+    const updated = await withTransaction(async (client) => {
+      const locked = await client.query<TimeEntryRow>(
+        `SELECT * FROM work.time_entries WHERE organization_id = $1 AND id = $2
+         AND deleted_at IS NULL FOR UPDATE`, [organizationId, timeEntryId],
+      );
+      const current = locked.rows[0];
+      if (!current) return null;
+      if (current.started_at && !current.ended_at) {
+        const cutoff = autoClockOutBoundary(current.started_at, END_OF_DAY_TIME);
+        if (cutoff.getTime() <= Date.now()) {
+          current.ended_at = cutoff;
+          current.auto_stopped_at = cutoff;
+          current.seconds = secondsBetween(current.started_at, cutoff);
+          await client.query(
+            `UPDATE work.time_entries SET ended_at = $2, auto_stopped_at = $2, seconds = $3,
+             updated_at = NOW() WHERE id = $1`, [timeEntryId, cutoff, current.seconds],
+          );
+        }
+      }
+      if (current.auto_stopped_at) {
+        const differs = (value: Date | null | undefined, existing: Date | null) =>
+          value !== undefined && (value?.getTime() ?? null) !== (existing?.getTime() ?? null);
+        if ((input.seconds !== undefined && input.seconds !== current.seconds)
+          || differs(input.startedAt, current.started_at) || differs(input.endedAt, current.ended_at)) {
+          rejectedPatch = true;
+          await client.query('SELECT id FROM work.cards WHERE id = $1 FOR UPDATE', [current.card_id]);
+          await this.refreshTrackedSeconds(organizationId, current.card_id, client);
+          return mapTimeEntry(current);
+        }
+      }
+      const result = await client.query<TimeEntryRow>(
+        `UPDATE work.time_entries entry SET ${sets.join(', ')}
+         FROM work.cards card
+         WHERE entry.organization_id = $${index} AND entry.id = $${index + 1}
+           AND entry.deleted_at IS NULL AND card.id = entry.card_id
+           AND card.organization_id = entry.organization_id
+         RETURNING ${TIME_ENTRY_COLUMNS}`, values,
+      );
+      const entry = result.rows[0] ? mapTimeEntry(result.rows[0]) : null;
+      if (entry) {
+        await client.query('SELECT id FROM work.cards WHERE id = $1 FOR UPDATE', [entry.cardId]);
+        await this.refreshTrackedSeconds(organizationId, entry.cardId, client);
+      }
+      return entry;
+    });
+    if (rejectedPatch) {
+      throw new ConflictError('TIME_ENTRY_AUTO_STOPPED',
+        'This timer stopped automatically at 18:00 Africa/Harare. Refresh and resume by starting a new timer.');
     }
-    return entry;
+    return updated;
   }
 
   async deleteTimeEntry(
@@ -2745,8 +2793,8 @@ export class PostgresBoardStore implements WorkStore {
     return (result.rowCount ?? 0) > 0;
   }
 
-  private async refreshTrackedSeconds(organizationId: string, cardId: string) {
-    await db.query(
+  private async refreshTrackedSeconds(organizationId: string, cardId: string, client?: TransactionClient) {
+    await (client ?? db).query(
       `
         UPDATE work.cards card
         SET tracked_seconds_cache = COALESCE((

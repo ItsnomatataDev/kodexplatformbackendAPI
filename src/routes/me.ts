@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { readBodyWithLimit } from '../middleware/body-limit.js';
 import { getAuth } from '../auth/middleware.js';
 import type {
   PublicProfile,
@@ -31,7 +32,7 @@ export type MeRouteDependencies = {
   files?: FileStorage;
 };
 
-const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
+const MAX_AVATAR_BYTES = 10 * 1024 * 1024;
 
 function serializeMe(
   auth: ReturnType<typeof getAuth>,
@@ -121,8 +122,8 @@ export function createMeRoutes(dependencies: MeRouteDependencies) {
         field: 'Content-Length',
       });
     }
-    const sizeBytes = Number.parseInt(rawLength, 10);
-    if (!Number.isFinite(sizeBytes) || sizeBytes < 1) {
+    const sizeBytes = Number(rawLength);
+    if (!Number.isInteger(sizeBytes) || sizeBytes < 1) {
       throw new ValidationError('Content-Length must be a positive number.', {
         field: 'Content-Length',
       });
@@ -144,47 +145,23 @@ export function createMeRoutes(dependencies: MeRouteDependencies) {
       throw new ValidationError('Request body is required.', { field: 'body' });
     }
 
-    const objectKey = profileAvatarObjectKey({
-      userId: auth.actor.userId,
-      filename,
-    });
+    if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(contentType)) {
+      throw new ValidationError('Please choose a JPG, PNG, WebP, or GIF image.');
+    }
+    const body = Buffer.from(await readBodyWithLimit(c.req.raw, MAX_AVATAR_BYTES));
+    if (body.length !== sizeBytes) {
+      throw new ValidationError('The upload was incomplete. Please choose the image again.');
+    }
+    const objectKey = profileAvatarObjectKey({ userId: auth.actor.userId, filename });
     await files.ensureBucket?.(PROFILE_PICTURES_BUCKET);
-
-    const put =
-      files.putObjectStream?.bind(files) ??
-      (async (streamInput: {
-        bucket: string;
-        objectKey: string;
-        body: ReadableStream<Uint8Array> | Buffer;
-        contentType?: string | null;
-        contentLength: number;
-      }) => {
-        const chunks: Uint8Array[] = [];
-        const reader = (
-          streamInput.body as ReadableStream<Uint8Array>
-        ).getReader();
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) chunks.push(value);
-        }
-        await files.putObject({
-          bucket: streamInput.bucket,
-          objectKey: streamInput.objectKey,
-          body: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))),
-          contentType: streamInput.contentType,
-        });
-      });
-
-    await put({
+    await files.putObject({
       bucket: PROFILE_PICTURES_BUCKET,
       objectKey,
-      body: c.req.raw.body,
+      body,
       contentType,
-      contentLength: sizeBytes,
     });
 
-    const publicUrl = `/api/me/avatar/file?objectKey=${encodeURIComponent(objectKey)}`;
+    const publicUrl = `/api/organization/avatar/file?objectKey=${encodeURIComponent(objectKey)}`;
     const updater = dependencies.updatePublicProfile;
     const profile = updater
       ? await updater(auth.actor.userId, { avatarUrl: publicUrl })

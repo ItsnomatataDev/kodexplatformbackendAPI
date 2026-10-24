@@ -829,3 +829,130 @@ test('PB-05 SMTP fails safely when AUTH LOGIN is not advertised', async () => {
   }
 });
 
+
+
+test('invitation SMTP template escapes names and sends professional HTML and plain text', async () => {
+  const delivered: import('../src/auth/smtp-transport.js').SmtpMail[] = [];
+  const sender = new SmtpEmailSender({
+    from: 'workspace@example.com', appPublicUrl: 'https://workspace.example',
+    deliver: async (mail) => { delivered.push(mail); },
+  });
+  await sender.sendInvitation({
+    to: 'new@example.com', resetToken: 'private-token', firstName: '<img src=x onerror=alert(1)>',
+    organizationName: '<script>unsafe</script> & Team', expiresMinutes: 30,
+  });
+  assert.equal(delivered.length, 1);
+  const mail = delivered[0];
+  assert.equal(mail.to, 'new@example.com');
+  assert.match(mail.html!, /Set up your password/);
+  assert.match(mail.html!, /&lt;script&gt;unsafe&lt;\/script&gt; &amp; Team/);
+  assert.doesNotMatch(mail.html!, /<script>|<img src=x/);
+  assert.match(mail.text, /expires in 30 minutes/);
+  assert.match(mail.text, /can be used once/);
+  assert.match(mail.text, /Keep this link private/);
+  assert.match(mail.text, /https:\/\/workspace.example\/reset-password\?type=invite&token=private-token/);
+  assert.doesNotMatch(mail.html!, /manage notification preferences/);
+  await assert.rejects(new UnconfiguredEmailSender().sendInvitation({
+    to: 'new@example.com', resetToken: 'token', organizationName: 'Team',
+  }), EmailDeliveryError);
+});
+
+test('invitation setup tokens expire, are single-use, and failed resends preserve prior links', async (t) => {
+  const store = new MemoryAuthStore();
+  store.seedUser({ userId: userA, email: 'new@example.com', emailNormalized: 'new@example.com',
+    accountStatus: 'pending', isActive: false, deletedAt: null, passwordHash: null });
+  const accessTokens = new AccessTokenService({ secret, issuer: 'test', audience: 'test', ttlSeconds: 900 });
+  const sessions = new SessionService({ store, tokenSecret: secret, accessTokens,
+    accessTokenTtlSeconds: 900, refreshTokenTtlSeconds: 3600,
+    resolveAuthContext: async () => authContext(userA, 'new@example.com') });
+  const email = new CapturingEmailSender();
+  let fail = false;
+  const passwords = new PasswordService({ store, sessions, tokenSecret: secret, passwordResetTtlSeconds: 1800,
+    sendPasswordResetEmail: (message) => email.sendPasswordReset(message),
+    sendInvitationEmail: async (message) => {
+      await email.sendInvitation(message);
+      if (fail) throw new EmailDeliveryError();
+    },
+  });
+  await passwords.requestInvitation('new@example.com', 'Example Team');
+  const first = email.lastInvitation?.resetToken;
+  assert.ok(first);
+  assert.equal(email.lastReset, undefined);
+  assert.equal(email.lastInvitation!.organizationName, 'Example Team');
+  fail = true;
+  await assert.rejects(passwords.requestInvitation('new@example.com', 'Example Team'), EmailDeliveryError);
+  const undelivered = email.lastInvitation?.resetToken;
+  assert.ok(undelivered);
+  await assert.rejects(passwords.confirmPasswordReset(undelivered, 'safe-password'), UnauthorizedError);
+  await passwords.confirmPasswordReset(first, 'safe-password');
+  await assert.rejects(passwords.confirmPasswordReset(first, 'other-password'), UnauthorizedError);
+  assert.equal((await store.findLoginIdentityById(userA))?.accountStatus, 'pending');
+  assert.equal((await store.findLoginIdentityById(userA))?.isActive, false);
+  fail = false;
+  await passwords.requestInvitation('new@example.com', 'Example Team');
+  const older = email.lastInvitation?.resetToken;
+  assert.ok(older);
+  await passwords.requestInvitation('new@example.com', 'Example Team');
+  const latest = email.lastInvitation?.resetToken;
+  assert.ok(latest);
+  await assert.rejects(passwords.confirmPasswordReset(older, 'safe-password'), UnauthorizedError);
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+  t.mock.timers.tick(1_800_001);
+  await assert.rejects(passwords.confirmPasswordReset(latest, 'safe-password'), /expired/);
+});
+
+test('deleted accounts receive no reset email and cannot use an existing reset link', async () => {
+  const store = new MemoryAuthStore();
+  store.seedUser({
+    userId: userA,
+    email: 'deleted@example.com',
+    emailNormalized: 'deleted@example.com',
+    accountStatus: 'active',
+    isActive: true,
+    deletedAt: null,
+    passwordHash: await hashPassword(password),
+  });
+  const accessTokens = new AccessTokenService({
+    secret,
+    issuer: 'kode-platform/test',
+    audience: 'kode-platform-api/test',
+    ttlSeconds: 900,
+    clockToleranceSeconds: 0,
+  });
+  const sessions = new SessionService({
+    store,
+    tokenSecret: secret,
+    accessTokens,
+    accessTokenTtlSeconds: 900,
+    refreshTokenTtlSeconds: 3_600,
+    resolveAuthContext: async () => authContext(userA, 'deleted@example.com'),
+  });
+  const email = new CapturingEmailSender();
+  const passwords = new PasswordService({
+    store,
+    sessions,
+    tokenSecret: secret,
+    passwordResetTtlSeconds: 1_800,
+    sendPasswordResetEmail: (message) => email.sendPasswordReset(message),
+  });
+
+  await passwords.requestPasswordReset('deleted@example.com');
+  const issuedBeforeDeletion = email.lastReset!.resetToken;
+  store.seedUser({
+    userId: userA,
+    email: 'deleted@example.com',
+    emailNormalized: 'deleted@example.com',
+    accountStatus: 'deleted',
+    isActive: false,
+    deletedAt: null,
+    passwordHash: await hashPassword(password),
+  });
+  email.lastReset = undefined;
+
+  await passwords.requestPasswordReset('deleted@example.com');
+  assert.equal(email.lastReset, undefined);
+  await assert.rejects(
+    passwords.confirmPasswordReset(issuedBeforeDeletion, 'updated-password'),
+    UnauthorizedError,
+  );
+});

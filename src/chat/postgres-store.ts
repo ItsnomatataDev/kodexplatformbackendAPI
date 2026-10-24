@@ -27,6 +27,11 @@ type ConversationRow = {
   unread_count?: string | number | null;
   member_count?: string | number | null;
   disappearing_seconds?: number | null;
+  last_message_id?: string | null;
+  last_message_body?: string | null;
+  last_message_type?: ChatConversationRecord['lastMessageType'];
+  last_message_sender_id?: string | null;
+  last_message_attachment_name?: string | null;
 };
 
 type MemberRow = {
@@ -87,6 +92,11 @@ function mapConversation(row: ConversationRow): ChatConversationRecord {
     memberCount:
       row.member_count == null ? undefined : Number(row.member_count),
     disappearingSeconds: row.disappearing_seconds ?? null,
+    lastMessageId: row.last_message_id ?? null,
+    lastMessageBody: row.last_message_body ?? null,
+    lastMessageType: row.last_message_type ?? null,
+    lastMessageSenderId: row.last_message_sender_id ?? null,
+    lastMessageAttachmentName: row.last_message_attachment_name ?? null,
   };
 }
 
@@ -146,6 +156,20 @@ function orderedPair(a: string, b: string): [string, string] {
 }
 
 export class PostgresChatStore implements ChatStore {
+  async canReadLegacyAttachment(organizationId: string, userId: string, objectKey: string) {
+    const urls = ['chat-images', 'chat-attachments'].flatMap(bucket => [
+      `/api/chat/media?bucket=${bucket}&objectKey=${encodeURIComponent(objectKey)}`,
+      `/api/chat/media/${bucket}/${objectKey}`,
+    ]);
+    const result = await db.query(`SELECT 1 FROM chat.messages m
+      JOIN chat.conversation_members cm ON cm.conversation_id = m.conversation_id AND cm.user_id = $2
+      WHERE m.organization_id = $1 AND m.is_deleted = FALSE
+        AND (m.expires_at IS NULL OR m.expires_at > NOW())
+        AND m.attachment_url = ANY($3::text[]) LIMIT 1`,
+    [organizationId, userId, urls]);
+    return result.rows.length > 0;
+  }
+
   async listConversations(input: ListConversationsInput) {
     const limit = listLimit(input.limit);
     const result = await db.query<ConversationRow>(
@@ -167,11 +191,25 @@ export class PostgresChatStore implements ChatStore {
                 cm.last_read_at IS NULL
                 OR m.created_at > cm.last_read_at
               )
-          ) AS unread_count
+          ) AS unread_count,
+          lm.id AS last_message_id,
+          lm.body AS last_message_body,
+          lm.message_type AS last_message_type,
+          lm.sender_id AS last_message_sender_id,
+          lm.attachment_name AS last_message_attachment_name
         FROM chat.conversations c
         JOIN chat.conversation_members cm
           ON cm.conversation_id = c.id
          AND cm.user_id = $2
+        LEFT JOIN LATERAL (
+          SELECT m.id, m.body, m.message_type, m.sender_id, m.attachment_name
+          FROM chat.messages m
+          WHERE m.conversation_id = c.id
+            AND m.is_deleted = FALSE
+            AND (m.expires_at IS NULL OR m.expires_at > NOW())
+          ORDER BY m.created_at DESC
+          LIMIT 1
+        ) lm ON TRUE
         WHERE c.organization_id = $1
         ORDER BY c.last_message_at DESC NULLS LAST, c.created_at DESC, c.id DESC
         LIMIT $3 OFFSET $4
@@ -190,9 +228,24 @@ export class PostgresChatStore implements ChatStore {
   async getConversation(organizationId: string, conversationId: string) {
     const result = await db.query<ConversationRow>(
       `
-        SELECT *
-        FROM chat.conversations
-        WHERE id = $1 AND organization_id = $2
+        SELECT
+          c.*,
+          lm.id AS last_message_id,
+          lm.body AS last_message_body,
+          lm.message_type AS last_message_type,
+          lm.sender_id AS last_message_sender_id,
+          lm.attachment_name AS last_message_attachment_name
+        FROM chat.conversations c
+        LEFT JOIN LATERAL (
+          SELECT m.id, m.body, m.message_type, m.sender_id, m.attachment_name
+          FROM chat.messages m
+          WHERE m.conversation_id = c.id
+            AND m.is_deleted = FALSE
+            AND (m.expires_at IS NULL OR m.expires_at > NOW())
+          ORDER BY m.created_at DESC
+          LIMIT 1
+        ) lm ON TRUE
+        WHERE c.id = $1 AND c.organization_id = $2
         LIMIT 1
       `,
       [conversationId, organizationId],

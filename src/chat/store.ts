@@ -30,6 +30,12 @@ export type ChatConversationRecord = {
   unreadCount?: number;
   memberCount?: number;
   disappearingSeconds?: number | null;
+  /** Latest non-deleted message preview for inbox rows. */
+  lastMessageId?: string | null;
+  lastMessageBody?: string | null;
+  lastMessageType?: ChatMessageType | null;
+  lastMessageSenderId?: string | null;
+  lastMessageAttachmentName?: string | null;
 };
 
 export type ChatMemberRecord = {
@@ -137,6 +143,7 @@ export type CreateGroupConversationInput = {
 };
 
 export interface ChatStore {
+  canReadLegacyAttachment(organizationId: string, userId: string, objectKey: string): Promise<boolean>;
   listConversations(
     input: ListConversationsInput,
   ): Promise<{ conversations: ChatConversationRecord[]; hasMore: boolean }>;

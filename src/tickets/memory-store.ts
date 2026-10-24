@@ -247,6 +247,7 @@ export class MemoryTicketStore implements TicketStore {
       userId: input.userId,
       createdBy: input.createdBy,
       assignedTo,
+      assignedAt: assignedTo ? now : null,
       requesterEmail: input.requesterEmail ?? null,
       externalName: null,
       externalCompany: null,
@@ -287,6 +288,7 @@ export class MemoryTicketStore implements TicketStore {
       userId: null,
       createdBy: null,
       assignedTo: null,
+      assignedAt: null,
       requesterEmail: input.requesterEmail.toLowerCase(),
       externalName: input.externalName,
       externalCompany: input.externalCompany ?? null,
@@ -330,6 +332,9 @@ export class MemoryTicketStore implements TicketStore {
     if (input.description !== undefined) ticket.description = input.description;
     if (input.actionTaken !== undefined) ticket.actionTaken = input.actionTaken;
     if (input.assignedTo !== undefined) {
+      if (ticket.assignedTo !== input.assignedTo) {
+        ticket.assignedAt = input.assignedTo ? new Date() : null;
+      }
       ticket.assignedTo = input.assignedTo;
       if (input.assignedTo && ticket.status === 'open') {
         ticket.status = 'assigned';

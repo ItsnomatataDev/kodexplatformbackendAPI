@@ -19,7 +19,7 @@
 	# Camera / original videos can be hundreds of MiB–1 GiB and take a long time
 	# on mobile or Starlink uplinks. Keep binary upload routes ungzip'd and with
 	# long read timeouts so the proxy does not kill the stream mid-transfer.
-	@contentStudioBinary path /api/content-studio/schedules/*/assets/binary /api/content-studio/clients/*/media/binary /api/stock/assets/*/images/*/binary
+	@contentStudioBinary path /api/content-studio/schedules/*/assets/binary /api/content-studio/clients/*/media/binary /api/content-studio/uploads/sessions/*/parts/* /api/stock/assets/*/images/*/binary
 	handle @contentStudioBinary {
 		reverse_proxy api:3000 {
 			header_up X-Forwarded-Proto {scheme}

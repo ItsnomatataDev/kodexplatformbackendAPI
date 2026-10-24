@@ -38,6 +38,30 @@ export function isKodeLegacyRoleKey(
   return (KODE_LEGACY_ROLE_KEYS as readonly string[]).includes(roleKey);
 }
 
+export function pickDirectoryRoleKey(
+  roles: Array<{
+    roleKey: string;
+    isAdminRole: boolean;
+    isDefaultSignupRole?: boolean;
+  }>,
+  requested: string | undefined,
+  options: { allowAdmin: boolean },
+): string | null {
+  const requestedKey = requested?.trim().toLowerCase() ?? '';
+  const pool = options.allowAdmin
+    ? roles
+    : roles.filter((role) => !role.isAdminRole);
+  if (requestedKey && isKodeOperatingRoleKey(requestedKey)) {
+    const match = pool.find((role) => role.roleKey === requestedKey);
+    if (match) return match.roleKey;
+  }
+  return (
+    pool.find((role) => role.isDefaultSignupRole)?.roleKey ??
+    pool[0]?.roleKey ??
+    null
+  );
+}
+
 export async function applyKodeRoleModel(client: Queryable): Promise<void> {
   await client.query(
     `

@@ -1,3 +1,5 @@
+import { CHAT_HEARTBEAT_MS, CHAT_PRESENCE_TTL_MS } from '../chat/presence.js';
+import { logger } from '../config/logger.js';
 import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { upgradeWebSocket } from '@hono/node-server';
@@ -58,9 +60,41 @@ export function createChatWebSocketRoutes(dependencies: ChatWsDependencies) {
       const organizationId = auth.membership.organizationId;
       const userId = auth.actor.userId;
 
+      let watchedUsers: string[] = [];
+      let lastHeartbeat = Date.now();
+      let expiryTimer: ReturnType<typeof setInterval> | undefined;
+      let closed = false;
+      let presenceWork = Promise.resolve();
+      const updatePresence = (action: 'touch' | 'close') => {
+        presenceWork = presenceWork.then(async () => {
+          if (action === 'touch' && closed) return;
+          try {
+            const presence = await hub.presence.update(organizationId, userId, connectionId, action);
+            await hub.publish(organizationPresenceChannel(organizationId),
+              chatEnvelope('presence', presence, { organizationId }));
+          } catch (err) {
+            logger.warn({ err }, 'Chat presence unavailable');
+            await hub.publish(organizationPresenceChannel(organizationId),
+              chatEnvelope('presence', { userId, status: 'unknown', lastSeenAt: null }, { organizationId }));
+          }
+        });
+        return presenceWork;
+      };
+      const snapshot = async (ws: WSContext) => {
+        try {
+          const users = await hub.presence.snapshot(organizationId, watchedUsers);
+          ws.send(JSON.stringify(chatEnvelope('presence.snapshot', { users }, { organizationId })));
+        } catch {
+          ws.send(JSON.stringify(chatEnvelope('presence.snapshot', {
+            users: watchedUsers.map(userId => ({ userId, status: 'unknown', lastSeenAt: null })),
+          }, { organizationId })));
+        }
+      };
+
       return {
         async onOpen(_event, ws: WSContext) {
           await hub.start();
+          if (closed) return;
           hub.register(connectionId, {
             socket: {
               send: (data) => {
@@ -72,23 +106,15 @@ export function createChatWebSocketRoutes(dependencies: ChatWsDependencies) {
             conversations: new Set(),
           });
 
-          ws.send(
-            JSON.stringify(
-              chatEnvelope('presence', {
-                userId,
-                status: 'online',
-              }, { organizationId }),
-            ),
-          );
+          expiryTimer = setInterval(() => {
+            if (Date.now() - lastHeartbeat >= CHAT_PRESENCE_TTL_MS) ws.close(4000, 'Heartbeat expired');
+          }, 5_000);
+          expiryTimer.unref();
+          if (!closed) await updatePresence('touch');
+          ws.send(JSON.stringify(chatEnvelope('presence.ready', {
+            heartbeatMs: CHAT_HEARTBEAT_MS, ttlMs: CHAT_PRESENCE_TTL_MS,
+          }, { organizationId })));
 
-          await hub.publish(
-            organizationPresenceChannel(organizationId),
-            chatEnvelope(
-              'presence',
-              { userId, status: 'online' },
-              { organizationId },
-            ),
-          );
         },
 
         async onMessage(event, ws: WSContext) {
@@ -108,9 +134,30 @@ export function createChatWebSocketRoutes(dependencies: ChatWsDependencies) {
             return;
           }
 
+          if (closed) return;
           const type = parsed.type;
           if (type === 'ping') {
+            try {
+              await dependencies.auth.requireActiveSession(verified.sessionId!, userId);
+            } catch {
+              ws.close(4001, 'Session expired');
+              return;
+            }
+            lastHeartbeat = Date.now();
+            await updatePresence('touch');
             ws.send(JSON.stringify(chatEnvelope('pong', {})));
+            await snapshot(ws);
+            return;
+          }
+
+          if (type === 'presence.subscribe') {
+            const ids = parsed.payload?.userIds;
+            if (!Array.isArray(ids) || ids.length > 200 || ids.some(id => typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
+              ws.send(JSON.stringify(chatEnvelope('error', { message: 'Invalid presence user IDs (maximum 200).' })));
+              return;
+            }
+            watchedUsers = [...new Set(ids as string[])];
+            await snapshot(ws);
             return;
           }
 
@@ -156,13 +203,27 @@ export function createChatWebSocketRoutes(dependencies: ChatWsDependencies) {
               userId,
             );
             if (!isMember) return;
+            const activityRaw = parsed.payload?.activity;
+            const activity =
+              activityRaw === 'recording' ||
+              activityRaw === 'typing' ||
+              activityRaw === 'idle'
+                ? activityRaw
+                : undefined;
+            const isTyping =
+              activity === 'idle'
+                ? false
+                : activity === 'recording' || activity === 'typing'
+                  ? true
+                  : Boolean(parsed.payload?.isTyping ?? true);
             await hub.publishToConversation(
               conversationId,
               chatEnvelope(
                 'typing',
                 {
                   userId,
-                  isTyping: Boolean(parsed.payload?.isTyping ?? true),
+                  isTyping,
+                  ...(activity ? { activity } : {}),
                 },
                 { conversationId, organizationId },
               ),
@@ -171,15 +232,10 @@ export function createChatWebSocketRoutes(dependencies: ChatWsDependencies) {
         },
 
         async onClose() {
+          closed = true;
+          clearInterval(expiryTimer);
           hub.unregister(connectionId);
-          await hub.publish(
-            organizationPresenceChannel(organizationId),
-            chatEnvelope(
-              'presence',
-              { userId, status: 'offline' },
-              { organizationId },
-            ),
-          );
+          await updatePresence('close');
         },
       };
     }),

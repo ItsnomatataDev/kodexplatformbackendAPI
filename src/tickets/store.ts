@@ -27,6 +27,7 @@ export type TicketRecord = {
   userId: string | null;
   createdBy: string | null;
   assignedTo: string | null;
+  assignedAt: Date | null;
   requesterEmail: string | null;
   externalName: string | null;
   externalCompany: string | null;

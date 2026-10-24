@@ -14,6 +14,7 @@ import { decodeStrictBase64 } from '../src/http/base64.js';
 import { resolveClientIp } from '../src/http/client-ip.js';
 import { AppError, PayloadTooLargeError, ServiceUnavailableError } from '../src/http/errors.js';
 import { FIELD_LIMITS } from '../src/http/limits.js';
+import { enforceWorkRateLimit } from '../src/http/work-rate-limit.js';
 import { MemoryBoardStore } from '../src/work/memory-store.js';
 import {
   authContext,
@@ -191,6 +192,11 @@ const tightPolicies = {
   attachment: { limit: 1, windowSeconds: 60 },
   attachmentOrg: { limit: 100, windowSeconds: 60 },
   attachmentIp: { limit: 100, windowSeconds: 60 },
+  uploadSession: { limit: 10, windowSeconds: 60 },
+  uploadPart: { limit: 1000, windowSeconds: 60 },
+  payslipBatch: { limit: 100, windowSeconds: 60 },
+  payslipBatchOrg: { limit: 100, windowSeconds: 60 },
+  payslipBatchIp: { limit: 100, windowSeconds: 60 },
 };
 
 function errorCode(error: unknown) {
@@ -615,6 +621,40 @@ test('PB-09 untrusted forwarded headers cannot bypass the login IP limiter', asy
   assert.equal(blocked.response.status, 429);
   assert.equal(blocked.body.error?.code, 'RATE_LIMITED');
   assert.equal(blocked.response.headers.get('Retry-After') != null, true);
+});
+
+test('PB-11 payslip batches use a dedicated rate-limit bucket', async () => {
+  const limiter = trackingLimiter(new MemoryRateLimiter(['test']));
+  const auth = authContext();
+  const ip = '198.51.100.7';
+
+  await enforceWorkRateLimit(
+    limiter,
+    auth,
+    ip,
+    tightPolicies,
+    'payslipBatch',
+  );
+
+  assert.equal(
+    limiter.keys.includes(`work:payslip:user:${auth.actor.userId}`),
+    true,
+  );
+  assert.equal(
+    limiter.keys.includes(`work:payslip:org:${auth.membership.organizationId}`),
+    true,
+  );
+  assert.equal(limiter.keys.includes(`work:payslip:ip:${ip}`), true);
+
+  assert.equal(
+    limiter.keys.includes(`work:attach:user:${auth.actor.userId}`),
+    false,
+  );
+  assert.equal(
+    limiter.keys.includes(`work:attach:org:${auth.membership.organizationId}`),
+    false,
+  );
+  assert.equal(limiter.keys.includes(`work:attach:ip:${ip}`), false);
 });
 
 test('PB-11 Work mutations and attachments are rate limited after authorization', async () => {

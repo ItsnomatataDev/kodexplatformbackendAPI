@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { ConflictError } from '../http/errors.js';
 import type { TransactionClient } from '../db/transaction.js';
 import type {
   AuthStore,
@@ -86,11 +87,12 @@ export class MemoryAuthStore implements AuthStore {
       .map((session) => ({ ...session }));
   }
 
-  async touchSession(sessionId: string, at: Date) {
+  async touchSession(sessionId: string, at: Date, expiresAt: Date) {
     const session = this.sessions.get(sessionId);
 
-    if (session) {
+    if (session && !session.revokedAt) {
       session.lastSeenAt = at;
+      if (expiresAt > session.expiresAt) session.expiresAt = expiresAt;
     }
   }
 
@@ -158,10 +160,21 @@ export class MemoryAuthStore implements AuthStore {
   ) {
     for (const record of this.refreshTokens.values()) {
       if (record.id === tokenId) {
+        if (record.usedAt) {
+          throw new ConflictError(
+            'REFRESH_CONFLICT',
+            'Retry authentication with the current refresh cookie.',
+          );
+        }
         record.usedAt = usedAt;
         record.replacedBy = replacedBy;
+        return;
       }
     }
+    throw new ConflictError(
+      'REFRESH_CONFLICT',
+      'Retry authentication with the current refresh cookie.',
+    );
   }
 
   async createPasswordResetToken(

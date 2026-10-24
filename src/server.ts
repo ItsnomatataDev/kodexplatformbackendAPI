@@ -8,6 +8,7 @@ import { db } from './db/pool.js';
 import { closeAllRedisRateLimiters } from './auth/rate-limit-redis.js';
 import { getChatRealtimeHub } from './chat/hub.js';
 import { startAttendanceScheduler } from './attendance/scheduler.js';
+import type { Server as HttpServer } from 'node:http';
 
 const app = createApp();
 const wss = new WebSocketServer({ noServer: true });
@@ -17,7 +18,11 @@ const server = serve({
   hostname: env.host,
   port: env.port,
   websocket: { server: wss },
-}) as ServerType;
+}) as HttpServer;
+
+const HTTP_REQUEST_TIMEOUT_MS = 30 * 60 * 1000;
+
+server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
 
 const stopAttendanceScheduler = startAttendanceScheduler();
 
@@ -36,6 +41,7 @@ logger.info(
     port: env.port,
     appEnv: env.appEnv,
     websocket: true,
+    requestTimeoutMs: server.requestTimeout,
   },
   'Kode Platform API started',
 );

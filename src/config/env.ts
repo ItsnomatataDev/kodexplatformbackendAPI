@@ -331,6 +331,73 @@ export const env = {
     };
   })(),
 
+  contentStudioUploads: {
+    resumableEnabled: booleanFromEnv(
+      'CONTENT_STUDIO_RESUMABLE_UPLOADS_ENABLED',
+      false,
+    ),
+    partSizeBytes: bytesFromEnv(
+      'CONTENT_STUDIO_UPLOAD_PART_SIZE_BYTES',
+      8 * 1024 * 1024,
+      8 * 1024 * 1024,
+      16 * 1024 * 1024,
+    ),
+    sessionInactivityMs: durationFromEnv(
+      'CONTENT_STUDIO_UPLOAD_SESSION_INACTIVITY_SECONDS',
+      7 * 24 * 60 * 60,
+      60 * 60,
+      30 * 24 * 60 * 60,
+    ) * 1000,
+    terminalRetentionMs: durationFromEnv(
+      'CONTENT_STUDIO_UPLOAD_TERMINAL_RETENTION_SECONDS',
+      30 * 24 * 60 * 60,
+      24 * 60 * 60,
+      90 * 24 * 60 * 60,
+    ) * 1000,
+    maxActiveSessionsPerUser: countFromEnv(
+      'CONTENT_STUDIO_UPLOAD_MAX_ACTIVE_PER_USER',
+      2,
+      1,
+      10,
+    ),
+    maxActiveSessionsPerOrganization: countFromEnv(
+      'CONTENT_STUDIO_UPLOAD_MAX_ACTIVE_PER_ORGANIZATION',
+      8,
+      1,
+      100,
+    ),
+    maxReservedBytesPerUser: bytesFromEnv(
+      'CONTENT_STUDIO_UPLOAD_MAX_RESERVED_BYTES_PER_USER',
+      2 * 1024 * 1024 * 1024,
+      1024 * 1024 * 1024,
+      20 * 1024 * 1024 * 1024,
+    ),
+    maxReservedBytesPerOrganization: bytesFromEnv(
+      'CONTENT_STUDIO_UPLOAD_MAX_RESERVED_BYTES_PER_ORGANIZATION',
+      10 * 1024 * 1024 * 1024,
+      1024 * 1024 * 1024,
+      100 * 1024 * 1024 * 1024,
+    ),
+    maxConcurrentPartsPerSession: countFromEnv(
+      'CONTENT_STUDIO_UPLOAD_MAX_CONCURRENT_PARTS_PER_SESSION',
+      4,
+      1,
+      4,
+    ),
+    maxConcurrentPartsPerUser: countFromEnv(
+      'CONTENT_STUDIO_UPLOAD_MAX_CONCURRENT_PARTS_PER_USER',
+      8,
+      1,
+      16,
+    ),
+    maxConcurrentPartsPerOrganization: countFromEnv(
+      'CONTENT_STUDIO_UPLOAD_MAX_CONCURRENT_PARTS_PER_ORGANIZATION',
+      16,
+      1,
+      64,
+    ),
+  },
+
   rateLimits: {
     mutation: {
       limit: countFromEnv('WORK_MUTATION_RATE_LIMIT', 60, 1, 10_000),
@@ -355,6 +422,36 @@ export const env = {
     attachmentIp: {
       limit: countFromEnv('WORK_IP_ATTACHMENT_RATE_LIMIT', 20, 1, 2_000),
       windowSeconds: durationFromEnv('WORK_ATTACHMENT_RATE_WINDOW_SECONDS', 60, 1, 3_600),
+    },
+    uploadSession: {
+      limit: countFromEnv('CONTENT_STUDIO_UPLOAD_SESSION_RATE_LIMIT', 10, 1, 100),
+      windowSeconds: durationFromEnv(
+        'CONTENT_STUDIO_UPLOAD_SESSION_RATE_WINDOW_SECONDS',
+        3_600,
+        60,
+        86_400,
+      ),
+    },
+    uploadPart: {
+      limit: countFromEnv('CONTENT_STUDIO_UPLOAD_PART_RATE_LIMIT', 1_000, 1, 10_000),
+      windowSeconds: durationFromEnv(
+        'CONTENT_STUDIO_UPLOAD_PART_RATE_WINDOW_SECONDS',
+        60,
+        1,
+        3_600,
+      ),
+    },
+    payslipBatch: {
+      limit: countFromEnv('WORK_PAYSLIP_BATCH_RATE_LIMIT', 500, 1, 5_000),
+      windowSeconds: durationFromEnv('WORK_PAYSLIP_BATCH_RATE_WINDOW_SECONDS', 600, 1, 3_600),
+    },
+    payslipBatchOrg: {
+      limit: countFromEnv('WORK_ORG_PAYSLIP_BATCH_RATE_LIMIT', 1_000, 1, 10_000),
+      windowSeconds: durationFromEnv('WORK_PAYSLIP_BATCH_RATE_WINDOW_SECONDS', 600, 1, 3_600),
+    },
+    payslipBatchIp: {
+      limit: countFromEnv('WORK_IP_PAYSLIP_BATCH_RATE_LIMIT', 750, 1, 7_500),
+      windowSeconds: durationFromEnv('WORK_PAYSLIP_BATCH_RATE_WINDOW_SECONDS', 600, 1, 3_600),
     },
   } satisfies WorkRateLimitPolicies,
 

@@ -13,6 +13,7 @@ export function isSecurityIngestPath(pathname: string) {
 /** Raw binary uploads stream to MinIO; do not buffer/decode them. */
 export function isContentStudioBinaryUploadPath(pathname: string) {
   return (
+    /^\/api\/content-studio\/uploads\/sessions\/[^/]+\/parts\/\d+\/?$/.test(pathname) ||
     /^\/api\/content-studio\/schedules\/[^/]+\/assets\/binary\/?$/.test(pathname) ||
     /^\/api\/content-studio\/clients\/[^/]+\/media\/binary\/?$/.test(pathname) ||
     /^\/api\/documents\/(payslip-batches\/[^/]+\/items\/binary|upload\/binary)\/?$/.test(
@@ -22,7 +23,7 @@ export function isContentStudioBinaryUploadPath(pathname: string) {
   );
 }
 
-async function readBodyWithLimit(
+export async function readBodyWithLimit(
   request: Request,
   maxBytes: number,
 ): Promise<Uint8Array> {
@@ -77,7 +78,7 @@ export function bodyLimitMiddleware(maxBytes: number) {
     }
 
     const pathname = new URL(c.req.url).pathname;
-    if (isContentStudioBinaryUploadPath(pathname)) {
+    if (isContentStudioBinaryUploadPath(pathname) || /^\/api\/me\/avatar\/binary\/?$/.test(pathname)) {
       await next();
       return;
     }

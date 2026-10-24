@@ -354,6 +354,49 @@ test('expired and revoked refresh tokens are denied', async () => {
   assert.equal(revoked.error?.code, 'SESSION_REVOKED');
 });
 
+test('a shared browser cookie wins over a stale tab token even with strict replay checking', async () => {
+  const { app, store } = await createHarness({ refreshTokenReuseGraceSeconds: 0 });
+  const first = await json(await app.request('/auth/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'user@example.com', password }),
+  }));
+  const next = await json(await app.request('/auth/refresh', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh_token: first.refresh_token }),
+  }));
+  const response = await app.request('/auth/refresh', {
+    method: 'POST', headers: {
+      Origin: corsOrigins[0]!,
+      Cookie: `kode_refresh=${next.refresh_token}; kode_csrf=csrf-value`,
+      'X-CSRF-Token': 'csrf-value', 'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ refresh_token: first.refresh_token }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await store.getSession(first.session_id!))!.revokedAt, null);
+});
+
+test('concurrent refresh grace never bypasses a logged-out session', async () => {
+  const { app } = await createHarness();
+  const first = await json(await app.request('/auth/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'user@example.com', password }),
+  }));
+  await app.request('/auth/refresh', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh_token: first.refresh_token }),
+  });
+  assert.equal((await app.request('/auth/logout', {
+    method: 'POST', headers: { Authorization: `Bearer ${first.access_token}` },
+  })).status, 200);
+  const response = await app.request('/auth/refresh', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh_token: first.refresh_token }),
+  });
+  assert.equal(response.status, 401);
+  assert.equal((await json(response)).error?.code, 'SESSION_REVOKED');
+});
+
 test('logout and logout-all revoke the authenticated sessions only', async () => {
   const { app, store } = await createHarness();
   const first = await json(

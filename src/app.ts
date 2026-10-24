@@ -1,3 +1,7 @@
+import { createMediaPlatformRoutes, type MediaControlPlaneStore } from './routes/media-platform.js';
+import { sharedPlaybackGrantStore, revokePlaybackGrantsForUser } from './media-platform/playback/api-grants.js';
+import type { PlaybackGrantStore } from './media-platform/playback/redis-grant.js';
+import { PostgresMediaPlatformStore } from './media-platform/postgres-store.js';
 import './types/hono.js';
 import { Hono } from 'hono';
 import { env } from './config/env.js';
@@ -5,6 +9,7 @@ import {createDefaultAuthDependencies, createDefaultAuthLifecycle,createDefaultM
 import { createAuthMiddleware } from './auth/middleware.js';
 import type { AuthDependencies } from './auth/middleware.js';
 import { createAuthRoutes, type AuthRouteDependencies } from './auth/routes.js';
+import { SignupService } from './auth/signup.js';
 import type { RateLimiter } from './auth/rate-limit.js';
 import { errorHandler } from './middleware/error-handler.js';
 import { requestContext } from './middleware/request-context.js';
@@ -38,7 +43,8 @@ import {
 } from './routes/card-ecosystem.js';
 import { MemoryFileStorage } from './files/memory-storage.js';
 import { MinioFileStorage } from './files/minio-storage.js';
-import type { FileStorage } from './files/storage.js';
+import { MinioMultipartFileStorage } from './files/minio-multipart-storage.js';
+import type { FileStorage, MultipartFileStorage } from './files/storage.js';
 import { PostgresNotificationStore } from './notifications/postgres-store.js';
 import type { NotificationStore } from './notifications/store.js';
 import { createNotificationRoutes } from './routes/notifications.js';
@@ -54,6 +60,9 @@ import { createChatRoutes } from './routes/chat.js';
 import { createChatWebSocketRoutes } from './routes/chat-ws.js';
 import { PostgresContentStore } from './content/postgres-store.js';
 import type { ContentStore } from './content/store.js';
+import { PostgresUploadSessionRepository } from './content/resumable/postgres-repository.js';
+import type { UploadSessionRepository } from './content/resumable/types.js';
+import { ResumableUploadService } from './content/resumable/service.js';
 import { createContentStudioRoutes } from './routes/content-studio.js';
 import { createSchedulePlaybackRoutes } from './routes/schedule-playback.js';
 import { createKodexRoutes } from './routes/kodex.js';
@@ -113,6 +122,7 @@ export type CreateAppOptions = {
   auth?: AuthDependencies;
   me?: MeRouteDependencies;
   organizationDirectory?: OrganizationDirectoryStore;
+  sendOrganizationInvitation?: (email: string, organizationName: string) => Promise<void>;
   authLifecycle?: AuthRouteDependencies;
   corsOrigins?: string[];
   boards?: WorkStore;
@@ -121,7 +131,12 @@ export type CreateAppOptions = {
   attendance?: AttendanceStore;
   chat?: ChatStore;
   content?: ContentStore;
+  mediaPlatform?: MediaControlPlaneStore;
+  mediaPlayback?: { secret: string; publicBaseUrl: string; grants?: PlaybackGrantStore };
   files?: FileStorage;
+  multipartFiles?: MultipartFileStorage;
+  uploadSessionRepository?: UploadSessionRepository;
+  resumableUploadService?: ResumableUploadService;
   trustedProxyIps?: string[];
   limits?: Partial<HttpLimits>;
   rateLimiter?: RateLimiter;
@@ -136,6 +151,15 @@ export function createApp(options: CreateAppOptions = {}) {
     options.organizationDirectory ?? new PostgresOrganizationDirectoryStore();
   const authLifecycle =
     options.authLifecycle ?? createDefaultAuthLifecycle(authDependencies);
+  const revokeAccountAccess = async (userId: string) => {
+    if (!options.auth || options.authLifecycle) {
+      await authLifecycle.sessions.revokeAllSessionsForUser(
+        userId,
+        'account_deactivated',
+      );
+    }
+    await revokePlaybackGrantsForUser(userId);
+  };
   const corsOrigins = options.corsOrigins ?? env.cors.allowedOrigins;
   const boards = options.boards ?? new PostgresBoardStore();
   const notifications =
@@ -179,6 +203,34 @@ export function createApp(options: CreateAppOptions = {}) {
       options.limits?.maxContentStudioUploadBytes ??
       env.limits.maxContentStudioUploadBytes,
   };
+  const uploadSessionRepository =
+    options.uploadSessionRepository ?? new PostgresUploadSessionRepository();
+  const resumableUploadService =
+    options.resumableUploadService ??
+    new ResumableUploadService({
+      repository: uploadSessionRepository,
+      content,
+      files,
+      multipart: options.multipartFiles ?? new MinioMultipartFileStorage(),
+      config: {
+        enabled: env.contentStudioUploads.resumableEnabled,
+        maxFileBytes: limits.maxContentStudioUploadBytes,
+        partSizeBytes: env.contentStudioUploads.partSizeBytes,
+        sessionInactivityMs: env.contentStudioUploads.sessionInactivityMs,
+        terminalRetentionMs: env.contentStudioUploads.terminalRetentionMs,
+        maxActiveSessionsPerUser: env.contentStudioUploads.maxActiveSessionsPerUser,
+        maxActiveSessionsPerOrganization:
+          env.contentStudioUploads.maxActiveSessionsPerOrganization,
+        maxReservedBytesPerUser: env.contentStudioUploads.maxReservedBytesPerUser,
+        maxReservedBytesPerOrganization:
+          env.contentStudioUploads.maxReservedBytesPerOrganization,
+        maxConcurrentPartsPerSession:
+          env.contentStudioUploads.maxConcurrentPartsPerSession,
+        maxConcurrentPartsPerUser: env.contentStudioUploads.maxConcurrentPartsPerUser,
+        maxConcurrentPartsPerOrganization:
+          env.contentStudioUploads.maxConcurrentPartsPerOrganization,
+      },
+    });
   const rateLimiter = options.rateLimiter ?? authLifecycle.rateLimiter;
   const rateLimitPolicies: WorkRateLimitPolicies = {
     ...env.rateLimits,
@@ -208,7 +260,17 @@ export function createApp(options: CreateAppOptions = {}) {
   });
 
   app.route('/health', health);
-  app.route('/auth', createAuthRoutes(authLifecycle));
+  const signup =
+    authLifecycle.signup ??
+    new SignupService({
+      store: organizationDirectory,
+      resolveByHost: async (host) => {
+        const resolved = await branding.resolveOrganizationByHost(host);
+        if (!resolved) return null;
+        return organizationDirectory.getOrganization(resolved.id);
+      },
+    });
+  app.route('/auth', createAuthRoutes({ ...authLifecycle, signup }));
 
   const api = new Hono();
   const apiAuth = createAuthMiddleware(authDependencies);
@@ -222,7 +284,12 @@ export function createApp(options: CreateAppOptions = {}) {
   });
   api.route('/me', createMeRoutes(meWithFiles));
   api.route('/schedules', createSchedulePlaybackRoutes());
-  api.route('/organization', createOrganizationRoutes({ store: organizationDirectory }));
+  api.route('/organization', createOrganizationRoutes({
+    store: organizationDirectory,
+    sendInvitation: options.sendOrganizationInvitation ?? ((email, name) => authLifecycle.passwords.requestInvitation(email, name)),
+    files,
+    onUserAccessRevoked: revokeAccountAccess,
+  }));
   api.route(
     '/organization',
     createBrandingRoutes({ store: branding, files }),
@@ -257,6 +324,7 @@ export function createApp(options: CreateAppOptions = {}) {
       store: chat,
       files,
       directory: organizationDirectory,
+      notifications,
     }),
   );
   api.route(
@@ -265,8 +333,19 @@ export function createApp(options: CreateAppOptions = {}) {
       store: content,
       files,
       directory: organizationDirectory,
+      resumableUploadService,
+      uploadSessionRepository,
     }),
   );
+  api.route('/media-platform', createMediaPlatformRoutes({
+    store: options.mediaPlatform ?? new PostgresMediaPlatformStore(), content, files,
+    playbackSecret: options.mediaPlayback?.secret ?? process.env.MEDIA_PLAYBACK_SIGNING_SECRET,
+    publicBaseUrl: options.mediaPlayback?.publicBaseUrl ?? process.env.MEDIA_PLAYBACK_PUBLIC_BASE_URL,
+    grants: options.mediaPlayback?.grants
+      ?? ((options.mediaPlayback?.secret ?? process.env.MEDIA_PLAYBACK_SIGNING_SECRET)
+        ? sharedPlaybackGrantStore()
+        : undefined),
+  }));
   api.route('/kodex', createKodexRoutes({ files, chat }));
   api.route('/leave', createLeaveRoutes({ store: leave }));
   api.route(
@@ -294,6 +373,7 @@ export function createApp(options: CreateAppOptions = {}) {
     createItRoutes({
       store: itWorkspace,
       passwords: authLifecycle.passwords,
+      onUserAccessRevoked: revokeAccountAccess,
     }),
   );
   api.route('/ai', createAiRoutes({ store: aiWorkspace, files }));

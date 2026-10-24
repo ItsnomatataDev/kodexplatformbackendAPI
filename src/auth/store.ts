@@ -70,9 +70,18 @@ export type AuthStore = {
     input: CreateSessionInput,
     client?: TransactionClient,
   ): Promise<SessionRecord>;
-  getSession(sessionId: string): Promise<SessionRecord | null>;
+  /** With a transaction client, lock the session to serialize refreshes. */
+  getSession(
+    sessionId: string,
+    client?: TransactionClient,
+  ): Promise<SessionRecord | null>;
   listActiveSessions(userId: string): Promise<SessionRecord[]>;
-  touchSession(sessionId: string, at: Date): Promise<void>;
+  touchSession(
+    sessionId: string,
+    at: Date,
+    expiresAt: Date,
+    client?: TransactionClient,
+  ): Promise<void>;
   revokeSession(
     sessionId: string,
     reason: string,
@@ -91,6 +100,7 @@ export type AuthStore = {
   ): Promise<RefreshTokenRecord>;
   findRefreshTokenByHash(
     tokenHash: string,
+    client?: TransactionClient,
   ): Promise<RefreshTokenRecord | null>;
   markRefreshTokenUsed(
     tokenId: string,

@@ -13,6 +13,7 @@ import { PasswordService } from './password-service.js';
 import { createEmailSender } from './email.js';
 import { MemoryRateLimiter } from './rate-limit.js';
 import { RedisRateLimiter } from './rate-limit-redis.js';
+import { revokePlaybackGrantsForUser } from '../media-platform/playback/api-grants.js';
 
 export function createDefaultAccessTokenService() {
   return new AccessTokenService({
@@ -33,6 +34,7 @@ export function createDefaultAuthDependencies(): AuthDependencies {
     refreshTokenTtlSeconds: env.auth.refreshTokenTtlSeconds,
     resolveAuthContext,
     withTransaction,
+    onUserRevoked: revokePlaybackGrantsForUser,
   });
 
   return {
@@ -63,6 +65,7 @@ export function createDefaultAuthLifecycle(
     refreshTokenTtlSeconds: env.auth.refreshTokenTtlSeconds,
     resolveAuthContext: auth.resolveAuthContext,
     withTransaction,
+    onUserRevoked: revokePlaybackGrantsForUser,
   });
 
   const emailSender = createEmailSender(env.email, {
@@ -81,6 +84,7 @@ export function createDefaultAuthLifecycle(
       passwordResetTtlSeconds: env.auth.passwordResetTtlSeconds,
       sendPasswordResetEmail: (message) =>
         emailSender.sendPasswordReset(message),
+      sendInvitationEmail: (message) => emailSender.sendInvitation(message),
       resolveFirstName: async (userId, email) => {
         const profile = await loadPublicProfile(userId);
         if (profile?.fullName?.trim()) {

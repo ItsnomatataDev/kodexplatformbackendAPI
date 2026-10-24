@@ -177,11 +177,7 @@ export async function autoClockOutSession(session: ActiveSessionRow, clockOutAt:
     ? 0
     : secondsBetween(session.clockInAt, clockOutAt);
   const marker = `Auto clocked out by system at ${clockOutAt.toISOString()} (18:00 Africa/Harare).`;
-  const notes = session.notes?.includes('Auto clocked out by system')
-    ? session.notes
-    : [session.notes, marker].filter(Boolean).join('\n');
-
-  await db.query(
+  const result = await db.query(
     `
       UPDATE attendance.sessions
       SET
@@ -189,14 +185,16 @@ export async function autoClockOutSession(session: ActiveSessionRow, clockOutAt:
         clock_out_method = 'auto',
         status = 'completed',
         work_seconds = $3,
-        notes = $4,
+        notes = CASE WHEN notes LIKE '%Auto clocked out by system%' THEN notes
+          ELSE concat_ws(E'\\n', NULLIF(notes, ''), $4::text) END,
         updated_at = NOW()
       WHERE id = $1
         AND status = 'active'
         AND clock_out_at IS NULL
     `,
-    [session.id, clockOutAt, workSeconds, notes],
+    [session.id, clockOutAt, workSeconds, marker],
   );
+  return (result.rowCount ?? 0) > 0;
 }
 
 export async function upsertDailyStatus(params: {

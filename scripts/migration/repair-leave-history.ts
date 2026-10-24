@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { db } from "../../src/db/pool";
+import { db } from "../../src/db/pool.js";
 
 
 

@@ -2,13 +2,16 @@ import { randomUUID } from 'node:crypto';
 import { listLimit, listOffset, pageOf } from '../db/list-bounds.js';
 import { normalizeEmail } from '../auth/login.js';
 import type { AccountStatus, MembershipStatus } from '../authorization/types.js';
-import { ConflictError, NotFoundError, ValidationError } from '../http/errors.js';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../http/errors.js';
 import { KODE_OPERATING_ROLE_KEYS } from './role-model.js';
 import type {
   ApproveMemberInput,
+  CreateSelfSignupInput,
+  CreateSelfSignupResult,
   DirectoryUserLookup,
   InviteMemberInput,
   InviteMemberResult,
+  MemberAccountActionInput,
   ListMembersOptions,
   OfficeRecord,
   OrganizationDirectoryStore,
@@ -88,6 +91,14 @@ export class MemoryOrganizationDirectoryStore
     organizationId: string,
   ): Promise<OrganizationRecord | null> {
     return this.organizations.find((row) => row.id === organizationId) ?? null;
+  }
+
+  async getOrganizationBySlug(slug: string): Promise<OrganizationRecord | null> {
+    const normalized = slug.trim().toLowerCase();
+    return (
+      this.organizations.find((row) => row.slug.toLowerCase() === normalized) ??
+      null
+    );
   }
 
   async listMembers(
@@ -247,7 +258,28 @@ export class MemoryOrganizationDirectoryStore
         userId,
         membershipId,
         message:
-          'Invite created. The user can sign up with this email and will be linked to your organization.',
+          'Invitation saved. The employee must set up their password and receive account approval.',
+      };
+    }
+
+    if (['deleted', 'rejected', 'suspended'].includes(existing.accountStatus)) {
+      throw new ConflictError(
+        'ACCOUNT_REQUIRES_RESTORE',
+        'This account is deleted, rejected, or suspended. Restore or approve it through the employee account workflow before sending an invitation.',
+      );
+    }
+    
+    // Keep resend behavior aligned with the PostgreSQL store.
+    if (existing.accountStatus === 'pending' || existing.accountStatus === 'pending_approval') {
+      const pending = this.members.find((member) =>
+        member.organizationId === input.organizationId && member.userId === existing.userId && member.status === 'pending');
+      if (!pending) {
+        throw new ConflictError('ACCOUNT_PENDING', 'This account is awaiting approval. Manage it through the approval workflow.');
+      }
+      return {
+        status: 'invite_created', userId: existing.userId,
+        membershipId: pending.membershipId,
+        message: 'Invitation saved. Account approval is still required.',
       };
     }
 
@@ -310,6 +342,67 @@ export class MemoryOrganizationDirectoryStore
       userId: existing.userId,
       membershipId: existingMembership?.membershipId ?? membershipId,
       message: 'User linked successfully and marked active.',
+    };
+  }
+
+  async createSelfSignup(
+    input: CreateSelfSignupInput,
+  ): Promise<CreateSelfSignupResult> {
+    const emailNormalized = normalizeEmail(input.email);
+    if (!emailNormalized) {
+      throw new ValidationError('Email is required.');
+    }
+    const existing = await this.findUserByEmail(emailNormalized);
+    if (existing) {
+      throw new ConflictError(
+        'ACCOUNT_EXISTS',
+        'An account with this email already exists. Sign in or ask an administrator to invite you.',
+      );
+    }
+    const role = await this.getRoleByKey(input.organizationId, input.roleKey);
+    if (!role) {
+      throw new ValidationError('The selected role is not available.');
+    }
+    if (input.officeId) {
+      const office = await this.getOffice(input.organizationId, input.officeId);
+      if (!office?.isActive) {
+        throw new ValidationError(
+          'Selected office was not found in this organization.',
+        );
+      }
+    }
+    const userId = randomUUID();
+    const membershipId = randomUUID();
+    this.users.push({
+      userId,
+      email: emailNormalized,
+      emailNormalized,
+      accountStatus: 'pending_approval',
+      isActive: false,
+      fullName: input.fullName.trim() || null,
+    });
+    this.members.push({
+      organizationId: input.organizationId,
+      membershipId,
+      userId,
+      email: emailNormalized,
+      fullName: input.fullName.trim() || null,
+      avatarUrl: null,
+      jobTitle: null,
+      department: null,
+      username: null,
+      employeeCode: null,
+      roleKey: role.roleKey,
+      officeId: input.officeId ?? null,
+      status: 'pending',
+      accountStatus: 'pending_approval',
+    });
+    return {
+      userId,
+      membershipId,
+      organizationId: input.organizationId,
+      roleKey: role.roleKey,
+      email: emailNormalized,
     };
   }
 
@@ -421,6 +514,102 @@ export class MemoryOrganizationDirectoryStore
       member.officeId = input.officeId ?? null;
     }
 
+    const { organizationId: _org, membershipId: _id, ...rest } = member;
+    return rest;
+  }
+
+  private requireMember(organizationId: string, userId: string) {
+    const member = this.members.find(
+      (row) => row.organizationId === organizationId && row.userId === userId,
+    );
+    if (!member) {
+      throw new NotFoundError(
+        'MEMBER_NOT_FOUND',
+        'The organization member was not found.',
+      );
+    }
+    return member;
+  }
+
+  private assertNotLastActiveAdmin(organizationId: string, userId: string) {
+    const target = this.requireMember(organizationId, userId);
+    const isAdmin = target.roleKey === 'admin';
+    if (!isAdmin || target.status !== 'active' || target.accountStatus !== 'active') {
+      return;
+    }
+    const remaining = this.members.filter(
+      (member) =>
+        member.organizationId === organizationId &&
+        member.userId !== userId &&
+        member.roleKey === 'admin' &&
+        member.status === 'active' &&
+        member.accountStatus === 'active',
+    );
+    if (remaining.length < 1) {
+      throw new ForbiddenError(
+        'LAST_ADMIN',
+        'You cannot suspend or delete the last active administrator.',
+      );
+    }
+  }
+
+  async suspendMember(input: MemberAccountActionInput) {
+    this.assertNotLastActiveAdmin(input.organizationId, input.userId);
+    const member = this.requireMember(input.organizationId, input.userId);
+    member.status = 'suspended';
+    member.accountStatus = 'suspended';
+    const user = this.users.find((row) => row.userId === input.userId);
+    if (user) {
+      user.accountStatus = 'suspended';
+      user.isActive = false;
+    }
+    const { organizationId: _org, membershipId: _id, ...rest } = member;
+    return rest;
+  }
+
+  async restoreMember(input: MemberAccountActionInput) {
+    const member = this.requireMember(input.organizationId, input.userId);
+    const user = this.users.find((row) => row.userId === input.userId);
+    if (user?.emailNormalized.startsWith('deleted:')) {
+      throw new ValidationError(
+        'This account was permanently deleted. Invite the person again with a new account.',
+      );
+    }
+    member.status = 'active';
+    member.accountStatus = 'active';
+    if (user) {
+      user.accountStatus = 'active';
+      user.isActive = true;
+    }
+    const { organizationId: _org, membershipId: _id, ...rest } = member;
+    return rest;
+  }
+
+  async softDeleteMember(input: MemberAccountActionInput) {
+    this.assertNotLastActiveAdmin(input.organizationId, input.userId);
+    const member = this.requireMember(input.organizationId, input.userId);
+    member.status = 'removed';
+    member.accountStatus = 'deleted';
+    const user = this.users.find((row) => row.userId === input.userId);
+    if (user) {
+      user.accountStatus = 'deleted';
+      user.isActive = false;
+    }
+    const { organizationId: _org, membershipId: _id, ...rest } = member;
+    return rest;
+  }
+
+  async hardDeleteMember(input: MemberAccountActionInput) {
+    this.assertNotLastActiveAdmin(input.organizationId, input.userId);
+    const member = this.requireMember(input.organizationId, input.userId);
+    member.status = 'removed';
+    member.accountStatus = 'deleted';
+    const user = this.users.find((row) => row.userId === input.userId);
+    if (user) {
+      user.accountStatus = 'deleted';
+      user.isActive = false;
+      user.emailNormalized = `deleted:${input.userId}`;
+    }
     const { organizationId: _org, membershipId: _id, ...rest } = member;
     return rest;
   }

@@ -40,6 +40,11 @@ function isLeaveStaff(auth: AuthContext) {
   );
 }
 
+function readOptionalFilter(value: string | undefined, field: string) {
+  if (!value || value === 'all') return undefined;
+  return requireUuidValue(value, field);
+}
+
 function readPage(c: { req: { query: (name: string) => string | undefined } }) {
   return readListQuery(c);
 }
@@ -70,6 +75,30 @@ function serializeRequest(row: Awaited<ReturnType<PostgresLeaveStore['listMyRequ
     cancelled_by: row.cancelledBy,
     cancellation_reason: row.cancellationReason,
     created_at: row.createdAt.toISOString(),
+    requester_name: row.requesterName ?? null,
+    requester_email: row.requesterEmail ?? null,
+    requester_department: row.office ?? row.requestDepartment,
+    requester_role: row.requestRole,
+    requester_office_id: row.officeId,
+  };
+}
+
+function serializeCalendarEvent(
+  row: Awaited<ReturnType<PostgresLeaveStore['listCalendarEvents']>>[number],
+) {
+  return {
+    id: row.id,
+    organization_id: row.organizationId,
+    user_id: row.userId,
+    leave_type_id: row.leaveTypeId,
+    office_id: row.officeId,
+    start_date: row.startDate,
+    end_date: row.endDate,
+    requested_days: row.requestedDays,
+    status: row.status,
+    request_department: row.requestDepartment,
+    request_role: row.requestRole,
+    office: row.office,
     requester_name: row.requesterName ?? null,
     requester_email: row.requesterEmail ?? null,
     requester_department: row.office ?? row.requestDepartment,
@@ -178,7 +207,7 @@ export function createLeaveRoutes(dependencies: LeaveRouteDependencies) {
     if (!isLeaveStaff(auth)) {
       throw new ForbiddenError('LEAVE_ADMIN_REQUIRED', 'Leave admin access required.');
     }
-    const officeId = c.req.query('officeId') ?? undefined;
+    const officeId = readOptionalFilter(c.req.query('officeId'), 'officeId');
     const page = await dependencies.store.listRequests(
       organizationId,
       officeId,
@@ -228,7 +257,7 @@ export function createLeaveRoutes(dependencies: LeaveRouteDependencies) {
     );
     if (balance.remainingDays <= 0) {
       throw new ValidationError(
-        'You have used up all your leave days for the year. You cannot request more leave until your balance is restored.',
+        'You have used up all your leave days for the year. You cannot request more leave until your balance is restored 😂.',
       );
     }
     if (requestedDays > balance.remainingDays) {
@@ -377,7 +406,7 @@ export function createLeaveRoutes(dependencies: LeaveRouteDependencies) {
     if (!isLeaveStaff(auth)) {
       throw new ForbiddenError('LEAVE_ADMIN_REQUIRED', 'Leave admin access required.');
     }
-    const officeId = c.req.query('officeId') ?? undefined;
+    const officeId = readOptionalFilter(c.req.query('officeId'), 'officeId');
     const employees = await dependencies.store.listBalanceEmployees({
       organizationId,
       officeId,
@@ -401,8 +430,8 @@ export function createLeaveRoutes(dependencies: LeaveRouteDependencies) {
     if (!isLeaveStaff(auth)) {
       throw new ForbiddenError('LEAVE_ADMIN_REQUIRED', 'Leave admin access required.');
     }
-    const userId = c.req.query('userId') ?? undefined;
-    const officeId = c.req.query('officeId') ?? undefined;
+    const userId = readOptionalFilter(c.req.query('userId'), 'userId');
+    const officeId = readOptionalFilter(c.req.query('officeId'), 'officeId');
     const limitRaw = Number(c.req.query('limit') ?? 50);
     const entries = await dependencies.store.listBalanceAudit({
       organizationId,
@@ -431,6 +460,21 @@ export function createLeaveRoutes(dependencies: LeaveRouteDependencies) {
           email: row.modifierEmail ?? null,
         },
       })),
+    });
+  });
+
+  routes.get('/calendar/events', async (c) => {
+    const auth = getAuth(c);
+    const organizationId = authorizeLeave(auth, 'leave.read');
+    const officeId = readOptionalFilter(c.req.query('officeId'), 'officeId');
+
+    const events = await dependencies.store.listCalendarEvents(
+      organizationId,
+      officeId,
+    );
+
+    return c.json({
+      events: events.map(serializeCalendarEvent),
     });
   });
 

@@ -41,6 +41,7 @@ type TicketRow = {
   user_id: string | null;
   created_by: string | null;
   assigned_to: string | null;
+  assigned_at: Date | null;
   requester_email: string | null;
   external_name: string | null;
   external_company: string | null;
@@ -115,6 +116,7 @@ const TICKET_COLUMNS = `
   ticket.user_id,
   ticket.created_by,
   ticket.assigned_to,
+  ticket.assigned_at,
   ticket.requester_email,
   ticket.external_name,
   ticket.external_company,
@@ -133,7 +135,7 @@ const TICKET_COLUMNS = `
   ticket.created_at,
   ticket.updated_at,
   COALESCE(requester_profile.full_name, ticket.external_name) AS requester_name,
-  assigned_profile.full_name AS assigned_name,
+  COALESCE(NULLIF(btrim(assigned_profile.full_name), ''), assigned_user.email) AS assigned_name,
   office.name AS office_name,
   org.name AS organization_name
 `;
@@ -148,6 +150,7 @@ const TICKET_FROM = `
     ON requester_profile.user_id = ticket.user_id
   LEFT JOIN identity.user_profiles assigned_profile
     ON assigned_profile.user_id = ticket.assigned_to
+  LEFT JOIN identity.users assigned_user ON assigned_user.id = ticket.assigned_to
 `;
 
 function mapTicket(row: TicketRow): TicketRecord {
@@ -162,6 +165,7 @@ function mapTicket(row: TicketRow): TicketRecord {
     userId: row.user_id,
     createdBy: row.created_by,
     assignedTo: row.assigned_to,
+    assignedAt: row.assigned_at ?? null,
     requesterEmail: row.requester_email,
     externalName: row.external_name,
     externalCompany: row.external_company,
@@ -537,10 +541,11 @@ export class PostgresTicketStore implements TicketStore {
           comment.created_at,
           comment.external_name,
           comment.external_email,
-          COALESCE(profile.full_name, comment.external_name) AS author_name
+          COALESCE(NULLIF(btrim(profile.full_name), ''), author.email, comment.external_name) AS author_name
         FROM tickets.ticket_comments comment
         LEFT JOIN identity.user_profiles profile
           ON profile.user_id = comment.author_id
+        LEFT JOIN identity.users author ON author.id = comment.author_id
         WHERE comment.organization_id = $1
           AND comment.ticket_id = $2
         ORDER BY comment.created_at ASC, comment.id ASC
@@ -581,10 +586,11 @@ export class PostgresTicketStore implements TicketStore {
           inserted.created_at,
           inserted.external_name,
           inserted.external_email,
-          profile.full_name AS author_name
+          COALESCE(NULLIF(btrim(profile.full_name), ''), author.email) AS author_name
         FROM inserted
         LEFT JOIN identity.user_profiles profile
           ON profile.user_id = inserted.author_id
+        LEFT JOIN identity.users author ON author.id = inserted.author_id
       `,
       [
         input.organizationId,

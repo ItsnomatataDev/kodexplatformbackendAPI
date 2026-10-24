@@ -5,7 +5,7 @@ import { enforceRateLimit } from '../auth/rate-limit.js';
 import { getAuth } from '../auth/middleware.js';
 import type { WorkRateLimitPolicies } from './limits.js';
 
-export type WorkRateLimitKind = 'mutation' | 'attachment';
+export type WorkRateLimitKind = 'mutation' | 'attachment' | 'payslipBatch';
 
 export async function enforceWorkRateLimit(
   limiter: RateLimiter,
@@ -34,6 +34,28 @@ export async function enforceWorkRateLimit(
       `work:attach:ip:${ip}`,
       policies.attachmentIp.limit,
       policies.attachmentIp.windowSeconds,
+    );
+    return;
+  }
+
+  if (kind === 'payslipBatch') {
+    await enforceRateLimit(
+      limiter,
+      `work:payslip:user:${auth.actor.userId}`,
+      policies.payslipBatch.limit,
+      policies.payslipBatch.windowSeconds,
+    );
+    await enforceRateLimit(
+      limiter,
+      `work:payslip:org:${auth.membership.organizationId}`,
+      policies.payslipBatchOrg.limit,
+      policies.payslipBatchOrg.windowSeconds,
+    );
+    await enforceRateLimit(
+      limiter,
+      `work:payslip:ip:${ip}`,
+      policies.payslipBatchIp.limit,
+      policies.payslipBatchIp.windowSeconds,
     );
     return;
   }

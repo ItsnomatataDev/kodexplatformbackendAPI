@@ -7,6 +7,8 @@ export type ChatRealtimeEventType =
   | 'typing'
   | 'read_receipt'
   | 'presence'
+  | 'presence.snapshot'
+  | 'presence.ready'
   | 'ping'
   | 'pong'
   | 'subscribe'

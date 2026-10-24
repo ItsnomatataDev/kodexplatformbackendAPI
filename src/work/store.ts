@@ -337,6 +337,7 @@ export type TimeEntryRecord = {
   note: string | null;
   startedAt: Date | null;
   endedAt: Date | null;
+  autoStoppedAt?: Date | null;
   isBillable: boolean;
   deletedAt: Date | null;
   createdAt: Date;

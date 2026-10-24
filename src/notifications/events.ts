@@ -1,4 +1,5 @@
 import { logger } from '../config/logger.js';
+import type { ChatStore } from '../chat/store.js';
 import type { WorkStore } from '../work/store.js';
 import {
   NOTIFICATION_TYPES,
@@ -144,6 +145,86 @@ export async function notifyCardCommented(params: {
           commentId: params.commentId,
           actorUserId: params.actorUserId,
           actorName,
+        },
+      }),
+    ),
+  );
+}
+
+function chatPreview(params: {
+  body?: string | null;
+  messageType?: string | null;
+  attachmentName?: string | null;
+}) {
+  const body = params.body?.trim();
+  if (body) return body.slice(0, 140);
+  const type = (params.messageType ?? 'text').toLowerCase();
+  if (type === 'audio') return 'Voice note';
+  if (type === 'image') return 'Photo';
+  if (type === 'file') return params.attachmentName?.trim() || 'Attachment';
+  return 'New message';
+}
+
+/** In-app chat notifications for conversation members (except sender / muted). */
+export async function notifyChatMessage(params: {
+  notifications: NotificationStore;
+  chat: ChatStore;
+  organizationId: string;
+  conversationId: string;
+  messageId: string;
+  actorUserId: string;
+  actorEmail?: string | null;
+  body?: string | null;
+  messageType?: string | null;
+  attachmentName?: string | null;
+  conversationTitle?: string | null;
+  conversationType?: string | null;
+}) {
+  const members = await params.chat.listMembers(params.conversationId);
+  const recipients = members.filter(
+    (member) =>
+      member.userId !== params.actorUserId && member.isMuted !== true,
+  );
+  if (recipients.length === 0) return;
+
+  const actorName = actorLabel(
+    await params.notifications.getDisplayName(params.actorUserId),
+    params.actorEmail,
+  );
+  const preview = chatPreview({
+    body: params.body,
+    messageType: params.messageType,
+    attachmentName: params.attachmentName,
+  });
+  const isDirect = (params.conversationType ?? 'direct') === 'direct';
+  const title = isDirect
+    ? `${actorName} sent you a message`
+    : `${actorName} in ${params.conversationTitle?.trim() || 'Group chat'}`;
+
+  await Promise.all(
+    recipients.map((member) =>
+      createQuietly(params.notifications, {
+        organizationId: params.organizationId,
+        recipientUserId: member.userId,
+        actorUserId: params.actorUserId,
+        type: NOTIFICATION_TYPES.chatMessage,
+        title,
+        message: preview,
+        entityType: 'chat',
+        entityId: params.conversationId,
+        actionUrl: `/chat?conversationId=${params.conversationId}&messageId=${params.messageId}`,
+        priority: 'medium',
+        category: 'chat',
+        dedupeKey: `chat_message:${params.messageId}:${member.userId}`,
+        metadata: {
+          conversationId: params.conversationId,
+          conversationType: params.conversationType ?? 'direct',
+          conversationTitle: params.conversationTitle ?? null,
+          senderId: params.actorUserId,
+          senderName: actorName,
+          messageId: params.messageId,
+          messageType: params.messageType ?? 'text',
+          category: 'chat',
         },
       }),
     ),

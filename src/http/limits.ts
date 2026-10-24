@@ -80,4 +80,9 @@ export type WorkRateLimitPolicies = {
   attachment: RateLimitPolicy;
   attachmentOrg: RateLimitPolicy;
   attachmentIp: RateLimitPolicy;
+  uploadSession: RateLimitPolicy;
+  uploadPart: RateLimitPolicy;
+  payslipBatch: RateLimitPolicy;
+  payslipBatchOrg: RateLimitPolicy;
+  payslipBatchIp: RateLimitPolicy;
 };

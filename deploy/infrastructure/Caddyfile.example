@@ -1,0 +1,15 @@
+# Review snippet for the SAME HTTPS ORIGIN serving the existing frontend bundle.
+# Do not paste into existing production networking without topology review.
+# If Caddy itself is containerized, localhost refers to that container: review upstream address first.
+handle /infrastructure-api/* {
+    header Cache-Control "no-store"
+    reverse_proxy 127.0.0.1:3101 {
+        header_up X-Infra-Client-IP {remote_host}
+    }
+}
+# Existing SPA fallback/static hosting routes follow this specific handler.
+# Do not include request bodies, Cookie, Set-Cookie or X-CSRF-Token in proxy/access logs.
+# BLOCKER: deploy behind an approved shared gateway/WAF limiter before production use.
+# This core Caddy snippet supplies routing and header overwrite only, not rate limiting.
+# See nginx-rate-limit.example.conf for an alternative gateway design for review.
+# Do not publish /health/* through the external frontend proxy.

@@ -1,5 +1,7 @@
 import { keysetPredicate, listLimit, pageOf } from '../db/list-bounds.js';
 import { db } from '../db/pool.js';
+import { withTransaction } from '../db/transaction.js';
+import { NotFoundError, ValidationError } from '../http/errors.js';
 
 export type LeaveRequestStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
 
@@ -257,17 +259,20 @@ export class PostgresLeaveStore {
   }
 
   async getBalance(organizationId: string, userId: string): Promise<LeaveBalanceRecord> {
-    void organizationId;
     const result = await db.query<{
       leave_days_total: number | null;
       leave_days_remaining: number | null;
     }>(
-      `SELECT leave_days_total, leave_days_remaining
-       FROM identity.user_profiles
-       WHERE user_id = $1
+      `SELECT p.leave_days_total, p.leave_days_remaining
+       FROM organizations.memberships m
+       JOIN identity.users u ON u.id = m.user_id
+       LEFT JOIN identity.user_profiles p ON p.user_id = m.user_id
+       WHERE m.user_id = $1 AND m.organization_id = $2 AND m.status = 'active'
+         AND u.deleted_at IS NULL AND p.deleted_at IS NULL
        LIMIT 1`,
-      [userId],
+      [userId, organizationId],
     );
+    if (!result.rows[0]) throw new NotFoundError('LEAVE_EMPLOYEE_NOT_FOUND', 'Employee not found in this organization.');
     const totalDays = Number(result.rows[0]?.leave_days_total ?? 22);
     const remainingDays = Number(
       result.rows[0]?.leave_days_remaining ?? totalDays,
@@ -287,32 +292,44 @@ export class PostgresLeaveStore {
     remainingDays: number;
     note?: string | null;
   }) {
-    const previous = await this.getBalance(params.organizationId, params.userId);
-    await db.query(
-      `UPDATE identity.user_profiles
-       SET leave_days_total = $2,
-           leave_days_remaining = $3,
-           updated_at = NOW()
-       WHERE user_id = $1`,
-      [params.userId, params.totalDays, params.remainingDays],
-    );
-    await db.query(
-      `INSERT INTO leave.balance_audit (
-         organization_id, user_id, actor_user_id,
-         previous_total, previous_remaining, new_total, new_remaining, note
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [
-        params.organizationId,
-        params.userId,
-        params.actorUserId,
-        previous.totalDays,
-        previous.remainingDays,
-        params.totalDays,
-        params.remainingDays,
-        params.note ?? null,
-      ],
-    );
-    return this.getBalance(params.organizationId, params.userId);
+    if (!Number.isInteger(params.totalDays) || !Number.isInteger(params.remainingDays)
+      || params.totalDays < 0 || params.remainingDays < 0 || params.remainingDays > params.totalDays) {
+      throw new ValidationError('Leave balances must be whole non-negative days, with remainingDays at most totalDays.');
+    }
+    return withTransaction(async (client) => {
+      const member = await client.query(
+        `SELECT m.user_id FROM organizations.memberships m
+         JOIN identity.users u ON u.id = m.user_id
+         LEFT JOIN identity.user_profiles p ON p.user_id = m.user_id
+         WHERE m.organization_id = $1 AND m.user_id = $2 AND m.status = 'active'
+           AND u.deleted_at IS NULL AND p.deleted_at IS NULL FOR UPDATE OF m`,
+        [params.organizationId, params.userId],
+      );
+      if (!member.rows[0]) throw new NotFoundError('LEAVE_EMPLOYEE_NOT_FOUND', 'Employee not found in this organization.');
+      await client.query(
+        `INSERT INTO identity.user_profiles (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`,
+        [params.userId],
+      );
+      const previous = await client.query(
+        `SELECT leave_days_total, leave_days_remaining FROM identity.user_profiles WHERE user_id = $1 FOR UPDATE`,
+        [params.userId],
+      );
+      await client.query(
+        `UPDATE identity.user_profiles SET leave_days_total = $2, leave_days_remaining = $3,
+         updated_at = NOW() WHERE user_id = $1`,
+        [params.userId, params.totalDays, params.remainingDays],
+      );
+      await client.query(
+        `INSERT INTO leave.balance_audit (organization_id, user_id, actor_user_id,
+         previous_total, previous_remaining, new_total, new_remaining, note)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [params.organizationId, params.userId, params.actorUserId,
+          previous.rows[0].leave_days_total, previous.rows[0].leave_days_remaining,
+          params.totalDays, params.remainingDays, params.note ?? null],
+      );
+      return { totalDays: params.totalDays, remainingDays: params.remainingDays,
+        usedDays: params.totalDays - params.remainingDays };
+    });
   }
 
   async listMyRequests(
@@ -372,7 +389,25 @@ export class PostgresLeaveStore {
     const paged = pageOf(result.rows.map(mapRequest), limit);
     return { requests: paged.rows, hasMore: paged.hasMore };
   }
+  async listCalendarEvents(organizationId: string, officeId?: string | null) {
+    const params: unknown[] = [organizationId, officeId ?? null];
 
+    const result = await db.query<RequestRow>(
+      `SELECT r.*,
+              p.full_name AS requester_name,
+              u.email AS requester_email
+       FROM leave.requests r
+       LEFT JOIN identity.user_profiles p ON p.user_id = r.user_id
+       LEFT JOIN identity.users u ON u.id = r.user_id
+       WHERE r.organization_id = $1
+         AND ($2::uuid IS NULL OR r.office_id = $2 OR r.office_id IS NULL)
+         AND r.status IN ('pending', 'approved', 'rejected')
+       ORDER BY r.start_date ASC, r.id ASC`,
+      params,
+    );
+
+    return result.rows.map(mapRequest);
+  }
   async countPending(organizationId: string) {
     const result = await db.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM leave.requests
@@ -796,10 +831,10 @@ export class PostgresLeaveStore {
        LEFT JOIN identity.user_profiles p ON p.user_id = m.user_id
        WHERE m.organization_id = $1
          AND m.status = 'active'
+         AND u.deleted_at IS NULL AND p.deleted_at IS NULL
          AND (
            $2::uuid IS NULL
-           OR m.office_id = $2
-           OR p.office_id = $2
+           OR COALESCE(m.office_id, p.office_id) = $2
          )
        ORDER BY p.full_name NULLS LAST, u.email ASC`,
       [params.organizationId, params.officeId ?? null],
@@ -827,7 +862,7 @@ export class PostgresLeaveStore {
     officeId?: string | null;
     limit?: number;
   }) {
-    const limit = Math.min(Math.max(params.limit ?? 50, 1), 200);
+    const limit = Math.min(Math.max(Math.trunc(params.limit ?? 50), 1), 200);
     const result = await db.query<{
       id: string;
       organization_id: string;
@@ -851,13 +886,15 @@ export class PostgresLeaveStore {
          mp.full_name AS modifier_name,
          mu.email AS modifier_email
        FROM leave.balance_audit a
+       LEFT JOIN organizations.memberships em
+         ON em.user_id = a.user_id AND em.organization_id = a.organization_id
        LEFT JOIN identity.user_profiles ep ON ep.user_id = a.user_id
        LEFT JOIN identity.users eu ON eu.id = a.user_id
        LEFT JOIN identity.user_profiles mp ON mp.user_id = a.actor_user_id
        LEFT JOIN identity.users mu ON mu.id = a.actor_user_id
        WHERE a.organization_id = $1
          AND ($2::uuid IS NULL OR a.user_id = $2)
-         AND ($3::uuid IS NULL OR ep.office_id = $3)
+         AND ($3::uuid IS NULL OR COALESCE(em.office_id, ep.office_id) = $3)
        ORDER BY a.created_at DESC
        LIMIT $4`,
       [

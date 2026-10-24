@@ -24,11 +24,15 @@ import {
 import { attachmentDisposition, streamStoredMedia } from '../content/media-stream.js';
 import type { FileStorage } from '../files/storage.js';
 import type { OrganizationDirectoryStore } from '../organizations/store.js';
+import { notifyChatMessage } from '../notifications/events.js';
+import type { NotificationStore } from '../notifications/store.js';
+import { logger } from '../config/logger.js';
 
 export type ChatRouteDependencies = {
   store: ChatStore;
   files: FileStorage;
   directory: OrganizationDirectoryStore;
+  notifications?: NotificationStore;
 };
 
 function authorizeChat(auth: ReturnType<typeof getAuth>, action: string) {
@@ -95,7 +99,12 @@ async function assertCanReadChatMedia(params: {
     );
   }
 
-  // Conversation members can read media in that thread (including 'unscoped' uploads).
+  // Legacy unscoped uploads are readable only through a message in a joined conversation.
+  if (parsed.conversationId === 'unscoped' && !await params.store.canReadLegacyAttachment(
+    params.organizationId, params.userId, objectKey,
+  )) {
+    throw new ForbiddenError('CHAT_FORBIDDEN', 'This file is not attached to one of your conversations.');
+  }
   if (parsed.conversationId !== 'unscoped') {
     const member = await params.store.isMember(
       parsed.conversationId,
@@ -129,6 +138,11 @@ function serializeConversation(
     unreadCount: conversation.unreadCount ?? 0,
     memberCount: conversation.memberCount ?? null,
     disappearingSeconds: conversation.disappearingSeconds ?? null,
+    lastMessageId: conversation.lastMessageId ?? null,
+    lastMessageBody: conversation.lastMessageBody ?? null,
+    lastMessageType: conversation.lastMessageType ?? null,
+    lastMessageSenderId: conversation.lastMessageSenderId ?? null,
+    lastMessageAttachmentName: conversation.lastMessageAttachmentName ?? null,
   };
 }
 
@@ -411,6 +425,43 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
     }
 
     const body = await readJson(c);
+    let attachmentUrl = readOptionalString(body.attachmentUrl ?? body.attachment_url, 'attachmentUrl', 2_048);
+    if (attachmentUrl) {
+      if (/^(blob:|data:|file:)/i.test(attachmentUrl)) {
+        throw new ValidationError('Upload the attachment before sending it.', { field: 'attachmentUrl' });
+      }
+      let parsed: URL;
+      try {
+        parsed = new URL(attachmentUrl, 'https://chat.invalid');
+      } catch {
+        throw new ValidationError('Invalid attachment URL.', { field: 'attachmentUrl' });
+      }
+      if (parsed.pathname.startsWith('/api/chat/media')) {
+        let bucket = parsed.searchParams.get('bucket') ?? '';
+        let objectKey = readMediaObjectKey(parsed.searchParams.get('objectKey'));
+        if (parsed.pathname.startsWith('/api/chat/media/')) {
+          const parts = parsed.pathname.slice('/api/chat/media/'.length).split('/');
+          try {
+            bucket = decodeURIComponent(parts.shift() ?? '');
+            objectKey = parts.map(decodeURIComponent).join('/');
+          } catch {
+            throw new ValidationError('Invalid attachment URL encoding.', { field: 'attachmentUrl' });
+          }
+        }
+        const scope = parseChatObjectKey(objectKey);
+        if (!scope || scope.organizationId !== organizationId || scope.conversationId !== conversationId ||
+            !['chat-images', 'chat-attachments'].includes(bucket)) {
+          throw new ValidationError('Attachment must belong to this conversation.', { field: 'attachmentUrl' });
+        }
+        const exists = dependencies.files.headObject
+          ? await dependencies.files.headObject(bucket, objectKey)
+          : await dependencies.files.getObject(bucket, objectKey);
+        if (!exists) throw new ValidationError('Attachment upload is missing.', { field: 'attachmentUrl' });
+        attachmentUrl = `/api/chat/media?bucket=${encodeURIComponent(bucket)}&objectKey=${encodeURIComponent(objectKey)}`;
+      } else if (parsed.protocol !== 'https:' || !attachmentUrl.startsWith('https://')) {
+        throw new ValidationError('Invalid attachment URL.', { field: 'attachmentUrl' });
+      }
+    }
     const disappearingSeconds = conversation.disappearingSeconds ?? null;
     const expiresAt =
       disappearingSeconds != null
@@ -434,11 +485,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
         : body.reply_to_message_id
           ? requireUuidValue(String(body.reply_to_message_id), 'replyToMessageId')
           : null,
-      attachmentUrl: readOptionalString(
-        body.attachmentUrl ?? body.attachment_url,
-        'attachmentUrl',
-        2_048,
-      ),
+      attachmentUrl,
       attachmentName: readOptionalString(
         body.attachmentName ?? body.attachment_name,
         'attachmentName',
@@ -459,6 +506,25 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
         { conversationId, organizationId },
       ),
     );
+
+    if (dependencies.notifications) {
+      void notifyChatMessage({
+        notifications: dependencies.notifications,
+        chat: dependencies.store,
+        organizationId,
+        conversationId,
+        messageId: message.id,
+        actorUserId: auth.actor.userId,
+        actorEmail: auth.actor.email,
+        body: message.body,
+        messageType: message.messageType,
+        attachmentName: message.attachmentName,
+        conversationTitle: conversation.title,
+        conversationType: conversation.type,
+      }).catch((error) => {
+        logger.warn({ err: error }, 'Chat notification fan-out failed');
+      });
+    }
 
     return c.json({ message: serializeMessage(message) }, 201);
   });
@@ -659,11 +725,12 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
     const contentType =
       readOptionalString(body.contentType, 'contentType', FIELD_LIMITS.contentType) ??
       'application/octet-stream';
-    const conversationId = body.conversationId
-      ? requireUuidValue(body.conversationId, 'conversationId')
-      : null;
+    const conversationId = requireUuidValue(body.conversationId, 'conversationId');
 
     if (conversationId) {
+      if (!await dependencies.store.getConversation(organizationId, conversationId)) {
+        throw new NotFoundError('CHAT_CONVERSATION_NOT_FOUND', 'Conversation not found.');
+      }
       await requireMembership(
         dependencies.store,
         conversationId,
@@ -682,7 +749,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
     const bucket = chatBucketForContentType(contentType);
     const objectKey = chatObjectKey({
       organizationId,
-      conversationId: conversationId ?? 'unscoped',
+      conversationId,
       fileId,
       filename: fileName,
     });

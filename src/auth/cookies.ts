@@ -47,5 +47,6 @@ export function clearAuthCookies(c: Context, settings: CookieSettings) {
 }
 
 export function readRefreshToken(c: Context, bodyToken?: string): string | undefined {
-  return bodyToken || getCookie(c, REFRESH_COOKIE);
+  // The cookie is shared across tabs; a sleeping tab's body token can be stale.
+  return getCookie(c, REFRESH_COOKIE) || bodyToken;
 }

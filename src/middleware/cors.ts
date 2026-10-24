@@ -1,23 +1,29 @@
 import { createMiddleware } from 'hono/factory';
 
-function applyCorsHeaders(
-  headers: Headers,
-  origin: string,
-) {
+
+function applyCorsHeaders(headers: Headers, origin: string) {
   headers.set('Access-Control-Allow-Origin', origin);
   headers.append('Vary', 'Origin');
   headers.set('Access-Control-Allow-Credentials', 'true');
+
   headers.set(
     'Access-Control-Allow-Headers',
-    'Authorization, Content-Type, X-CSRF-Token, X-Request-Id, X-Kode-Ingest-Token, Range',
+    'Authorization, Content-Type, X-CSRF-Token, X-Request-Id, X-Kode-Ingest-Token, X-Kode-Filename, Range',
   );
+
   headers.set(
     'Access-Control-Allow-Methods',
     'GET, POST, PUT, PATCH, DELETE, OPTIONS',
   );
-  headers.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges, X-Request-Id');
+
+  headers.set(
+    'Access-Control-Expose-Headers',
+    'Content-Length, Content-Range, Accept-Ranges, X-Request-Id',
+  );
+
   headers.set('Access-Control-Max-Age', '600');
 }
+
 
 export function corsMiddleware(allowedOrigins: string[]) {
   return createMiddleware(async (c, next) => {
@@ -37,12 +43,7 @@ export function corsMiddleware(allowedOrigins: string[]) {
       applyCorsHeaders(c.res.headers, origin);
       return c.body(null, 204);
     }
-
     await next();
-
-    // Re-apply after the handler. Routes that return `new Response(...)`
-    // (streamed MinIO media) replace the response and would otherwise drop
-    // Access-Control-* headers set before next(), breaking browser blob fetches.
     if (allowOrigin && origin) {
       applyCorsHeaders(c.res.headers, origin);
     }

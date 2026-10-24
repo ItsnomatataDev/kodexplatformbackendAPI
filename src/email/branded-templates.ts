@@ -220,3 +220,45 @@ export function buildBrandedTransactionalEmail(params: {
       .join('\n'),
   };
 }
+
+
+export function buildInvitationEmail(params: {
+  firstName: string;
+  existingAccount?: boolean;
+  requiresApproval?: boolean;
+  organizationName: string;
+  setupUrl: string;
+  expiresMinutes: number;
+  appUrl: string;
+}): { subject: string; html: string; text: string } {
+  const minutes = Math.max(1, Math.round(params.expiresMinutes));
+  const invitation = `You have been invited to join ${params.organizationName} on ${APP_NAME}.`;
+  const instructions = params.existingAccount
+    ? 'You already have an account. Sign in using your existing email address and password to access your workspace.'
+    : `Choose your password using the secure link below. This link can be used once and expires in ${minutes} minutes.`;
+  const approval = params.requiresApproval === false
+    ? 'Your workspace access is ready.'
+    : 'Your workspace administrator may need to approve your account before you can sign in.';
+  const safety = 'Keep this link private. We will never ask you to share your password by email. If you were not expecting this invitation, you can ignore this email or contact the organization through a known contact.';
+  const footer = 'You received this email because a workspace administrator invited this email address.';
+  return {
+    subject: `Your workspace invitation - ${APP_NAME}`,
+    text: [`Hello ${params.firstName},`, '', invitation, '', instructions, params.setupUrl, '', approval, '', safety, '', footer].join('\n'),
+    html: buildEmailLayout({
+      section: 'Workspace invitation',
+      title: 'Your workspace invitation',
+      appUrl: params.appUrl,
+      footerNote: footer,
+      bodyHtml: `
+        <h1 style="margin:0 0 20px;font-size:24px;line-height:1.3;color:${EMAIL_INK};">You are invited</h1>
+        <p style="font-size:15px;line-height:1.6;">Hello ${escapeHtml(params.firstName)},</p>
+        <p style="font-size:15px;line-height:1.6;">${escapeHtml(invitation)}</p>
+        <p style="font-size:15px;line-height:1.6;">${escapeHtml(instructions)}</p>
+        <p style="margin:24px 0;">${buildEmailCta(params.setupUrl, params.existingAccount ? 'Sign in to your workspace' : 'Set up your password')}</p>
+        <p style="font-size:13px;line-height:1.6;color:${EMAIL_MUTED};">${escapeHtml(approval)}</p>
+        <p style="font-size:12px;line-height:1.6;word-break:break-all;">If the button does not work, open this link:<br><a href="${escapeHtml(params.setupUrl)}" style="color:${EMAIL_ORANGE};">${escapeHtml(params.setupUrl)}</a></p>
+        <p style="margin:20px 0;font-size:12px;line-height:1.6;color:${EMAIL_MUTED};">${escapeHtml(safety)}</p>
+      `,
+    }),
+  };
+}

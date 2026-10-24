@@ -8,6 +8,8 @@ import { ConflictError, NotFoundError, ValidationError } from '../http/errors.js
 import { KODE_OPERATING_ROLE_KEYS } from './role-model.js';
 import type {
   ApproveMemberInput,
+  CreateSelfSignupInput,
+  CreateSelfSignupResult,
   DirectoryUserLookup,
   InviteMemberInput,
   InviteMemberResult,
@@ -17,9 +19,11 @@ import type {
   OrganizationMemberRecord,
   OrganizationRecord,
   OrganizationRoleRecord,
+  MemberAccountActionInput,
   RejectMemberInput,
   UpdateMemberAccessInput,
 } from './store.js';
+import { applyDirectoryAccountAction } from './account-lifecycle.js';
 
 type OrganizationRow = {
   id: string;
@@ -63,6 +67,7 @@ type RoleRow = {
   is_admin_role: boolean;
   is_manager_role: boolean;
   is_active: boolean;
+  is_default_signup_role?: boolean;
 };
 
 type UserLookupRow = {
@@ -129,6 +134,7 @@ function serializeRole(row: RoleRow): OrganizationRoleRecord {
     isAdminRole: row.is_admin_role,
     isManagerRole: row.is_manager_role,
     isActive: row.is_active,
+    isDefaultSignupRole: Boolean(row.is_default_signup_role),
   };
 }
 
@@ -185,7 +191,8 @@ async function resolveRole(
         role_label,
         is_admin_role,
         is_manager_role,
-        is_active
+        is_active,
+        is_default_signup_role
       FROM organizations.roles
       WHERE organization_id = $1
         AND role_key = $2
@@ -243,6 +250,21 @@ export class PostgresOrganizationDirectoryStore
       [organizationId],
     );
 
+    return result.rows[0] ? serializeOrganization(result.rows[0]) : null;
+  }
+
+  async getOrganizationBySlug(slug: string): Promise<OrganizationRecord | null> {
+    const normalized = slug.trim().toLowerCase();
+    if (!normalized) return null;
+    const result = await db.query<OrganizationRow>(
+      `
+        SELECT id, name, slug, status, access_status, is_active
+        FROM organizations.organizations
+        WHERE lower(slug) = $1
+        LIMIT 1
+      `,
+      [normalized],
+    );
     return result.rows[0] ? serializeOrganization(result.rows[0]) : null;
   }
 
@@ -322,7 +344,8 @@ export class PostgresOrganizationDirectoryStore
           role_label,
           is_admin_role,
           is_manager_role,
-          is_active
+          is_active,
+          is_default_signup_role
         FROM organizations.roles
         WHERE organization_id = $1
           AND role_key = ANY($2::text[])
@@ -463,7 +486,31 @@ export class PostgresOrganizationDirectoryStore
           userId,
           membershipId,
           message:
-            'Invite created. The user can sign up with this email and will be linked to your organization.',
+            'Invitation saved. The employee must set up their password and receive account approval.',
+        };
+      }
+
+      if (['deleted', 'rejected', 'suspended'].includes(existing.accountStatus)) {
+        throw new ConflictError(
+          'ACCOUNT_REQUIRES_RESTORE',
+          'This account is deleted, rejected, or suspended. Restore or approve it through the employee account workflow before sending an invitation.',
+        );
+      }
+      
+      // Retrying an invitation must not activate an account awaiting approval.
+      if (existing.accountStatus === 'pending' || existing.accountStatus === 'pending_approval') {
+        const pending = await client.query<{ id: string }>(
+          `SELECT id FROM organizations.memberships
+           WHERE organization_id = $1 AND user_id = $2 AND status = 'pending'`,
+          [input.organizationId, existing.userId],
+        );
+        if (!pending.rows[0]) {
+          throw new ConflictError('ACCOUNT_PENDING', 'This account is awaiting approval. Manage it through the approval workflow.');
+        }
+        return {
+          status: 'invite_created', userId: existing.userId,
+          membershipId: pending.rows[0].id,
+          message: 'Invitation saved. Account approval is still required.',
         };
       }
 
@@ -609,6 +656,110 @@ export class PostgresOrganizationDirectoryStore
         userId: existing.userId,
         membershipId: membership.rows[0]?.id ?? membershipId,
         message: 'User linked successfully and marked active.',
+      };
+    });
+  }
+
+  async createSelfSignup(
+    input: CreateSelfSignupInput,
+  ): Promise<CreateSelfSignupResult> {
+    const emailNormalized = normalizeEmail(input.email);
+    if (!emailNormalized) {
+      throw new ValidationError('Email is required.');
+    }
+
+    return withTransaction(async (client) => {
+      const existing = await this.findUserByEmailInClient(client, emailNormalized);
+      if (existing) {
+        throw new ConflictError(
+          'ACCOUNT_EXISTS',
+          'An account with this email already exists. Sign in or ask an administrator to invite you.',
+        );
+      }
+
+      const role = await resolveRole(client, input.organizationId, input.roleKey);
+      await assertOfficeInOrganization(
+        client,
+        input.organizationId,
+        input.officeId,
+      );
+
+      const userId = randomUUID();
+      const membershipId = randomUUID();
+
+      await client.query(
+        `
+          INSERT INTO identity.users (
+            id,
+            email,
+            email_normalized,
+            is_active,
+            account_status
+          )
+          VALUES ($1, $2, $3, FALSE, 'pending_approval')
+        `,
+        [userId, emailNormalized, emailNormalized],
+      );
+
+      await client.query(
+        `
+          INSERT INTO identity.password_credentials (
+            user_id,
+            password_hash,
+            algorithm
+          )
+          VALUES ($1, $2, 'argon2id')
+        `,
+        [userId, input.passwordHash],
+      );
+
+      await client.query(
+        `
+          INSERT INTO identity.user_profiles (
+            user_id,
+            full_name,
+            primary_role_key,
+            office_id
+          )
+          VALUES ($1, $2, $3, $4)
+        `,
+        [
+          userId,
+          input.fullName.trim() || null,
+          role.roleKey,
+          input.officeId ?? null,
+        ],
+      );
+
+      await client.query(
+        `
+          INSERT INTO organizations.memberships (
+            id,
+            organization_id,
+            user_id,
+            role_id,
+            role_key,
+            status,
+            office_id
+          )
+          VALUES ($1, $2, $3, $4, $5, 'pending', $6)
+        `,
+        [
+          membershipId,
+          input.organizationId,
+          userId,
+          role.id,
+          role.roleKey,
+          input.officeId ?? null,
+        ],
+      );
+
+      return {
+        userId,
+        membershipId,
+        organizationId: input.organizationId,
+        roleKey: role.roleKey,
+        email: emailNormalized,
       };
     });
   }
@@ -881,6 +1032,45 @@ export class PostgresOrganizationDirectoryStore
       }
       return member;
     });
+  }
+
+  private async applyAccountAction(
+    input: MemberAccountActionInput,
+    action: 'suspend' | 'restore' | 'soft_delete' | 'hard_delete',
+  ): Promise<OrganizationMemberRecord> {
+    return withTransaction(async (client) => {
+      await applyDirectoryAccountAction(client, {
+        organizationId: input.organizationId,
+        actorUserId: input.actorUserId,
+        targetUserId: input.userId,
+        action,
+        reason: input.reason,
+      });
+      const member = await loadMember(client, input.organizationId, input.userId);
+      if (!member) {
+        throw new NotFoundError(
+          'MEMBER_NOT_FOUND',
+          'The organization member was not found.',
+        );
+      }
+      return member;
+    });
+  }
+
+  async suspendMember(input: MemberAccountActionInput) {
+    return this.applyAccountAction(input, 'suspend');
+  }
+
+  async restoreMember(input: MemberAccountActionInput) {
+    return this.applyAccountAction(input, 'restore');
+  }
+
+  async softDeleteMember(input: MemberAccountActionInput) {
+    return this.applyAccountAction(input, 'soft_delete');
+  }
+
+  async hardDeleteMember(input: MemberAccountActionInput) {
+    return this.applyAccountAction(input, 'hard_delete');
   }
 
   private async findUserByEmailInClient(

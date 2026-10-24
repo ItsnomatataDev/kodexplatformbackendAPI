@@ -1,0 +1,21 @@
+# PROPOSAL ONLY. Do not import/reload without separate routing approval.
+# Slice 2: replace the site address with the reviewed HTTPS media hostname
+# (not this example). Assumes Caddy runs on the VPS host; a container needs
+# a reviewed shared network and media-edge:8080 instead of host loopback.
+# Host Caddy should proxy to 127.0.0.1:3100 after media-edge is listening.
+media.example.invalid {
+    log {
+        output discard
+    }
+    header {
+        -Server
+        Referrer-Policy no-referrer
+        X-Content-Type-Options nosniff
+    }
+    reverse_proxy 127.0.0.1:3100 {
+        transport http {
+            dial_timeout 5s
+            response_header_timeout 35s
+        }
+    }
+}
