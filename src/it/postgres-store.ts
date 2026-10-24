@@ -1,6 +1,8 @@
 import { keysetPredicate, listLimit, pageOf } from '../db/list-bounds.js';
 import { db } from '../db/pool.js';
 import { NotFoundError, ValidationError } from '../http/errors.js';
+import { withTransaction } from '../db/transaction.js';
+import { applyDirectoryAccountAction } from '../organizations/account-lifecycle.js';
 import {
   buildStorageSnapshot,
   classifyProbe,
@@ -1003,38 +1005,25 @@ export class PostgresItStore {
     }
 
     const reason = params.reason?.trim() || null;
+    const directoryAction =
+      action === 'hard_delete_auth_user'
+        ? 'hard_delete'
+        : action === 'reactivate'
+          ? 'restore'
+          : action === 'suspend' || action === 'soft_delete'
+            ? action
+            : null;
 
-    if (action === 'hard_delete_auth_user') {
-      // Soft-delete equivalent — never hard-delete auth rows from war room.
-      await db.query(
-        `UPDATE identity.users
-         SET account_status = 'deleted', is_active = FALSE,
-             deleted_at = COALESCE(deleted_at, NOW()), updated_at = NOW()
-         WHERE id = $1`,
-        [targetUserId],
-      );
-      await db.query(
-        `UPDATE identity.user_profiles
-         SET deleted_at = NOW(),
-             deleted_by = $2,
-             deletion_reason = $3,
-             is_suspended = FALSE,
-             updated_at = NOW()
-         WHERE user_id = $1`,
-        [targetUserId, actorUserId, reason],
-      );
-      await db.query(
-        `UPDATE identity.password_reset_tokens
-         SET used_at = NOW()
-         WHERE user_id = $1 AND used_at IS NULL`,
-        [targetUserId],
-      );
-      await db.query(
-        `UPDATE organizations.memberships
-         SET status = 'removed', removed_at = NOW(), removed_by = $3, updated_at = NOW()
-         WHERE organization_id = $1 AND user_id = $2`,
-        [organizationId, targetUserId, actorUserId],
-      );
+    if (directoryAction) {
+      await withTransaction(async (client) => {
+        await applyDirectoryAccountAction(client, {
+          organizationId,
+          actorUserId,
+          targetUserId,
+          action: directoryAction,
+          reason,
+        });
+      });
       await db.query(
         `INSERT INTO it.audit_logs (
            organization_id, actor_user_id, target_user_id, action, reason, metadata
@@ -1043,109 +1032,19 @@ export class PostgresItStore {
           organizationId,
           actorUserId,
           targetUserId,
-          'hard_delete_auth_user_mapped_to_soft_delete',
+          action,
           reason,
-          JSON.stringify({ mapped: true }),
+          JSON.stringify({ directoryAction }),
         ],
       );
-      return {
-        ok: true,
-        action,
-        targetUserId,
-        mappedTo: 'soft_delete',
-      };
+      return { ok: true, action, targetUserId };
     }
 
-    if (
-      action !== 'suspend' &&
-      action !== 'reactivate' &&
-      action !== 'soft_delete' &&
-      action !== 'change_role'
-    ) {
+    if (action !== 'change_role') {
       throw new ValidationError(`Unknown action: ${action}`);
     }
 
-    if (action === 'suspend') {
-      await db.query(
-        `UPDATE identity.users
-         SET account_status = 'suspended', is_active = FALSE, updated_at = NOW()
-         WHERE id = $1`,
-        [targetUserId],
-      );
-      await db.query(
-        `UPDATE identity.user_profiles
-         SET is_suspended = TRUE,
-             suspended_at = NOW(),
-             suspended_by = $2,
-             suspension_reason = $3,
-             updated_at = NOW()
-         WHERE user_id = $1`,
-        [targetUserId, actorUserId, reason],
-      );
-      await db.query(
-        `UPDATE organizations.memberships
-         SET status = 'suspended', updated_at = NOW()
-         WHERE organization_id = $1 AND user_id = $2`,
-        [organizationId, targetUserId],
-      );
-    } else if (action === 'reactivate') {
-      await db.query(
-        `UPDATE identity.users
-         SET account_status = 'active', is_active = TRUE,
-             deleted_at = NULL, updated_at = NOW()
-         WHERE id = $1`,
-        [targetUserId],
-      );
-      await db.query(
-        `UPDATE identity.user_profiles
-         SET is_suspended = FALSE,
-             suspended_at = NULL,
-             suspended_by = NULL,
-             suspension_reason = NULL,
-             deleted_at = NULL,
-             deleted_by = NULL,
-             deletion_reason = NULL,
-             updated_at = NOW()
-         WHERE user_id = $1`,
-        [targetUserId],
-      );
-      await db.query(
-        `UPDATE organizations.memberships
-         SET status = 'active', removed_at = NULL, removed_by = NULL, updated_at = NOW()
-         WHERE organization_id = $1 AND user_id = $2`,
-        [organizationId, targetUserId],
-      );
-    } else if (action === 'soft_delete') {
-      await db.query(
-        `UPDATE identity.users
-         SET account_status = 'deleted', is_active = FALSE,
-             deleted_at = COALESCE(deleted_at, NOW()), updated_at = NOW()
-         WHERE id = $1`,
-        [targetUserId],
-      );
-      await db.query(
-        `UPDATE identity.user_profiles
-         SET deleted_at = NOW(),
-             deleted_by = $2,
-             deletion_reason = $3,
-             is_suspended = FALSE,
-             updated_at = NOW()
-         WHERE user_id = $1`,
-        [targetUserId, actorUserId, reason],
-      );
-      await db.query(
-        `UPDATE identity.password_reset_tokens
-         SET used_at = NOW()
-         WHERE user_id = $1 AND used_at IS NULL`,
-        [targetUserId],
-      );
-      await db.query(
-        `UPDATE organizations.memberships
-         SET status = 'removed', removed_at = NOW(), removed_by = $3, updated_at = NOW()
-         WHERE organization_id = $1 AND user_id = $2`,
-        [organizationId, targetUserId, actorUserId],
-      );
-    } else if (action === 'change_role') {
+    {
       const roleKey = String(params.newRole ?? '').trim();
       if (!roleKey) {
         throw new ValidationError('newRole is required for change_role.');

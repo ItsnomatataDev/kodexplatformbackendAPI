@@ -151,6 +151,15 @@ export function createApp(options: CreateAppOptions = {}) {
     options.organizationDirectory ?? new PostgresOrganizationDirectoryStore();
   const authLifecycle =
     options.authLifecycle ?? createDefaultAuthLifecycle(authDependencies);
+  const revokeAccountAccess = async (userId: string) => {
+    if (!options.auth || options.authLifecycle) {
+      await authLifecycle.sessions.revokeAllSessionsForUser(
+        userId,
+        'account_deactivated',
+      );
+    }
+    await revokePlaybackGrantsForUser(userId);
+  };
   const corsOrigins = options.corsOrigins ?? env.cors.allowedOrigins;
   const boards = options.boards ?? new PostgresBoardStore();
   const notifications =
@@ -279,7 +288,7 @@ export function createApp(options: CreateAppOptions = {}) {
     store: organizationDirectory,
     sendInvitation: options.sendOrganizationInvitation ?? ((email, name) => authLifecycle.passwords.requestInvitation(email, name)),
     files,
-    onUserAccessRevoked: revokePlaybackGrantsForUser,
+    onUserAccessRevoked: revokeAccountAccess,
   }));
   api.route(
     '/organization',
@@ -315,6 +324,7 @@ export function createApp(options: CreateAppOptions = {}) {
       store: chat,
       files,
       directory: organizationDirectory,
+      notifications,
     }),
   );
   api.route(
@@ -363,6 +373,7 @@ export function createApp(options: CreateAppOptions = {}) {
     createItRoutes({
       store: itWorkspace,
       passwords: authLifecycle.passwords,
+      onUserAccessRevoked: revokeAccountAccess,
     }),
   );
   api.route('/ai', createAiRoutes({ store: aiWorkspace, files }));

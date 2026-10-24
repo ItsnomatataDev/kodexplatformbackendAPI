@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { listLimit, listOffset, pageOf } from '../db/list-bounds.js';
 import { normalizeEmail } from '../auth/login.js';
 import type { AccountStatus, MembershipStatus } from '../authorization/types.js';
-import { ConflictError, NotFoundError, ValidationError } from '../http/errors.js';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../http/errors.js';
 import { KODE_OPERATING_ROLE_KEYS } from './role-model.js';
 import type {
   ApproveMemberInput,
@@ -11,6 +11,7 @@ import type {
   DirectoryUserLookup,
   InviteMemberInput,
   InviteMemberResult,
+  MemberAccountActionInput,
   ListMembersOptions,
   OfficeRecord,
   OrganizationDirectoryStore,
@@ -513,6 +514,102 @@ export class MemoryOrganizationDirectoryStore
       member.officeId = input.officeId ?? null;
     }
 
+    const { organizationId: _org, membershipId: _id, ...rest } = member;
+    return rest;
+  }
+
+  private requireMember(organizationId: string, userId: string) {
+    const member = this.members.find(
+      (row) => row.organizationId === organizationId && row.userId === userId,
+    );
+    if (!member) {
+      throw new NotFoundError(
+        'MEMBER_NOT_FOUND',
+        'The organization member was not found.',
+      );
+    }
+    return member;
+  }
+
+  private assertNotLastActiveAdmin(organizationId: string, userId: string) {
+    const target = this.requireMember(organizationId, userId);
+    const isAdmin = target.roleKey === 'admin';
+    if (!isAdmin || target.status !== 'active' || target.accountStatus !== 'active') {
+      return;
+    }
+    const remaining = this.members.filter(
+      (member) =>
+        member.organizationId === organizationId &&
+        member.userId !== userId &&
+        member.roleKey === 'admin' &&
+        member.status === 'active' &&
+        member.accountStatus === 'active',
+    );
+    if (remaining.length < 1) {
+      throw new ForbiddenError(
+        'LAST_ADMIN',
+        'You cannot suspend or delete the last active administrator.',
+      );
+    }
+  }
+
+  async suspendMember(input: MemberAccountActionInput) {
+    this.assertNotLastActiveAdmin(input.organizationId, input.userId);
+    const member = this.requireMember(input.organizationId, input.userId);
+    member.status = 'suspended';
+    member.accountStatus = 'suspended';
+    const user = this.users.find((row) => row.userId === input.userId);
+    if (user) {
+      user.accountStatus = 'suspended';
+      user.isActive = false;
+    }
+    const { organizationId: _org, membershipId: _id, ...rest } = member;
+    return rest;
+  }
+
+  async restoreMember(input: MemberAccountActionInput) {
+    const member = this.requireMember(input.organizationId, input.userId);
+    const user = this.users.find((row) => row.userId === input.userId);
+    if (user?.emailNormalized.startsWith('deleted:')) {
+      throw new ValidationError(
+        'This account was permanently deleted. Invite the person again with a new account.',
+      );
+    }
+    member.status = 'active';
+    member.accountStatus = 'active';
+    if (user) {
+      user.accountStatus = 'active';
+      user.isActive = true;
+    }
+    const { organizationId: _org, membershipId: _id, ...rest } = member;
+    return rest;
+  }
+
+  async softDeleteMember(input: MemberAccountActionInput) {
+    this.assertNotLastActiveAdmin(input.organizationId, input.userId);
+    const member = this.requireMember(input.organizationId, input.userId);
+    member.status = 'removed';
+    member.accountStatus = 'deleted';
+    const user = this.users.find((row) => row.userId === input.userId);
+    if (user) {
+      user.accountStatus = 'deleted';
+      user.isActive = false;
+    }
+    const { organizationId: _org, membershipId: _id, ...rest } = member;
+    return rest;
+  }
+
+  async hardDeleteMember(input: MemberAccountActionInput) {
+    this.assertNotLastActiveAdmin(input.organizationId, input.userId);
+    const member = this.requireMember(input.organizationId, input.userId);
+    member.status = 'removed';
+    member.accountStatus = 'deleted';
+    const user = this.users.find((row) => row.userId === input.userId);
+    if (user) {
+      user.accountStatus = 'deleted';
+      user.isActive = false;
+      user.emailNormalized = `deleted:${input.userId}`;
+    }
     const { organizationId: _org, membershipId: _id, ...rest } = member;
     return rest;
   }

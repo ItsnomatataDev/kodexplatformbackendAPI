@@ -203,13 +203,27 @@ export function createChatWebSocketRoutes(dependencies: ChatWsDependencies) {
               userId,
             );
             if (!isMember) return;
+            const activityRaw = parsed.payload?.activity;
+            const activity =
+              activityRaw === 'recording' ||
+              activityRaw === 'typing' ||
+              activityRaw === 'idle'
+                ? activityRaw
+                : undefined;
+            const isTyping =
+              activity === 'idle'
+                ? false
+                : activity === 'recording' || activity === 'typing'
+                  ? true
+                  : Boolean(parsed.payload?.isTyping ?? true);
             await hub.publishToConversation(
               conversationId,
               chatEnvelope(
                 'typing',
                 {
                   userId,
-                  isTyping: Boolean(parsed.payload?.isTyping ?? true),
+                  isTyping,
+                  ...(activity ? { activity } : {}),
                 },
                 { conversationId, organizationId },
               ),

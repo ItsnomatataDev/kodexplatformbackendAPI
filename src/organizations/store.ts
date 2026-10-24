@@ -111,6 +111,13 @@ export type UpdateMemberAccessInput = {
   changeOffice: boolean;
 };
 
+export type MemberAccountActionInput = {
+  organizationId: string;
+  userId: string;
+  actorUserId: string;
+  reason?: string | null;
+};
+
 export type ListMembersOptions = {
   statuses?: MembershipStatus[];
   limit?: number;
@@ -155,4 +162,8 @@ export type OrganizationDirectoryStore = {
   updateMemberAccess(
     input: UpdateMemberAccessInput,
   ): Promise<OrganizationMemberRecord>;
+  suspendMember(input: MemberAccountActionInput): Promise<OrganizationMemberRecord>;
+  restoreMember(input: MemberAccountActionInput): Promise<OrganizationMemberRecord>;
+  softDeleteMember(input: MemberAccountActionInput): Promise<OrganizationMemberRecord>;
+  hardDeleteMember(input: MemberAccountActionInput): Promise<OrganizationMemberRecord>;
 };

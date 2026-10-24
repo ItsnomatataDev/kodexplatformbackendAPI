@@ -1,6 +1,7 @@
 export const NOTIFICATION_TYPES = {
   taskAssigned: 'task_assigned',
   taskComment: 'task_comment',
+  chatMessage: 'chat_message',
   attendanceClockInReminder: 'attendance_clock_in_reminder',
   attendanceLate: 'attendance_late',
   attendanceAutoClockOut: 'attendance_auto_clock_out',

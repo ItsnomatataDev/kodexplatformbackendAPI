@@ -19,9 +19,11 @@ import type {
   OrganizationMemberRecord,
   OrganizationRecord,
   OrganizationRoleRecord,
+  MemberAccountActionInput,
   RejectMemberInput,
   UpdateMemberAccessInput,
 } from './store.js';
+import { applyDirectoryAccountAction } from './account-lifecycle.js';
 
 type OrganizationRow = {
   id: string;
@@ -1030,6 +1032,45 @@ export class PostgresOrganizationDirectoryStore
       }
       return member;
     });
+  }
+
+  private async applyAccountAction(
+    input: MemberAccountActionInput,
+    action: 'suspend' | 'restore' | 'soft_delete' | 'hard_delete',
+  ): Promise<OrganizationMemberRecord> {
+    return withTransaction(async (client) => {
+      await applyDirectoryAccountAction(client, {
+        organizationId: input.organizationId,
+        actorUserId: input.actorUserId,
+        targetUserId: input.userId,
+        action,
+        reason: input.reason,
+      });
+      const member = await loadMember(client, input.organizationId, input.userId);
+      if (!member) {
+        throw new NotFoundError(
+          'MEMBER_NOT_FOUND',
+          'The organization member was not found.',
+        );
+      }
+      return member;
+    });
+  }
+
+  async suspendMember(input: MemberAccountActionInput) {
+    return this.applyAccountAction(input, 'suspend');
+  }
+
+  async restoreMember(input: MemberAccountActionInput) {
+    return this.applyAccountAction(input, 'restore');
+  }
+
+  async softDeleteMember(input: MemberAccountActionInput) {
+    return this.applyAccountAction(input, 'soft_delete');
+  }
+
+  async hardDeleteMember(input: MemberAccountActionInput) {
+    return this.applyAccountAction(input, 'hard_delete');
   }
 
   private async findUserByEmailInClient(

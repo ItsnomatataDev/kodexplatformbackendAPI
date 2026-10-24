@@ -24,11 +24,15 @@ import {
 import { attachmentDisposition, streamStoredMedia } from '../content/media-stream.js';
 import type { FileStorage } from '../files/storage.js';
 import type { OrganizationDirectoryStore } from '../organizations/store.js';
+import { notifyChatMessage } from '../notifications/events.js';
+import type { NotificationStore } from '../notifications/store.js';
+import { logger } from '../config/logger.js';
 
 export type ChatRouteDependencies = {
   store: ChatStore;
   files: FileStorage;
   directory: OrganizationDirectoryStore;
+  notifications?: NotificationStore;
 };
 
 function authorizeChat(auth: ReturnType<typeof getAuth>, action: string) {
@@ -134,6 +138,11 @@ function serializeConversation(
     unreadCount: conversation.unreadCount ?? 0,
     memberCount: conversation.memberCount ?? null,
     disappearingSeconds: conversation.disappearingSeconds ?? null,
+    lastMessageId: conversation.lastMessageId ?? null,
+    lastMessageBody: conversation.lastMessageBody ?? null,
+    lastMessageType: conversation.lastMessageType ?? null,
+    lastMessageSenderId: conversation.lastMessageSenderId ?? null,
+    lastMessageAttachmentName: conversation.lastMessageAttachmentName ?? null,
   };
 }
 
@@ -497,6 +506,25 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
         { conversationId, organizationId },
       ),
     );
+
+    if (dependencies.notifications) {
+      void notifyChatMessage({
+        notifications: dependencies.notifications,
+        chat: dependencies.store,
+        organizationId,
+        conversationId,
+        messageId: message.id,
+        actorUserId: auth.actor.userId,
+        actorEmail: auth.actor.email,
+        body: message.body,
+        messageType: message.messageType,
+        attachmentName: message.attachmentName,
+        conversationTitle: conversation.title,
+        conversationType: conversation.type,
+      }).catch((error) => {
+        logger.warn({ err: error }, 'Chat notification fan-out failed');
+      });
+    }
 
     return c.json({ message: serializeMessage(message) }, 201);
   });

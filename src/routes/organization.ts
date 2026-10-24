@@ -1,4 +1,4 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { getAuth } from '../auth/middleware.js';
 import { assertAuthorized } from '../authorization/authorize.js';
 import { requireOrganizationId } from '../authorization/organization.js';
@@ -287,6 +287,62 @@ export function createOrganizationRoutes(
 
     return c.json({ member: serializeMember(member) });
   });
+
+  async function runAccountAction(
+    c: Context,
+    action: 'suspend' | 'restore' | 'softDelete' | 'hardDelete',
+    selfMessage: string,
+  ) {
+    const auth = getAuth(c);
+    const body = await readJson(c);
+    rejectTenancyOverrides(auth, c, body);
+    requireDirectoryManager(auth);
+    const organizationId = requireOrganizationId(auth);
+    const userId = requireUuidValue(c.req.param('userId'), 'userId');
+    if (userId === auth.actor.userId) {
+      throw new ForbiddenError('CANNOT_MODIFY_SELF', selfMessage);
+    }
+    const reason = readOptionalString(body.reason, 'reason', 2_000) ?? null;
+    const input = {
+      organizationId,
+      userId,
+      actorUserId: auth.actor.userId,
+      reason,
+    };
+    const member =
+      action === 'suspend'
+        ? await dependencies.store.suspendMember(input)
+        : action === 'restore'
+          ? await dependencies.store.restoreMember(input)
+          : action === 'softDelete'
+            ? await dependencies.store.softDeleteMember(input)
+            : await dependencies.store.hardDeleteMember(input);
+    if (action !== 'restore') {
+      await dependencies.onUserAccessRevoked?.(userId);
+    }
+    return c.json({ member: serializeMember(member), action });
+  }
+
+  organization.post('/members/:userId/suspend', (c) =>
+    runAccountAction(c, 'suspend', 'You cannot suspend your own account.'),
+  );
+  organization.post('/members/:userId/restore', (c) =>
+    runAccountAction(c, 'restore', 'You cannot restore your own account.'),
+  );
+  organization.post('/members/:userId/delete', (c) =>
+    runAccountAction(
+      c,
+      'softDelete',
+      'You cannot delete your own account.',
+    ),
+  );
+  organization.post('/members/:userId/hard-delete', (c) =>
+    runAccountAction(
+      c,
+      'hardDelete',
+      'You cannot permanently delete your own account.',
+    ),
+  );
 
   organization.patch('/members/:userId/access', async (c) => {
     const auth = getAuth(c);

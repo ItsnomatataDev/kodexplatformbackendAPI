@@ -828,6 +828,115 @@ test('invitation rejects invalid addresses and unauthorized callers without send
   assert.equal(sends, 0);
 });
 
+test('directory managers can suspend, restore, soft-delete, and hard-delete members', async () => {
+  const store = new MemoryOrganizationDirectoryStore();
+  seedDirectory(store);
+  const extraAdmin = '55555555-5555-5555-5555-555555555555';
+  seedActiveMember(store, {
+    organizationId: orgA,
+    userId: extraAdmin,
+    roleKey: 'admin',
+    officeId: officeA,
+    fullName: 'Second Admin',
+    email: 'second.admin@example.com',
+  });
+  const target = '66666666-6666-6666-6666-666666666666';
+  seedActiveMember(store, {
+    organizationId: orgA,
+    userId: target,
+    roleKey: 'media_team',
+    officeId: officeA,
+    fullName: 'Target User',
+    email: 'target@example.com',
+  });
+  const app = createDirectoryApp(async () => authContext(), store);
+  const authorization = await bearer(userA);
+  const headers = { authorization, 'content-type': 'application/json' };
+
+  const lastAdmin = await json(
+    await app.request(`/api/organization/members/${userA}/delete`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ reason: 'nope' }),
+    }),
+  );
+  assert.equal(lastAdmin.error?.code, 'CANNOT_MODIFY_SELF');
+
+  const lastRemainingAdmin = await json(
+    await app.request(`/api/organization/members/${extraAdmin}/delete`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ reason: 'keep one admin' }),
+    }),
+  );
+  // extraAdmin is not the last admin because userA is also admin
+  assert.equal(lastRemainingAdmin.member?.accountStatus, 'deleted');
+
+  const suspended = await json(
+    await app.request(`/api/organization/members/${target}/suspend`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ reason: 'policy' }),
+    }),
+  );
+  assert.equal(suspended.member.accountStatus, 'suspended');
+  assert.equal(suspended.member.status, 'suspended');
+
+  const restored = await json(
+    await app.request(`/api/organization/members/${target}/restore`, {
+      method: 'POST',
+      headers,
+      body: '{}',
+    }),
+  );
+  assert.equal(restored.member.accountStatus, 'active');
+
+  const deleted = await json(
+    await app.request(`/api/organization/members/${target}/delete`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ reason: 'left the company' }),
+    }),
+  );
+  assert.equal(deleted.member.accountStatus, 'deleted');
+  assert.equal(deleted.member.status, 'removed');
+
+  const restoredSoft = await json(
+    await app.request(`/api/organization/members/${target}/restore`, {
+      method: 'POST',
+      headers,
+      body: '{}',
+    }),
+  );
+  assert.equal(restoredSoft.member.accountStatus, 'active');
+
+  const hard = await json(
+    await app.request(`/api/organization/members/${target}/hard-delete`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ reason: 'purge login' }),
+    }),
+  );
+  assert.equal(hard.member.accountStatus, 'deleted');
+  const refuse = await json(
+    await app.request(`/api/organization/members/${target}/restore`, {
+      method: 'POST',
+      headers,
+      body: '{}',
+    }),
+  );
+  assert.equal(refuse.error?.code, 'VALIDATION_ERROR');
+  await assert.rejects(
+    () =>
+      store.softDeleteMember({
+        organizationId: orgA,
+        userId: userA,
+        actorUserId: userC,
+      }),
+    /last active administrator/,
+  );
+});
+
 test('deleted members appear when the directory requests inactive accounts', async () => {
   const store = new MemoryOrganizationDirectoryStore();
   seedDirectory(store);
