@@ -397,7 +397,7 @@ export async function importEziTrackDailyReport(
        * reporting day from the UTC-normalized period timestamp because
        * local midnight can become the previous UTC calendar date.
        *
-       * Prefer the original periodStart value from n8n, whose leading
+       * Prefer the original periodStart value from the ingest payload, whose leading
        * YYYY-MM-DD is the EziTrack reporting day.
        */
       const summaryDate =

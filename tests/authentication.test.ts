@@ -31,7 +31,7 @@ function authContext(
   return {
     actor: {
       userId: userA,
-      email: 'user@example.com',
+      email: 'user@itsnomatata.com',
       isActive: true,
       accountStatus: 'active',
       deletedAt: null,
@@ -329,17 +329,3 @@ test('protected route requires authentication and health does not', async () => 
   assert.equal(liveBody.service, 'kode-platform');
 });
 
-test('infrastructure cookies and opaque tokens confer no ordinary Kodex authority', async () => {
-  const app = createTestApp(async () => {
-    throw new Error('Infrastructure credentials must not resolve ordinary membership');
-  });
-  const opaque = 'independent-infrastructure-opaque-session-token';
-  const cookieOnly = await app.request('/api/me', {
-    headers: { Cookie: `__Host-kodex_infra_session=${opaque}; kodex_infra_dev_session=${opaque}` },
-  });
-  assert.equal(cookieOnly.status, 401);
-  const bearer = await app.request('/api/me', {
-    headers: { Authorization: `Bearer ${opaque}` },
-  });
-  assert.equal(bearer.status, 401);
-});

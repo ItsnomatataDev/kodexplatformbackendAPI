@@ -103,6 +103,8 @@ function mapFlow(row: Record<string, unknown>) {
         : String(definition.slug),
     description:
       definition.description == null ? null : String(definition.description),
+    instructions:
+      definition.instructions == null ? null : String(definition.instructions),
     webhook_url:
       definition.webhook_url == null && definition.webhookUrl == null
         ? null
@@ -714,45 +716,81 @@ export class PostgresAiStore {
       throw new ValidationError('Automation flow is disabled.');
     }
 
-    const startedAt = new Date();
     const insert = await db.query(
       `INSERT INTO ai.automation_runs (
          organization_id, flow_id, status, started_at, result
-       ) VALUES ($1, $2, 'pending', $3, $4::jsonb)
+       ) VALUES ($1, $2, 'running', NOW(), $3::jsonb)
        RETURNING *`,
       [
         organizationId,
         flowId,
-        startedAt.toISOString(),
         JSON.stringify({
           workflow_name: flow.name,
           project_id: flow.project_id,
           triggered_by: userId,
-          message: 'Run accepted (stub engine).',
+          engine: 'kodex',
+          message: 'KODEX is running this automation.',
           payload: input?.payload ?? {},
         }),
       ],
     );
+    return { flow, run: mapRun(insert.rows[0]) };
+  }
 
-    const runId = String(insert.rows[0].id);
-    const finishedAt = new Date();
-    const complete = await db.query(
+  async automationSummary(organizationId: string) {
+    const result = await db.query(
+      `SELECT
+         (SELECT COUNT(*) FROM ai.automation_flows WHERE organization_id = $1)::int AS flows,
+         (SELECT COUNT(*) FROM ai.automation_flows WHERE organization_id = $1 AND enabled)::int AS enabled_flows,
+         COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days')::int AS runs_7d,
+         COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND status = 'completed')::int AS completed_7d,
+         COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days' AND status = 'failed')::int AS failed_7d,
+         MAX(created_at) AS last_run_at
+       FROM ai.automation_runs
+       WHERE organization_id = $1`,
+      [organizationId],
+    );
+    const row = result.rows[0] ?? {};
+    return {
+      flows: Number(row.flows ?? 0),
+      enabledFlows: Number(row.enabled_flows ?? 0),
+      runs7d: Number(row.runs_7d ?? 0),
+      completed7d: Number(row.completed_7d ?? 0),
+      failed7d: Number(row.failed_7d ?? 0),
+      lastRunAt: iso(row.last_run_at),
+    };
+  }
+
+  async finishRun(
+    organizationId: string,
+    runId: string,
+    outcome:
+      | { status: 'completed'; output: string }
+      | { status: 'failed'; error: string },
+  ) {
+    const result =
+      outcome.status === 'completed'
+        ? { message: 'KODEX completed this automation.', output: outcome.output }
+        : { message: outcome.error };
+    const update = await db.query(
       `UPDATE ai.automation_runs SET
-         status = 'completed',
-         finished_at = $3,
-         result = COALESCE(result, '{}'::jsonb) || $4::jsonb
+         status = $3,
+         finished_at = NOW(),
+         error = $4,
+         result = COALESCE(result, '{}'::jsonb) || $5::jsonb
        WHERE organization_id = $1 AND id = $2
        RETURNING *`,
       [
         organizationId,
         runId,
-        finishedAt.toISOString(),
-        JSON.stringify({
-          message: 'Stub run completed — no workflow engine wired yet.',
-          stub: true,
-        }),
+        outcome.status,
+        outcome.status === 'failed' ? outcome.error : null,
+        JSON.stringify(result),
       ],
     );
-    return mapRun(complete.rows[0]);
+    if (!update.rows[0]) {
+      throw new NotFoundError('AUTOMATION_RUN_NOT_FOUND', 'Automation run not found.');
+    }
+    return mapRun(update.rows[0]);
   }
 }

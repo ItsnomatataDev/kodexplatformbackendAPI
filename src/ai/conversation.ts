@@ -1,3 +1,5 @@
+import { documentsFromMetadata, messageContentForModel } from './document-text.js';
+
 export const AI_INFERENCE_HISTORY_LIMIT = 40;
 export const AI_MESSAGE_PAGE_LIMIT = 100;
 export const AI_MESSAGE_MAX_LIMIT = 500;
@@ -64,11 +66,20 @@ export function inferenceTurnsFromHistory(
   const turns: InferenceChatMessage[] = [
     { role: 'system', content: trustedSystemPrompt(systemPrompt) },
   ];
-  for (const message of messages) {
+  let documentTurn = -1;
+  messages.forEach((message, index) => {
+    if (message.role === 'user' && documentsFromMetadata(message.metadata).length > 0) {
+      documentTurn = index;
+    }
+  });
+  for (const [index, message] of messages.entries()) {
     if (message.role !== 'user' && message.role !== 'assistant') {
       continue;
     }
-    const content = message.content.trim();
+    const content =
+      index === documentTurn
+        ? messageContentForModel(message.content, message.metadata)
+        : message.content.trim();
     if (!content) {
       continue;
     }

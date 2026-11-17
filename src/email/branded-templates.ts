@@ -1,6 +1,5 @@
 /**
- * Branded email shell ported from the Codex / Supabase Resend templates
- * (ITsNomatataWorkSpace supabase/functions/_shared/n8nNotificationEmail.ts).
+ * Branded email shell ported from the original Codex Resend templates.
  */
 
 export const APP_NAME = "IT's Nomatata";

@@ -25,6 +25,7 @@ import {
   trustedSystemPrompt,
   type InferenceChatMessage,
 } from '../ai/conversation.js';
+import { resolveChatDocuments } from '../ai/document-text.js';
 import { buildGatewayChatMessages } from '../ai/gateway-context.js';
 import { createKodexAiGatewayClient } from '../ai-gateway/client.js';
 import { isKodexAiWorkspaceGatewayConfigured } from '../ai-gateway/config.js';
@@ -482,12 +483,21 @@ export function createAiRoutes(dependencies: AiRouteDependencies) {
           { limit: AI_INFERENCE_HISTORY_LIMIT },
         );
         if (!shouldReusePendingUserTurn(recent, message, clientMessageId)) {
+          const documents = await resolveChatDocuments({
+            attachments: body.attachments,
+            organizationId,
+            userId,
+            bucket: env.minio.bucket,
+            files: dependencies.files,
+          });
           await dependencies.store.addMessage(organizationId, userId, activeThreadId, {
             role: 'user',
             content: message,
+            attachments: Array.isArray(body.attachments) ? body.attachments.slice(0, 10) : [],
             metadata: {
               ...requestMetadata,
               ...(clientMessageId ? { clientMessageId } : {}),
+              ...(documents.length > 0 ? { documents } : {}),
               source: 'chat',
             },
           });

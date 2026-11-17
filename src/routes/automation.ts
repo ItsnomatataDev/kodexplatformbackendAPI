@@ -7,14 +7,25 @@ import {
   requireUuidValue,
 } from '../work/http.js';
 import type { PostgresAiStore } from '../ai/postgres-store.js';
+import { executeAutomationWithKodex } from '../ai/automation-run.js';
+import { logger } from '../config/logger.js';
+import { AppError } from '../http/errors.js';
 import { readListQuery } from '../http/list-query.js';
+import { isLlmReady, llmChatCompletions } from '../kodex/llm-client.js';
 
 export type AutomationRouteDependencies = {
   store: PostgresAiStore;
+  llmChatCompletions?: typeof llmChatCompletions;
 };
 
 function authorize(auth: ReturnType<typeof getAuth>) {
   return requireProductOrg(auth);
+}
+
+const NOT_RUNNABLE_STATUSES = new Set(['disabled', 'inactive', 'paused', 'draft']);
+
+function isRunnableStatus(status: string) {
+  return !NOT_RUNNABLE_STATUSES.has(status);
 }
 
 function buildDefinitionFromBody(body: Record<string, unknown>) {
@@ -25,6 +36,7 @@ function buildDefinitionFromBody(body: Record<string, unknown>) {
 
   if (body.slug !== undefined) definition.slug = body.slug;
   if (body.description !== undefined) definition.description = body.description;
+  if (body.instructions !== undefined) definition.instructions = body.instructions;
   if (body.webhook_url !== undefined || body.webhookUrl !== undefined) {
     definition.webhook_url = body.webhook_url ?? body.webhookUrl ?? null;
   }
@@ -54,9 +66,7 @@ export function createAutomationRoutes(dependencies: AutomationRouteDependencies
     const definition = buildDefinitionFromBody(body);
     const status = String(body.status ?? definition.status ?? 'active');
     const enabled =
-      body.enabled === undefined
-        ? status !== 'disabled' && status !== 'inactive'
-        : Boolean(body.enabled);
+      body.enabled === undefined ? isRunnableStatus(status) : Boolean(body.enabled);
 
     const flow = await dependencies.store.createFlow(
       organizationId,
@@ -85,7 +95,7 @@ export function createAutomationRoutes(dependencies: AutomationRouteDependencies
       body.enabled === undefined
         ? body.status === undefined
           ? undefined
-          : String(body.status) !== 'disabled' && String(body.status) !== 'inactive'
+          : isRunnableStatus(String(body.status))
         : Boolean(body.enabled);
 
     return c.json({
@@ -118,13 +128,48 @@ export function createAutomationRoutes(dependencies: AutomationRouteDependencies
         ? (body.payload as Record<string, unknown>)
         : (body as Record<string, unknown>);
 
-    const run = await dependencies.store.startRun(
+    const { flow, run } = await dependencies.store.startRun(
       organizationId,
       auth.actor.userId,
       flowId,
       { payload },
     );
-    return c.json({ run }, 201);
+    let finished;
+    try {
+      const output = await executeAutomationWithKodex(
+        dependencies.llmChatCompletions ?? llmChatCompletions,
+        flow,
+        payload,
+      );
+      finished = await dependencies.store.finishRun(organizationId, run.id, {
+        status: 'completed',
+        output,
+      });
+    } catch (error) {
+      logger.warn(
+        { flowId, errName: error instanceof Error ? error.name : 'unknown' },
+        'KODEX automation run failed',
+      );
+      finished = await dependencies.store.finishRun(organizationId, run.id, {
+        status: 'failed',
+        error:
+          error instanceof AppError
+            ? error.message
+            : 'KODEX could not complete this automation. Please try again.',
+      });
+    }
+    return c.json({ run: finished }, 201);
+  });
+
+  routes.get('/status', async (c) => {
+    const auth = getAuth(c);
+    const organizationId = authorize(auth);
+    return c.json({
+      checkedAt: new Date().toISOString(),
+      engine: 'KODEX',
+      kodexReady: isLlmReady(),
+      summary: await dependencies.store.automationSummary(organizationId),
+    });
   });
 
   routes.get('/runs', async (c) => {
