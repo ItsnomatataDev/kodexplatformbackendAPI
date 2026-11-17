@@ -1,10 +1,16 @@
 export const NOTIFICATION_TYPES = {
   taskAssigned: 'task_assigned',
   taskComment: 'task_comment',
+  ticketComment: 'ticket_comment',
+  ticketAssigned: 'ticket_assigned',
+  ticketWaiting: 'ticket_waiting_for_requester',
+  ticketResolved: 'ticket_resolved',
+  ticketFollowUp: 'ticket_follow_up',
   chatMessage: 'chat_message',
   attendanceClockInReminder: 'attendance_clock_in_reminder',
   attendanceLate: 'attendance_late',
   attendanceAutoClockOut: 'attendance_auto_clock_out',
+  locationPlannerMonthEnd: 'location_planner_month_end',
 } as const;
 
 export type NotificationType = string;
@@ -75,5 +81,14 @@ export interface NotificationStore {
   getDisplayName(userId: string): Promise<string | null>;
   getRecipientEmails(
     userIds: string[],
+    organizationId?: string,
   ): Promise<Map<string, { email: string; fullName: string | null }>>;
+  assertActiveOrgRecipients(
+    organizationId: string,
+    userIds: string[],
+  ): Promise<void>;
+  findActiveMemberByEmail(
+    organizationId: string,
+    email: string,
+  ): Promise<{ userId: string; email: string } | null>;
 }

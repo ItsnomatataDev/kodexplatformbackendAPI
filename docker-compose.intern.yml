@@ -1,0 +1,16 @@
+# Browser tools for the Ubuntu snapshot. Does not create Postgres or MinIO.
+# Start: docker compose -f docker-compose.intern.yml up -d
+name: kode-intern
+
+services:
+  db-ui:
+    image: sosedoff/pgweb:latest
+    container_name: kode-db-ui
+    restart: unless-stopped
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    environment:
+      PGWEB_DATABASE_URL: postgres://kode:kode_dev_password@host.docker.internal:5433/kode_platform?sslmode=disable
+    command: ["--bind=0.0.0.0", "--listen=8081", "--sessions=false"]
+    ports:
+      - "127.0.0.1:18080:8081"

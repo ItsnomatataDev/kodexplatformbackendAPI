@@ -1,8 +1,15 @@
 import { keysetPredicate, listLimit, pageOf } from '../db/list-bounds.js';
 import { db } from '../db/pool.js';
-import { NotFoundError, ValidationError } from '../http/errors.js';
+import { ForbiddenError, NotFoundError, ValidationError } from '../http/errors.js';
 import { withTransaction } from '../db/transaction.js';
-import { applyDirectoryAccountAction } from '../organizations/account-lifecycle.js';
+import {
+  applyDirectoryAccountAction,
+  assertNotLastActiveAdmin,
+} from '../organizations/account-lifecycle.js';
+import {
+  isKodeOperatingRoleKey,
+  isPrivilegedDirectoryRole,
+} from '../organizations/role-model.js';
 import {
   buildStorageSnapshot,
   classifyProbe,
@@ -1045,18 +1052,44 @@ export class PostgresItStore {
     }
 
     {
-      const roleKey = String(params.newRole ?? '').trim();
+      const roleKey = String(params.newRole ?? '').trim().toLowerCase();
       if (!roleKey) {
         throw new ValidationError('newRole is required for change_role.');
       }
-      const role = await db.query(
-        `SELECT id, role_key FROM organizations.roles
+      if (!isKodeOperatingRoleKey(roleKey)) {
+        throw new ValidationError('The selected role is not available.');
+      }
+      const actor = await db.query<{ is_admin: boolean }>(
+        `SELECT COALESCE(r.is_admin_role, FALSE) OR m.role_key = 'admin' AS is_admin
+         FROM organizations.memberships m
+         LEFT JOIN organizations.roles r ON r.id = m.role_id
+         WHERE m.organization_id = $1 AND m.user_id = $2
+         LIMIT 1`,
+        [organizationId, actorUserId],
+      );
+      if (isPrivilegedDirectoryRole(roleKey) && !actor.rows[0]?.is_admin) {
+        throw new ForbiddenError(
+          'INSUFFICIENT_PERMISSION',
+          'Only administrators can assign administrator or IT roles.',
+        );
+      }
+      const role = await db.query<{
+        id: string;
+        role_key: string;
+        is_admin_role: boolean;
+      }>(
+        `SELECT id, role_key, is_admin_role FROM organizations.roles
          WHERE organization_id = $1 AND role_key = $2
          LIMIT 1`,
         [organizationId, roleKey],
       );
       if (!role.rows[0]) {
         throw new NotFoundError('ROLE_NOT_FOUND', `Role "${roleKey}" was not found.`);
+      }
+      if (!role.rows[0].is_admin_role && role.rows[0].role_key !== 'admin') {
+        await withTransaction(async (client) => {
+          await assertNotLastActiveAdmin(client, organizationId, targetUserId);
+        });
       }
       await db.query(
         `UPDATE organizations.memberships

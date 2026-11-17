@@ -18,9 +18,14 @@ import type { ChatStore, ChatMessageRecord } from '../chat/store.js';
 import { chatEnvelope } from '../chat/events.js';
 import { getChatRealtimeHub } from '../chat/hub.js';
 import {
+  CHAT_IMAGES_BUCKET,
   chatBucketForContentType,
   chatObjectKey,
 } from '../chat/buckets.js';
+import {
+  chatImageMatchesContentType,
+  isInlineChatImageType,
+} from '../chat/media-type.js';
 import { attachmentDisposition, streamStoredMedia } from '../content/media-stream.js';
 import type { FileStorage } from '../files/storage.js';
 import type { OrganizationDirectoryStore } from '../organizations/store.js';
@@ -109,6 +114,7 @@ async function assertCanReadChatMedia(params: {
     const member = await params.store.isMember(
       parsed.conversationId,
       params.userId,
+      params.organizationId,
     );
     if (!member) {
       throw new ForbiddenError(
@@ -183,6 +189,7 @@ function serializeMessage(message: ChatMessageRecord) {
     senderName: message.senderName ?? null,
     senderEmail: message.senderEmail ?? null,
     expiresAt: message.expiresAt?.toISOString() ?? null,
+    clientMessageId: message.clientMessageId ?? null,
     reactions: (message.reactions ?? []).map((row) => ({
       id: row.id,
       messageId: row.messageId,
@@ -193,12 +200,19 @@ function serializeMessage(message: ChatMessageRecord) {
   };
 }
 
+function readOptionalClientMessageId(body: Record<string, unknown>): string | null {
+  const raw = body.clientMessageId ?? body.client_message_id;
+  if (raw === undefined || raw === null || raw === '') return null;
+  return requireUuidValue(String(raw), 'clientMessageId');
+}
+
 async function requireMembership(
   store: ChatStore,
   conversationId: string,
   userId: string,
+  organizationId?: string,
 ) {
-  const ok = await store.isMember(conversationId, userId);
+  const ok = await store.isMember(conversationId, userId, organizationId);
   if (!ok) {
     throw new ForbiddenError(
       'CHAT_NOT_A_MEMBER',
@@ -319,6 +333,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       dependencies.store,
       conversationId,
       auth.actor.userId,
+      organizationId,
     );
     const conversation = await dependencies.store.getConversation(
       organizationId,
@@ -347,6 +362,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       dependencies.store,
       conversationId,
       auth.actor.userId,
+      organizationId,
     );
     const beforeRaw = c.req.query('before');
     const before = beforeRaw ? new Date(beforeRaw) : null;
@@ -393,6 +409,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       dependencies.store,
       conversationId,
       auth.actor.userId,
+      organizationId,
     );
 
     const conversation = await dependencies.store.getConversation(
@@ -467,7 +484,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       disappearingSeconds != null
         ? new Date(Date.now() + disappearingSeconds * 1000)
         : null;
-    const message = await dependencies.store.sendMessage({
+    const { message, created } = await dependencies.store.sendMessage({
       organizationId,
       conversationId,
       senderId: auth.actor.userId,
@@ -496,37 +513,46 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
           ? (body.metadata as Record<string, unknown>)
           : {},
       expiresAt,
+      clientMessageId: readOptionalClientMessageId(body as Record<string, unknown>),
     });
 
-    await hub.publishToConversation(
-      conversationId,
-      chatEnvelope(
-        'message.created',
-        { message: serializeMessage(message) },
-        { conversationId, organizationId },
-      ),
-    );
+    // Persist succeeded even if realtime publish fails — do not re-create on retry.
+    if (created) {
+      try {
+        await hub.publishToConversation(
+          conversationId,
+          chatEnvelope(
+            'message.created',
+            { message: serializeMessage(message) },
+            { conversationId, organizationId },
+          ),
+        );
+      } catch (error) {
+        logger.warn({ err: error }, 'Chat message.created publish failed after persist');
+      }
 
-    if (dependencies.notifications) {
-      void notifyChatMessage({
-        notifications: dependencies.notifications,
-        chat: dependencies.store,
-        organizationId,
-        conversationId,
-        messageId: message.id,
-        actorUserId: auth.actor.userId,
-        actorEmail: auth.actor.email,
-        body: message.body,
-        messageType: message.messageType,
-        attachmentName: message.attachmentName,
-        conversationTitle: conversation.title,
-        conversationType: conversation.type,
-      }).catch((error) => {
-        logger.warn({ err: error }, 'Chat notification fan-out failed');
-      });
+      if (dependencies.notifications) {
+        void notifyChatMessage({
+          notifications: dependencies.notifications,
+          chat: dependencies.store,
+          organizationId,
+          conversationId,
+          messageId: message.id,
+          actorUserId: auth.actor.userId,
+          actorEmail: auth.actor.email,
+          body: message.body,
+          messageType: message.messageType,
+          attachmentName: message.attachmentName,
+          conversationTitle: conversation.title,
+          conversationType: conversation.type,
+        }).catch((error) => {
+          logger.warn({ err: error }, 'Chat notification fan-out failed');
+        });
+      }
     }
 
-    return c.json({ message: serializeMessage(message) }, 201);
+    // 201 = newly persisted; 200 = identical idempotent retry.
+    return c.json({ message: serializeMessage(message), created }, created ? 201 : 200);
   });
 
   routes.patch('/messages/:messageId', async (c) => {
@@ -546,6 +572,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       dependencies.store,
       existing.conversationId,
       auth.actor.userId,
+      organizationId,
     );
     const message = await dependencies.store.editMessage({
       organizationId,
@@ -579,6 +606,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       dependencies.store,
       existing.conversationId,
       auth.actor.userId,
+      organizationId,
     );
     const allowAny =
       auth.membership.isAdminRole ||
@@ -612,30 +640,33 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       dependencies.store,
       conversationId,
       auth.actor.userId,
+      organizationId,
     );
     const body = await readJson(c);
     const messageId = requireUuidValue(
       String(body.messageId ?? body.message_id),
       'messageId',
     );
-    const member = await dependencies.store.markRead({
+    const { member, advanced } = await dependencies.store.markRead({
       conversationId,
       userId: auth.actor.userId,
       messageId,
     });
-    await hub.publishToConversation(
-      conversationId,
-      chatEnvelope(
-        'read_receipt',
-        {
-          userId: auth.actor.userId,
-          messageId,
-          readAt: member.lastReadAt?.toISOString() ?? null,
-        },
-        { conversationId, organizationId },
-      ),
-    );
-    return c.json({ member: serializeMember(member) });
+    if (advanced) {
+      await hub.publishToConversation(
+        conversationId,
+        chatEnvelope(
+          'read_receipt',
+          {
+            userId: auth.actor.userId,
+            messageId: member.lastReadMessageId ?? messageId,
+            readAt: member.lastReadAt?.toISOString() ?? null,
+          },
+          { conversationId, organizationId },
+        ),
+      );
+    }
+    return c.json({ member: serializeMember(member), advanced });
   });
 
   routes.get('/messages/:messageId/reactions', async (c) => {
@@ -653,6 +684,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       dependencies.store,
       existing.conversationId,
       auth.actor.userId,
+      organizationId,
     );
     const reactions = await dependencies.store.listReactions(messageId);
     return c.json({
@@ -681,6 +713,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       dependencies.store,
       existing.conversationId,
       auth.actor.userId,
+      organizationId,
     );
     const body = await readJson(c);
     const emoji = readRequiredText(body.emoji, 'emoji');
@@ -735,6 +768,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
         dependencies.store,
         conversationId,
         auth.actor.userId,
+        organizationId,
       );
     }
 
@@ -743,6 +777,19 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       'contentBase64',
       c.get('limits').maxAttachmentBytes,
     );
+    if (contentType.toLowerCase().startsWith('image/')) {
+      if (!isInlineChatImageType(contentType)) {
+        throw new ValidationError('That image type is not allowed in chat.', {
+          field: 'contentType',
+        });
+      }
+      if (!chatImageMatchesContentType(contentType, bytes)) {
+        throw new ValidationError(
+          'File contents do not match the declared image type.',
+          { field: 'contentType' },
+        );
+      }
+    }
 
     const fileId = randomUUID();
     const checksumSha256 = createHash('sha256').update(bytes).digest('hex');
@@ -803,7 +850,10 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       objectKey,
       rangeHeader: c.req.header('range'),
       cacheControl: 'private, max-age=3600',
-      contentDisposition: attachmentDisposition('inline', safeFilename(fileName)),
+      contentDisposition: attachmentDisposition(
+        bucket === CHAT_IMAGES_BUCKET ? 'inline' : 'attachment',
+        safeFilename(fileName),
+      ),
       notFoundCode: 'CHAT_MEDIA_NOT_FOUND',
       notFoundMessage: 'Media not found.',
     });
@@ -843,7 +893,10 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       objectKey,
       rangeHeader: c.req.header('range'),
       cacheControl: 'private, max-age=3600',
-      contentDisposition: attachmentDisposition('inline', safeFilename(fileName)),
+      contentDisposition: attachmentDisposition(
+        bucket === CHAT_IMAGES_BUCKET ? 'inline' : 'attachment',
+        safeFilename(fileName),
+      ),
       notFoundCode: 'CHAT_MEDIA_NOT_FOUND',
       notFoundMessage: 'Media not found.',
     });
@@ -851,7 +904,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
 
   routes.delete('/conversations/:conversationId/membership', async (c) => {
     const auth = getAuth(c);
-    authorizeChat(auth, 'chat.write');
+    const organizationId = authorizeChat(auth, 'chat.write');
     const conversationId = requireUuidValue(
       c.req.param('conversationId'),
       'conversationId',
@@ -860,6 +913,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       dependencies.store,
       conversationId,
       auth.actor.userId,
+      organizationId,
     );
     const left = await dependencies.store.leaveConversation({
       conversationId,
@@ -885,6 +939,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       dependencies.store,
       conversationId,
       auth.actor.userId,
+      organizationId,
     );
     const body = await readJson(c);
     const rawSeconds = body.seconds ?? body.disappearing_seconds;
@@ -1057,6 +1112,7 @@ export function createChatRoutes(dependencies: ChatRouteDependencies) {
       dependencies.store,
       conversationId,
       auth.actor.userId,
+      organizationId,
     );
     const keyVersion = Number(c.req.query('keyVersion') ?? 1) || 1;
     const envelope = await dependencies.store.getOwnConversationKeyEnvelope({

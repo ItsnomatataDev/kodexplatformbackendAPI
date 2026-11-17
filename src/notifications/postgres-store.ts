@@ -1,4 +1,5 @@
 import { db } from '../db/pool.js';
+import { ValidationError } from '../http/errors.js';
 import type {
   CreateNotificationInput,
   ListNotificationsInput,
@@ -233,7 +234,49 @@ export class PostgresNotificationStore implements NotificationStore {
     return name && name.length > 0 ? name : null;
   }
 
-  async getRecipientEmails(userIds: string[]) {
+  async assertActiveOrgRecipients(organizationId: string, userIds: string[]) {
+    const unique = [...new Set(userIds.filter(Boolean))];
+    if (unique.length === 0) return;
+    const result = await db.query<{ user_id: string }>(
+      `
+        SELECT user_id
+        FROM organizations.memberships
+        WHERE organization_id = $1
+          AND status = 'active'
+          AND user_id = ANY($2::uuid[])
+      `,
+      [organizationId, unique],
+    );
+    if (result.rows.length !== unique.length) {
+      throw new ValidationError(
+        'Each recipient must be an active member of this organization.',
+        { field: 'userIds' },
+      );
+    }
+  }
+
+  async findActiveMemberByEmail(organizationId: string, email: string) {
+    const normalized = email.trim().toLowerCase();
+    if (!normalized) return null;
+    const result = await db.query<{ id: string; email: string }>(
+      `
+        SELECT u.id, u.email
+        FROM identity.users u
+        INNER JOIN organizations.memberships m ON m.user_id = u.id
+        WHERE m.organization_id = $1
+          AND m.status = 'active'
+          AND u.account_status = 'active'
+          AND lower(u.email) = $2
+        LIMIT 1
+      `,
+      [organizationId, normalized],
+    );
+    const row = result.rows[0];
+    if (!row?.email) return null;
+    return { userId: row.id, email: row.email };
+  }
+
+  async getRecipientEmails(userIds: string[], organizationId?: string) {
     const unique = [...new Set(userIds.filter(Boolean))];
     const map = new Map<string, { email: string; fullName: string | null }>();
     if (unique.length === 0) return map;
@@ -243,13 +286,24 @@ export class PostgresNotificationStore implements NotificationStore {
       email: string | null;
       full_name: string | null;
     }>(
+      organizationId
+        ? `
+        SELECT u.id, u.email, p.full_name
+        FROM identity.users u
+        INNER JOIN organizations.memberships m
+          ON m.user_id = u.id
+         AND m.organization_id = $2
+         AND m.status = 'active'
+        LEFT JOIN identity.user_profiles p ON p.user_id = u.id
+        WHERE u.id = ANY($1::uuid[])
       `
+        : `
         SELECT u.id, u.email, p.full_name
         FROM identity.users u
         LEFT JOIN identity.user_profiles p ON p.user_id = u.id
         WHERE u.id = ANY($1::uuid[])
       `,
-      [unique],
+      organizationId ? [unique, organizationId] : [unique],
     );
 
     for (const row of result.rows) {

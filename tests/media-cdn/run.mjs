@@ -121,6 +121,9 @@ async function main() {
     }
     check((await request('/_media_auth')).status === 404,'internal auth inaccessible');
     check((await request(path,{method:'POST'})).status === 405,'method denied');
+    check((await fetch(`http://media-edge:8080${path}`,{method:'PUT'})).status === 405,'playback PUT denied');
+    const ingestUnsigned = `/ingest/v1/${Math.floor(Date.now()/1000)+3600}/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/${assetId}/parts/1`;
+    check((await fetch(`http://media-edge:8080${ingestUnsigned}`,{method:'PUT',body:'x'})).status === 403,'ingest without grant denied');
     check((await fetch(`http://minio:9000/${bucket}/.media/v2/${assetId}/${generation}/hls/master.m3u8`)).status === 403,'origin private');
     // Delete only this disposable fixture: valid cached reads still work,
     // while invalid requests stay denied and an uncached object is absent.

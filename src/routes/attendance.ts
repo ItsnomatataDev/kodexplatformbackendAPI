@@ -4,10 +4,7 @@ import { assertAuthorized } from '../authorization/authorize.js';
 import { hasPermission } from '../authorization/permissions.js';
 import { requireOrganizationId } from '../authorization/organization.js';
 import { ForbiddenError, ValidationError } from '../http/errors.js';
-import {
-  readJson,
-  readOptionalString,
-  requireUuidValue,
+import {readJson, readOptionalString,requireUuidValue,
 } from '../work/http.js';
 import type { AuthContext } from '../authorization/types.js';
 import { assertWithinOfficeGeofences } from '../attendance/geofence.js';

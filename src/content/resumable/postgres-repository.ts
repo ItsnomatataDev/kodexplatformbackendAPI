@@ -232,6 +232,31 @@ export class PostgresUploadSessionRepository implements UploadSessionRepository 
     );
   }
 
+  async listEmptyActiveOwned(organizationId: string, createdBy: string) {
+    const result = await db.query<UploadSessionRow>(
+      `
+        SELECT ${SESSION_COLUMNS}
+        FROM content.upload_sessions s
+        WHERE s.organization_id = $1
+          AND s.created_by = $2
+          AND s.state IN ('initiating', 'uploading')
+          AND s.expires_at > NOW()
+          AND NOT EXISTS (
+            SELECT 1
+            FROM content.upload_session_parts p
+            WHERE p.session_id = s.id
+              AND (
+                p.state = 'committed'
+                OR (p.state = 'uploading' AND p.lease_until > NOW())
+              )
+          )
+        ORDER BY s.created_at ASC
+      `,
+      [organizationId, createdBy],
+    );
+    return result.rows.map(mapSession);
+  }
+
   async getOwned(organizationId: string, createdBy: string, sessionId: string) {
     const result = await db.query<UploadSessionRow>(
       `SELECT ${SESSION_COLUMNS} FROM content.upload_sessions
@@ -259,10 +284,6 @@ export class PostgresUploadSessionRepository implements UploadSessionRepository 
       await client.query(
         `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
         [`upload-part-quota:${organizationId}:${createdBy}`],
-      );
-      await client.query(
-        `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-        [`upload-part-quota-org:${organizationId}`],
       );
       const selected = await client.query<UploadSessionRow>(
         `SELECT ${SESSION_COLUMNS} FROM content.upload_sessions

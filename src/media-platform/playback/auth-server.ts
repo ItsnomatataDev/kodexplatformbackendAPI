@@ -6,6 +6,12 @@ import {
 
 import { createHash } from 'node:crypto';
 import { verifyMediaEdgeRequest } from './edge-auth.js';
+import { verifyMediaIngestRequest } from './ingest-auth.js';
+import { createMediaIngestSigner, type MediaIngestSigner } from './ingest-signer.js';
+import {
+  createRedisIngestGrantStore,
+  type IngestGrantStore,
+} from './ingest-grant.js';
 import {
   createMediaOriginSigner,
   createMinioOriginClient,
@@ -60,11 +66,17 @@ function requestUri(
   return value;
 }
 
+export type MediaAuthIngest = {
+  signer: MediaIngestSigner;
+  grants: IngestGrantStore;
+};
+
 export function createMediaAuthServer(
   secret: string,
   originSigner?: MediaOriginSigner,
   expectedOrigin = 'http://minio:9000',
   grants?: PlaybackGrantStore,
+  ingest?: MediaAuthIngest,
 ) {
   if (!secret) {
     throw new Error(
@@ -75,6 +87,17 @@ export function createMediaAuthServer(
   return createServer({ requestTimeout: 10_000, headersTimeout: 5_000, maxHeaderSize: 8192 }, async (request, response) => {
     if (request.method !== 'GET') {
       send(response, 405);
+      return;
+    }
+
+    if (request.url === '/authorize-ingest') {
+      await authorizeIngest(
+        request,
+        response,
+        secret,
+        expectedOrigin,
+        ingest,
+      );
       return;
     }
 
@@ -100,25 +123,28 @@ export function createMediaAuthServer(
       return;
     }
 
-    if (grants) {
-      try {
-        const grant = await grants.get(verification.signature);
-        if (
-          !grant ||
-          grant.assetId !== verification.assetId ||
-          (grant.generation ?? undefined) !== verification.generation ||
-          grant.expiresAt <= Math.floor(Date.now() / 1000)
-        ) {
-          send(response, 403);
-          return;
-        }
-      } catch (error) {
-        send(
-          response,
-          error instanceof ServiceUnavailableError ? 503 : 403,
-        );
+    if (!grants) {
+      send(response, 503);
+      return;
+    }
+
+    try {
+      const grant = await grants.get(verification.signature);
+      if (
+        !grant ||
+        grant.assetId !== verification.assetId ||
+        (grant.generation ?? undefined) !== verification.generation ||
+        grant.expiresAt <= Math.floor(Date.now() / 1000)
+      ) {
+        send(response, 403);
         return;
       }
+    } catch (error) {
+      send(
+        response,
+        error instanceof ServiceUnavailableError ? 503 : 403,
+      );
+      return;
     }
 
     response.setHeader(
@@ -175,6 +201,71 @@ export function createMediaAuthServer(
   });
 }
 
+async function authorizeIngest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  secret: string,
+  expectedOrigin: string,
+  ingest?: MediaAuthIngest,
+) {
+  const uri = requestUri(request);
+  if (uri === null) {
+    send(response, 400);
+    return;
+  }
+
+  if (!ingest) {
+    send(response, 503);
+    return;
+  }
+
+  const verification = verifyMediaIngestRequest({ uri, secret });
+  if (!verification.valid) {
+    send(response, 403);
+    return;
+  }
+
+  try {
+    const grant = await ingest.grants.get(verification.signature);
+    if (
+      !grant ||
+      grant.sessionId !== verification.sessionId ||
+      grant.expiresAt <= Math.floor(Date.now() / 1000) ||
+      verification.partNumber > grant.expectedPartCount
+    ) {
+      send(response, 403);
+      return;
+    }
+
+    const originUrl = await ingest.signer.sign({
+      bucket: grant.bucket,
+      objectKey: grant.objectKey,
+      uploadId: grant.uploadId,
+      partNumber: verification.partNumber,
+    });
+    const parsedOriginUrl = new URL(originUrl);
+    if (
+      parsedOriginUrl.origin !== expectedOrigin ||
+      parsedOriginUrl.username !== '' ||
+      parsedOriginUrl.password !== '' ||
+      parsedOriginUrl.hash !== ''
+    ) {
+      throw new Error('Ingest signer returned an unexpected authority');
+    }
+
+    response.setHeader(
+      'X-Media-Origin-URI',
+      `${parsedOriginUrl.pathname}${parsedOriginUrl.search}`,
+    );
+    send(response, 204);
+  } catch (error) {
+    send(
+      response,
+      error instanceof ServiceUnavailableError ? 503 : 503,
+    );
+  }
+}
+
 function main(): void {
   const secret =
     process.env.MEDIA_PLAYBACK_SIGNING_SECRET ?? '';
@@ -229,11 +320,36 @@ function main(): void {
     rejectUnauthorized: true,
   });
 
+  const ingestAccessKey = process.env.MEDIA_INGEST_ACCESS_KEY ?? '';
+  const ingestSecretKey = process.env.MEDIA_INGEST_SECRET_KEY ?? '';
+  const ingest =
+    ingestAccessKey && ingestSecretKey
+      ? {
+          signer: createMediaIngestSigner({
+            client: createMinioOriginClient({
+              endpoint: minioEndpoint,
+              accessKey: ingestAccessKey,
+              secretKey: ingestSecretKey,
+            }),
+          }),
+          grants: createRedisIngestGrantStore({
+            appEnv,
+            host: process.env.REDIS_HOST ?? '127.0.0.1',
+            port: Number.isInteger(redisPort) ? redisPort : 6379,
+            username: process.env.REDIS_USERNAME || undefined,
+            password: process.env.REDIS_PASSWORD || undefined,
+            tls: process.env.REDIS_TLS === 'true',
+            rejectUnauthorized: true,
+          }),
+        }
+      : undefined;
+
   const server = createMediaAuthServer(
     secret,
     originSigner,
     'http://minio:9000',
     grants,
+    ingest,
   );
 
   server.listen(port, '0.0.0.0', () => {

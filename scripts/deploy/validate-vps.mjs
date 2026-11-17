@@ -15,6 +15,15 @@ export function validateVps(config) {
   requireValue(String(environment.PORT) === '3000', 'VPS API PORT must be 3000.');
   requireValue(environment.APP_ENV === 'staging' && environment.NODE_ENV === 'staging', 'VPS loopback topology requires the existing staging environment.');
   requireValue(!api.ports?.length, 'Host-network API must not declare Docker port publishing.');
+  const uploads = services['api-uploads'];
+  if (uploads) {
+    const uploadEnv = uploads.environment ?? {};
+    requireValue(uploads.network_mode === 'host', 'Upload API must retain host networking.');
+    requireValue(uploadEnv.HOST === '0.0.0.0', 'Upload API HOST must be 0.0.0.0.');
+    requireValue(String(uploadEnv.PORT) === '3002', 'Upload API PORT must be 3002.');
+    requireValue(uploadEnv.KODE_PROCESS_ROLE === 'uploads', 'Upload API must set KODE_PROCESS_ROLE=uploads.');
+    requireValue(!uploads.ports?.length, 'Host-network upload API must not declare Docker port publishing.');
+  }
   for (const [name, ports] of [['postgres', [5432]], ['redis', [6379]], ['minio', [9000, 9001]]]) {
     const published = services[name]?.ports ?? [];
     for (const target of ports) {

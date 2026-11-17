@@ -117,6 +117,7 @@ export function createWorkApp(
     | 'notifications'
     | 'tickets'
     | 'attendance'
+    | 'sendTicketEmail'
   > = {},
 ) {
   store.seedOrganizationMember({

@@ -6,8 +6,14 @@ import { assertAuthorized } from '../authorization/authorize.js';
 import { hasPermission } from '../authorization/permissions.js';
 import { requireOrganizationId } from '../authorization/organization.js';
 import { env } from '../config/env.js';
+import { logger } from '../config/logger.js';
 import { decodeStrictBase64 } from '../http/base64.js';
-import { ForbiddenError, NotFoundError, ValidationError } from '../http/errors.js';
+import {
+  ForbiddenError,
+  NotFoundError,
+  ServiceUnavailableError,
+  ValidationError,
+} from '../http/errors.js';
 import { FIELD_LIMITS } from '../http/limits.js';
 import { rateLimitWork } from '../http/work-rate-limit.js';
 import { streamStoredMedia, attachmentDisposition } from '../content/media-stream.js';
@@ -37,11 +43,20 @@ import {
   canSeeTicketWorkIntelligence,
   canTriggerMonthlyTicketReport,
 } from '../tickets/intelligence.js';
-import { sendAttendanceEmail } from '../email/attendance-mailer.js';
+import { sendAttendanceEmail, type SimpleEmail } from '../email/attendance-mailer.js';
+import type { NotificationStore } from '../notifications/store.js';
+import {
+  notifyTicketPublicComment,
+  notifyTicketRequester,
+  type TicketRequesterNotifyEvent,
+} from '../notifications/events.js';
+import { sendTicketFollowUp, TICKET_FOLLOW_UP_MAX_CHARS } from '../tickets/follow-up.js';
 
 export type TicketRouteDependencies = {
   store: TicketStore;
   files: FileStorage;
+  notifications?: NotificationStore;
+  sendEmail?: (message: SimpleEmail) => Promise<boolean>;
 };
 
 function serializeTicket(ticket: TicketRecord) {
@@ -150,7 +165,45 @@ function isAllowedTicketAttachment(contentType: string, filename: string) {
   ) {
     return true;
   }
-  return /\.(png|jpe?g|gif|webp|heic|heif|pdf|txt)$/i.test(filename);
+  return /\.(png|jpe?g|gif|webp|heic|heif|pdf|txt|docx|xlsx|pptx)$/i.test(filename);
+}
+
+function authorizeTicketFile(
+  auth: AuthContext,
+  action: 'read' | 'create' | 'delete',
+) {
+  const organizationId = requireOrganizationId(auth);
+  const preferred =
+    action === 'read'
+      ? 'tickets.read'
+      : action === 'create'
+        ? 'tickets.comment'
+        : 'tickets.attachments.delete';
+  const fallbacks =
+    action === 'read'
+      ? ['tickets.attachments.read']
+      : action === 'create'
+        ? ['tickets.attachments.create', 'tickets.update']
+        : ['tickets.update'];
+  if (auth.membership.isAdminRole) {
+    return organizationId;
+  }
+  if (
+    [preferred, ...fallbacks].some((candidate) =>
+      hasPermission(auth.membership.permissions, candidate),
+    )
+  ) {
+    return organizationId;
+  }
+  if (action === 'delete' && isTicketStaff(auth)) {
+    return organizationId;
+  }
+  assertAuthorized({
+    context: auth,
+    action: preferred,
+    resource: { type: 'ticket', organizationId },
+  });
+  return organizationId;
 }
 
 function authorizeTickets(auth: ReturnType<typeof getAuth>, action: string) {
@@ -208,6 +261,35 @@ function parsePriorityList(value: string | undefined): TicketPriority[] | undefi
     return undefined;
   }
   return value.split(',').map((item) => parsePriority(item.trim(), 'priority'));
+}
+
+async function notifyRequesterEvent(
+  dependencies: TicketRouteDependencies,
+  params: {
+    ticket: TicketRecord;
+    actorUserId: string;
+    actorEmail?: string | null;
+    event: TicketRequesterNotifyEvent;
+  },
+) {
+  if (!dependencies.notifications) {
+    return;
+  }
+  try {
+    await notifyTicketRequester({
+      notifications: dependencies.notifications,
+      sendEmail: dependencies.sendEmail ?? sendAttendanceEmail,
+      ticket: params.ticket,
+      actorUserId: params.actorUserId,
+      actorEmail: params.actorEmail,
+      event: params.event,
+    });
+  } catch (error) {
+    logger.warn(
+      { err: error, ticketId: params.ticket.id, event: params.event.kind },
+      'Failed to notify ticket requester',
+    );
+  }
 }
 
 export function createTicketRoutes(dependencies: TicketRouteDependencies) {
@@ -621,6 +703,15 @@ export function createTicketRoutes(dependencies: TicketRouteDependencies) {
       assignedTo,
     });
 
+    if (ticket.assignedTo) {
+      await notifyRequesterEvent(dependencies, {
+        ticket,
+        actorUserId: auth.actor.userId,
+        actorEmail: auth.actor.email,
+        event: { kind: 'assigned', technicianName: ticket.assignedName },
+      });
+    }
+
     return c.json({ ticket: serializeTicket(ticket) }, 201);
   });
 
@@ -746,6 +837,34 @@ export function createTicketRoutes(dependencies: TicketRouteDependencies) {
     if (!ticket) {
       throw new NotFoundError('TICKET_NOT_FOUND', 'The ticket was not found.');
     }
+    if (assignedTo && assignedTo !== existing.assignedTo) {
+      await notifyRequesterEvent(dependencies, {
+        ticket,
+        actorUserId: auth.actor.userId,
+        actorEmail: auth.actor.email,
+        event: { kind: 'assigned', technicianName: ticket.assignedName },
+      });
+    }
+    if (
+      nextStatus &&
+      nextStatus !== existing.status &&
+      nextStatus === 'waiting_for_requester'
+    ) {
+      await notifyRequesterEvent(dependencies, {
+        ticket,
+        actorUserId: auth.actor.userId,
+        actorEmail: auth.actor.email,
+        event: { kind: 'waiting_for_requester' },
+      });
+    }
+    if (nextStatus && nextStatus !== existing.status && nextStatus === 'resolved') {
+      await notifyRequesterEvent(dependencies, {
+        ticket,
+        actorUserId: auth.actor.userId,
+        actorEmail: auth.actor.email,
+        event: { kind: 'resolved' },
+      });
+    }
     return c.json({ ticket: serializeTicket(ticket) });
   });
 
@@ -784,13 +903,83 @@ export function createTicketRoutes(dependencies: TicketRouteDependencies) {
     if (!comment) {
       throw new NotFoundError('TICKET_NOT_FOUND', 'The ticket was not found.');
     }
+    if (dependencies.notifications && visibilityRaw === 'public') {
+      try {
+        await notifyTicketPublicComment({
+          notifications: dependencies.notifications,
+          sendEmail: dependencies.sendEmail ?? sendAttendanceEmail,
+          ticket: existing,
+          comment,
+          actorUserId: auth.actor.userId,
+          actorEmail: auth.actor.email,
+        });
+      } catch (error) {
+        logger.warn(
+          { err: error, ticketId, commentId: comment.id },
+          'Failed to notify ticket requester about a public comment',
+        );
+      }
+    }
     return c.json({ comment: serializeComment(comment) }, 201);
+  });
+
+  routes.post('/:ticketId/follow-up', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = authorizeTickets(auth, 'tickets.comment');
+    await rateLimitWork(c, 'mutation');
+    const ticketId = requireId(c.req.param('ticketId'), 'ticketId');
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
+    const existing = await dependencies.store.getById(organizationId, ticketId);
+    if (!existing || existing.userId !== auth.actor.userId) {
+      throw new NotFoundError('TICKET_NOT_FOUND', 'The ticket was not found.');
+    }
+    if (!dependencies.notifications) {
+      throw new ServiceUnavailableError('FOLLOW_UP_UNAVAILABLE', 'Follow-ups are not available.');
+    }
+    const message = readRequiredText(
+      body.message ?? body.body,
+      'message',
+      TICKET_FOLLOW_UP_MAX_CHARS,
+    );
+    const requesterName =
+      (await dependencies.notifications.getDisplayName(auth.actor.userId)) ??
+      existing.requesterName;
+    const { comment, emailed } = await sendTicketFollowUp({
+      notifications: dependencies.notifications,
+      sendEmail: dependencies.sendEmail ?? sendAttendanceEmail,
+      ticket: existing,
+      message,
+      requesterUserId: auth.actor.userId,
+      requesterName,
+      requesterEmail: auth.actor.email ?? existing.requesterEmail,
+      createComment: (commentBody) =>
+        dependencies.store.createComment({
+          organizationId,
+          ticketId,
+          authorId: auth.actor.userId,
+          body: commentBody,
+          visibility: 'public',
+        }),
+    });
+    return c.json(
+      {
+        followUp: {
+          ticketId,
+          technicianName: existing.assignedName,
+          emailed,
+          comment: comment ? serializeComment(comment) : null,
+        },
+      },
+      201,
+    );
   });
 
   routes.get('/:ticketId/attachments', async (c) => {
     const auth = getAuth(c);
     rejectIdentityOverrides(auth, c);
-    const organizationId = authorizeTickets(auth, 'tickets.attachments.read');
+    const organizationId = authorizeTicketFile(auth, 'read');
     const ticketId = requireId(c.req.param('ticketId'), 'ticketId');
     const existing = await dependencies.store.getById(organizationId, ticketId);
     if (!existing || !canAccessTicket(auth, existing)) {
@@ -806,7 +995,7 @@ export function createTicketRoutes(dependencies: TicketRouteDependencies) {
   routes.post('/:ticketId/attachments', async (c) => {
     const auth = getAuth(c);
     rejectIdentityOverrides(auth, c);
-    const organizationId = authorizeTickets(auth, 'tickets.attachments.create');
+    const organizationId = authorizeTicketFile(auth, 'create');
     await rateLimitWork(c, 'attachment');
     const ticketId = requireId(c.req.param('ticketId'), 'ticketId');
     const body = await readJson(c);
@@ -870,7 +1059,7 @@ export function createTicketRoutes(dependencies: TicketRouteDependencies) {
   routes.get('/:ticketId/attachments/:attachmentId', async (c) => {
     const auth = getAuth(c);
     rejectIdentityOverrides(auth, c);
-    const organizationId = authorizeTickets(auth, 'tickets.attachments.read');
+    const organizationId = authorizeTicketFile(auth, 'read');
     const ticketId = requireId(c.req.param('ticketId'), 'ticketId');
     const attachmentId = requireId(c.req.param('attachmentId'), 'attachmentId');
     const existing = await dependencies.store.getById(organizationId, ticketId);
@@ -890,7 +1079,7 @@ export function createTicketRoutes(dependencies: TicketRouteDependencies) {
   routes.get('/:ticketId/attachments/:attachmentId/content', async (c) => {
     const auth = getAuth(c);
     rejectIdentityOverrides(auth, c);
-    const organizationId = authorizeTickets(auth, 'tickets.attachments.read');
+    const organizationId = authorizeTicketFile(auth, 'read');
     const ticketId = requireId(c.req.param('ticketId'), 'ticketId');
     const attachmentId = requireId(c.req.param('attachmentId'), 'attachmentId');
     const existing = await dependencies.store.getById(organizationId, ticketId);
@@ -920,7 +1109,7 @@ export function createTicketRoutes(dependencies: TicketRouteDependencies) {
   routes.delete('/:ticketId/attachments/:attachmentId', async (c) => {
     const auth = getAuth(c);
     rejectIdentityOverrides(auth, c);
-    const organizationId = authorizeTickets(auth, 'tickets.attachments.delete');
+    const organizationId = authorizeTicketFile(auth, 'delete');
     await rateLimitWork(c, 'mutation');
     const ticketId = requireId(c.req.param('ticketId'), 'ticketId');
     const attachmentId = requireId(c.req.param('attachmentId'), 'attachmentId');

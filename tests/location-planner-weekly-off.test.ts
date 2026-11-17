@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { calendarDateKey } from '../src/location-planner/dates.js';
+import {
+  isLocationPlannerAdminRole,
+  isThreeLittleBirdsOffice,
+} from '../src/location-planner/tlb-office.js';
 import { expandWeeklyOffDates } from '../src/location-planner/weekly-off.js';
 
 test('expandWeeklyOffDates returns only matching weekdays', () => {
@@ -30,4 +34,15 @@ test('calendarDateKey keeps the local calendar day', () => {
 test('expandWeeklyOffDates rejects invalid weekday', () => {
   assert.deepEqual(expandWeeklyOffDates('2026-09-21', '2026-09-27', 7), []);
   assert.deepEqual(expandWeeklyOffDates('2026-09-21', '2026-09-27', -1), []);
+});
+
+test('planner people list is TLB office only and skips org admins', () => {
+  assert.equal(isThreeLittleBirdsOffice('three-little-birds'), true);
+  assert.equal(isThreeLittleBirdsOffice('tlb'), true);
+  assert.equal(isThreeLittleBirdsOffice('its-no-matata'), false);
+  assert.equal(isThreeLittleBirdsOffice('swtech', 'Shearwater'), false);
+  assert.equal(isThreeLittleBirdsOffice(null, 'Three Little Birds Victoria Falls'), true);
+  assert.equal(isLocationPlannerAdminRole('admin', false), true);
+  assert.equal(isLocationPlannerAdminRole('manager', true), true);
+  assert.equal(isLocationPlannerAdminRole('media_team', false), false);
 });

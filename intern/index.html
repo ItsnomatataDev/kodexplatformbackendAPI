@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kode intern desk</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4f1ea;
+        --card: #fffdf8;
+        --ink: #1c1917;
+        --muted: #57534e;
+        --line: #e7e0d4;
+        --accent: #0f766e;
+      }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+      }
+      main {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 48px 20px;
+      }
+      h1 {
+        font-size: 1.6rem;
+        margin: 0 0 8px;
+      }
+      p {
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .grid {
+        display: grid;
+        gap: 16px;
+        margin-top: 28px;
+      }
+      a.card {
+        display: block;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 20px 22px;
+        text-decoration: none;
+        color: inherit;
+      }
+      a.card:hover {
+        border-color: var(--accent);
+      }
+      .label {
+        font-size: 0.75rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--accent);
+        font-weight: 700;
+      }
+      h2 {
+        margin: 6px 0 8px;
+        font-size: 1.15rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Kode intern desk</h1>
+      <p>
+        Use these pages on the Ubuntu machine. You do not need SSH or the
+        terminal. This is a local copy, not the live VPS.
+      </p>
+      <div class="grid">
+        <a class="card" href="http://127.0.0.1:18080">
+          <div class="label">Tables</div>
+          <h2>Database browser</h2>
+          <p>
+            Click a schema, then a table. Read rows. Do not edit production-looking
+            data unless Thando asked you to.
+          </p>
+        </a>
+        <a class="card" href="http://127.0.0.1:9001">
+          <div class="label">Files</div>
+          <h2>MinIO console</h2>
+          <p>
+            Videos, images, documents. Open
+            <strong>content-review-assets</strong> for schedule media.
+          </p>
+        </a>
+      </div>
+    </main>
+  </body>
+</html>

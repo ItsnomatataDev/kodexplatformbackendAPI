@@ -383,6 +383,10 @@ export type ContentStore = {
     organizationId: string,
     mediaId: string,
   ): Promise<ContentClientMediaRecord>;
+  deleteScheduleAssetsByLibraryMediaId(
+    organizationId: string,
+    mediaId: string,
+  ): Promise<number>;
   countLibraryRefs(organizationId: string, mediaId: string): Promise<number>;
   countClientMediaUsingPath(
     organizationId: string,

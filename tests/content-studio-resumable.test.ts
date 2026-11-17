@@ -16,6 +16,7 @@ import type { MultipartFileStorage, MultipartPart } from '../src/files/storage.j
 import { bodyLimitMiddleware } from '../src/middleware/body-limit.js';
 import { errorHandler } from '../src/middleware/error-handler.js';
 import { MemoryRateLimiter } from '../src/auth/rate-limit.js';
+import { MemoryIngestGrantStore } from '../src/media-platform/playback/ingest-grant.js';
 import { authContext, orgA, orgB, userA } from './work-harness.js';
 
 const PART_BYTES = 8 * 1024 * 1024;
@@ -77,6 +78,22 @@ class FakeUploadRepository implements UploadSessionRepository {
     return session?.organizationId === organizationId && session.createdBy === createdBy
       ? session
       : null;
+  }
+
+  async listEmptyActiveOwned(organizationId: string, createdBy: string) {
+    return [...this.sessions.values()].filter((session) => {
+      if (session.organizationId !== organizationId || session.createdBy !== createdBy) {
+        return false;
+      }
+      if (session.state !== 'initiating' && session.state !== 'uploading') return false;
+      if (session.expiresAt.getTime() <= Date.now()) return false;
+      const parts = this.parts.get(session.id);
+      if (parts && parts.size > 0) return false;
+      for (const key of this.partClaims.keys()) {
+        if (key.startsWith(`${session.id}:`)) return false;
+      }
+      return true;
+    });
   }
 
   async claimPart(
@@ -789,6 +806,22 @@ test('serializes simultaneous completion and rejects cross-organization or non-o
   assert.equal(repository.sessions.get(session.sessionId)?.state, 'completed');
 });
 
+test('releases the caller empty uploads so a new session is not blocked by quota', async () => {
+  const { service, repository } = newService({
+    configOverrides: { maxActiveSessionsPerUser: 2 },
+  });
+  const first = await createUpload(service, PART_BYTES);
+  const second = await createUpload(service, PART_BYTES);
+  const third = await createUpload(service, PART_BYTES);
+  assert.equal(repository.sessions.get(first.sessionId)?.state, 'aborted');
+  assert.equal(repository.sessions.get(second.sessionId)?.state, 'aborted');
+  assert.equal(repository.sessions.get(third.sessionId)?.state, 'uploading');
+  const active = [...repository.sessions.values()].filter((session) =>
+    ['initiating', 'uploading'].includes(session.state),
+  );
+  assert.equal(active.length, 1);
+});
+
 test('cancels incomplete upload and expires abandoned sessions without deleting objects', async () => {
   const cancelled = newService();
   const cancelledSession = await createUpload(cancelled.service, PART_BYTES);
@@ -933,4 +966,26 @@ test('mounted session route hides sessions across organizations before storage a
   assert.equal(response.status, 404);
   assert.equal(targetLookups, 0);
   assert.equal(multipart.parts.size, 0);
+});
+
+test('exposes a signed ingest prefix when ingest grants are configured', async () => {
+  const grants = new MemoryIngestGrantStore();
+  const { service, repository } = newService({
+    configOverrides: {
+      ingest: {
+        publicBaseUrl: 'https://media.example.invalid',
+        secret: 'test-only-media-ingest-secret-value',
+        grants,
+      },
+    },
+  });
+  const session = await createUpload(service, PART_BYTES);
+  const prefix = session.ingest?.putUrlPrefix ?? '';
+  assert.ok(prefix.startsWith('https://media.example.invalid/ingest/v1/'));
+  assert.ok(prefix.includes(session.sessionId));
+  const stored = repository.sessions.get(session.sessionId);
+  assert.ok(stored?.providerUploadId);
+  const grant = await grants.get(prefix.split('/')[6]!);
+  assert.equal(grant?.sessionId, session.sessionId);
+  assert.equal(grant?.uploadId, stored.providerUploadId);
 });

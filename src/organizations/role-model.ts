@@ -38,6 +38,17 @@ export function isKodeLegacyRoleKey(
   return (KODE_LEGACY_ROLE_KEYS as readonly string[]).includes(roleKey);
 }
 
+export function isPrivilegedDirectoryRole(roleKey: string) {
+  return roleKey === 'admin' || roleKey === 'it';
+}
+
+export function isPublicSignupRole(role: {
+  roleKey: string;
+  isAdminRole: boolean;
+}) {
+  return !role.isAdminRole && !isPrivilegedDirectoryRole(role.roleKey);
+}
+
 export function pickDirectoryRoleKey(
   roles: Array<{
     roleKey: string;
@@ -50,7 +61,7 @@ export function pickDirectoryRoleKey(
   const requestedKey = requested?.trim().toLowerCase() ?? '';
   const pool = options.allowAdmin
     ? roles
-    : roles.filter((role) => !role.isAdminRole);
+    : roles.filter(isPublicSignupRole);
   if (requestedKey && isKodeOperatingRoleKey(requestedKey)) {
     const match = pool.find((role) => role.roleKey === requestedKey);
     if (match) return match.roleKey;

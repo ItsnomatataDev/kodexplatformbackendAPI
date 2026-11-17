@@ -142,6 +142,22 @@ export function createLocationPlannerRoutes(dependencies: LocationPlannerRouteDe
     }, 201);
   });
 
+  routes.delete('/off-days/:offDayId', async (c) => {
+    const auth = getAuth(c);
+    const organizationId = authorize(auth);
+    if (!isLocationPlannerStaff(auth)) throw new ForbiddenError('PLANNER_ADMIN_REQUIRED', 'Planner admin required.');
+    await dependencies.store.deleteOffDay(organizationId, requireUuidValue(c.req.param('offDayId'), 'offDayId'));
+    return c.json({ ok: true });
+  });
+
+  routes.delete('/weekly-off-days/:ruleId', async (c) => {
+    const auth = getAuth(c);
+    const organizationId = authorize(auth);
+    if (!isLocationPlannerStaff(auth)) throw new ForbiddenError('PLANNER_ADMIN_REQUIRED', 'Planner admin required.');
+    await dependencies.store.deactivateWeeklyOffDay(organizationId, requireUuidValue(c.req.param('ruleId'), 'ruleId'));
+    return c.json({ ok: true });
+  });
+
   routes.post('/fill-month', async (c) => {
     const auth = getAuth(c);
     const organizationId = authorize(auth);

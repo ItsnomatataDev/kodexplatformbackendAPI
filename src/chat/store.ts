@@ -70,6 +70,8 @@ export type ChatMessageRecord = {
   senderName?: string | null;
   senderEmail?: string | null;
   expiresAt?: Date | null;
+  /** Client-generated idempotency key when provided by the sender. */
+  clientMessageId?: string | null;
   reactions?: ChatReactionRecord[];
 };
 
@@ -125,6 +127,14 @@ export type SendMessageInput = {
   attachmentName?: string | null;
   metadata?: Record<string, unknown>;
   expiresAt?: Date | null;
+  /** Optional UUID from the client for idempotent retries. */
+  clientMessageId?: string | null;
+};
+
+export type SendMessageResult = {
+  message: ChatMessageRecord;
+  /** False when an identical clientMessageId retry returned the existing row. */
+  created: boolean;
 };
 
 export type CreateDirectConversationInput = {
@@ -157,6 +167,7 @@ export interface ChatStore {
   isMember(
     conversationId: string,
     userId: string,
+    organizationId?: string,
   ): Promise<boolean>;
   findOrCreateDirect(
     input: CreateDirectConversationInput,
@@ -169,7 +180,7 @@ export interface ChatStore {
     organizationId: string,
     messageId: string,
   ): Promise<ChatMessageRecord | null>;
-  sendMessage(input: SendMessageInput): Promise<ChatMessageRecord>;
+  sendMessage(input: SendMessageInput): Promise<SendMessageResult>;
   editMessage(input: {
     organizationId: string;
     messageId: string;
@@ -186,7 +197,7 @@ export interface ChatStore {
     conversationId: string;
     userId: string;
     messageId: string;
-  }): Promise<ChatMemberRecord>;
+  }): Promise<{ member: ChatMemberRecord; advanced: boolean }>;
   listReactions(messageId: string): Promise<ChatReactionRecord[]>;
   listReactionsForMessages(messageIds: string[]): Promise<ChatReactionRecord[]>;
   toggleReaction(input: {

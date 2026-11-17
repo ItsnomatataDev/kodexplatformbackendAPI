@@ -1,6 +1,11 @@
 import { listLimit, listOffset, pageOf } from '../db/list-bounds.js';
 import { db } from '../db/pool.js';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../http/errors.js';
+import {
+  assertClientMessageRetryAllowed,
+  normalizeClientMessagePayload,
+} from './client-message-idempotency.js';
+import { shouldAdvanceReadCursor } from './read-cursor.js';
 import type {
   ChatConversationRecord,
   ChatMemberRecord,
@@ -12,6 +17,7 @@ import type {
   ListConversationsInput,
   ListMessagesInput,
   SendMessageInput,
+  SendMessageResult,
 } from './store.js';
 
 type ConversationRow = {
@@ -66,6 +72,7 @@ type MessageRow = {
   sender_name?: string | null;
   sender_email?: string | null;
   expires_at?: Date | null;
+  client_message_id?: string | null;
 };
 
 type ReactionRow = {
@@ -138,6 +145,7 @@ function mapMessage(row: MessageRow): ChatMessageRecord {
     senderName: row.sender_name ?? null,
     senderEmail: row.sender_email ?? null,
     expiresAt: row.expires_at ?? null,
+    clientMessageId: row.client_message_id ?? null,
   };
 }
 
@@ -187,6 +195,7 @@ export class PostgresChatStore implements ChatStore {
             WHERE m.conversation_id = c.id
               AND m.is_deleted = FALSE
               AND m.sender_id <> $2
+              AND (m.expires_at IS NULL OR m.expires_at > NOW())
               AND (
                 cm.last_read_at IS NULL
                 OR m.created_at > cm.last_read_at
@@ -272,17 +281,62 @@ export class PostgresChatStore implements ChatStore {
     return result.rows.map(mapMember);
   }
 
-  async isMember(conversationId: string, userId: string) {
+  async isMember(
+    conversationId: string,
+    userId: string,
+    organizationId?: string,
+  ) {
     const result = await db.query<{ ok: number }>(
+      organizationId
+        ? `
+        SELECT 1 AS ok
+        FROM chat.conversation_members m
+        INNER JOIN chat.conversations c ON c.id = m.conversation_id
+        WHERE m.conversation_id = $1
+          AND m.user_id = $2
+          AND c.organization_id = $3
+        LIMIT 1
       `
+        : `
         SELECT 1 AS ok
         FROM chat.conversation_members
         WHERE conversation_id = $1 AND user_id = $2
         LIMIT 1
       `,
-      [conversationId, userId],
+      organizationId
+        ? [conversationId, userId, organizationId]
+        : [conversationId, userId],
     );
     return Boolean(result.rows[0]);
+  }
+
+  private async assertActiveOrgMembers(
+    client: {
+      query: (
+        sql: string,
+        params?: unknown[],
+      ) => Promise<{ rows: Array<{ user_id: string }> }>;
+    },
+    organizationId: string,
+    userIds: string[],
+  ) {
+    const unique = [...new Set(userIds)];
+    const result = await client.query(
+      `
+        SELECT user_id
+        FROM organizations.memberships
+        WHERE organization_id = $1
+          AND status = 'active'
+          AND user_id = ANY($2::uuid[])
+      `,
+      [organizationId, unique],
+    );
+    if (result.rows.length !== unique.length) {
+      throw new ValidationError(
+        'Every chat member must be an active organization member.',
+        { field: 'memberUserIds' },
+      );
+    }
   }
 
   async findOrCreateDirect(input: CreateDirectConversationInput) {
@@ -315,6 +369,10 @@ export class PostgresChatStore implements ChatStore {
     const client = await db.connect();
     try {
       await client.query('BEGIN');
+      await this.assertActiveOrgMembers(client, input.organizationId, [
+        input.createdBy,
+        input.otherUserId,
+      ]);
       const created = await client.query<ConversationRow>(
         `
           INSERT INTO chat.conversations (
@@ -390,6 +448,11 @@ export class PostgresChatStore implements ChatStore {
     const client = await db.connect();
     try {
       await client.query('BEGIN');
+      await this.assertActiveOrgMembers(
+        client,
+        input.organizationId,
+        memberIds,
+      );
       const created = await client.query<ConversationRow>(
         `
           INSERT INTO chat.conversations (
@@ -475,7 +538,7 @@ export class PostgresChatStore implements ChatStore {
     return result.rows[0] ? mapMessage(result.rows[0]) : null;
   }
 
-  async sendMessage(input: SendMessageInput) {
+  async sendMessage(input: SendMessageInput): Promise<SendMessageResult> {
     const messageType = input.messageType ?? 'text';
     const body = input.body?.trim() || null;
     if (
@@ -486,62 +549,199 @@ export class PostgresChatStore implements ChatStore {
       throw new ValidationError('Message cannot be empty.', { field: 'body' });
     }
 
+    const clientMessageId = input.clientMessageId?.trim() || null;
+    const incomingPayload = normalizeClientMessagePayload({
+      body,
+      messageType,
+      replyToMessageId: input.replyToMessageId,
+      attachmentUrl: input.attachmentUrl,
+      attachmentName: input.attachmentName,
+    });
+
     const client = await db.connect();
     try {
       await client.query('BEGIN');
-      const inserted = await client.query<MessageRow>(
-        `
-          INSERT INTO chat.messages (
-            conversation_id,
-            organization_id,
-            sender_id,
-            body,
-            message_type,
-            reply_to_message_id,
-            attachment_url,
-            attachment_name,
-            metadata,
-            expires_at
+
+      const insertParams = [
+        input.conversationId,
+        input.organizationId,
+        input.senderId,
+        body,
+        messageType,
+        input.replyToMessageId ?? null,
+        input.attachmentUrl ?? null,
+        input.attachmentName ?? null,
+        JSON.stringify(input.metadata ?? {}),
+        input.expiresAt ?? null,
+        clientMessageId,
+      ] as const;
+
+      const inserted = clientMessageId
+        ? await client.query<MessageRow>(
+            `
+              INSERT INTO chat.messages (
+                conversation_id,
+                organization_id,
+                sender_id,
+                body,
+                message_type,
+                reply_to_message_id,
+                attachment_url,
+                attachment_name,
+                metadata,
+                expires_at,
+                client_message_id
+              )
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
+              ON CONFLICT (conversation_id, sender_id, client_message_id)
+                WHERE client_message_id IS NOT NULL
+              DO NOTHING
+              RETURNING *
+            `,
+            [...insertParams],
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
-          RETURNING *
-        `,
-        [
-          input.conversationId,
+        : await client.query<MessageRow>(
+            `
+              INSERT INTO chat.messages (
+                conversation_id,
+                organization_id,
+                sender_id,
+                body,
+                message_type,
+                reply_to_message_id,
+                attachment_url,
+                attachment_name,
+                metadata,
+                expires_at,
+                client_message_id
+              )
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11)
+              RETURNING *
+            `,
+            [...insertParams],
+          );
+
+      if (inserted.rows[0]) {
+        await client.query(
+          `
+            UPDATE chat.conversations
+            SET last_message_at = $2, updated_at = NOW()
+            WHERE id = $1
+          `,
+          [input.conversationId, inserted.rows[0].created_at],
+        );
+        await client.query('COMMIT');
+        const message = await this.getMessage(
           input.organizationId,
-          input.senderId,
-          body,
-          messageType,
-          input.replyToMessageId ?? null,
-          input.attachmentUrl ?? null,
-          input.attachmentName ?? null,
-          JSON.stringify(input.metadata ?? {}),
-          input.expiresAt ?? null,
-        ],
-      );
-      await client.query(
+          inserted.rows[0].id,
+        );
+        if (!message) {
+          throw new NotFoundError('CHAT_MESSAGE_MISSING', 'Message not found after insert.');
+        }
+        return { message, created: true };
+      }
+
+    
+      if (!clientMessageId) {
+        throw new ConflictError(
+          'CHAT_MESSAGE_INSERT_FAILED',
+          'Could not persist chat message.',
+        );
+      }
+
+      const existingResult = await client.query<MessageRow>(
         `
-          UPDATE chat.conversations
-          SET last_message_at = $2, updated_at = NOW()
-          WHERE id = $1
+          SELECT
+            m.*,
+            p.full_name AS sender_name,
+            u.email AS sender_email
+          FROM chat.messages m
+          JOIN identity.users u ON u.id = m.sender_id
+          LEFT JOIN identity.user_profiles p ON p.user_id = m.sender_id
+          WHERE m.conversation_id = $1
+            AND m.sender_id = $2
+            AND m.client_message_id = $3
+          LIMIT 1
         `,
-        [input.conversationId, inserted.rows[0]!.created_at],
+        [input.conversationId, input.senderId, clientMessageId],
       );
       await client.query('COMMIT');
-      const message = await this.getMessage(
-        input.organizationId,
-        inserted.rows[0]!.id,
-      );
-      if (!message) {
-        throw new NotFoundError('CHAT_MESSAGE_MISSING', 'Message not found after insert.');
+
+      const existingRow = existingResult.rows[0];
+      if (!existingRow) {
+        throw new ConflictError(
+          'CHAT_MESSAGE_INSERT_FAILED',
+          'Could not persist chat message.',
+        );
       }
-      return message;
+
+      const existing = mapMessage(existingRow);
+      assertClientMessageRetryAllowed(
+        normalizeClientMessagePayload(existing),
+        incomingPayload,
+      );
+      return { message: existing, created: false };
     } catch (error) {
-      await client.query('ROLLBACK');
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+      }
+
+      if (
+        error &&
+        typeof error === 'object' &&
+        (error as { code?: string }).code === '23505' &&
+        clientMessageId
+      ) {
+        const existing = await this.findMessageByClientId({
+          organizationId: input.organizationId,
+          conversationId: input.conversationId,
+          senderId: input.senderId,
+          clientMessageId,
+        });
+        if (existing) {
+          assertClientMessageRetryAllowed(
+            normalizeClientMessagePayload(existing),
+            incomingPayload,
+          );
+          return { message: existing, created: false };
+        }
+      }
       throw error;
     } finally {
       client.release();
     }
+  }
+
+  private async findMessageByClientId(input: {
+    organizationId: string;
+    conversationId: string;
+    senderId: string;
+    clientMessageId: string;
+  }) {
+    const result = await db.query<MessageRow>(
+      `
+        SELECT
+          m.*,
+          p.full_name AS sender_name,
+          u.email AS sender_email
+        FROM chat.messages m
+        JOIN identity.users u ON u.id = m.sender_id
+        LEFT JOIN identity.user_profiles p ON p.user_id = m.sender_id
+        WHERE m.organization_id = $1
+          AND m.conversation_id = $2
+          AND m.sender_id = $3
+          AND m.client_message_id = $4
+        LIMIT 1
+      `,
+      [
+        input.organizationId,
+        input.conversationId,
+        input.senderId,
+        input.clientMessageId,
+      ],
+    );
+    return result.rows[0] ? mapMessage(result.rows[0]) : null;
   }
 
   async editMessage(input: {
@@ -619,25 +819,93 @@ export class PostgresChatStore implements ChatStore {
     userId: string;
     messageId: string;
   }) {
-    const result = await db.query<MemberRow>(
+    const messageResult = await db.query<{
+      id: string;
+      conversation_id: string;
+      created_at: Date;
+      is_deleted: boolean;
+    }>(
       `
-        UPDATE chat.conversation_members
-        SET
-          last_read_message_id = $3,
-          last_read_at = NOW()
+        SELECT id, conversation_id, created_at, is_deleted
+        FROM chat.messages
+        WHERE id = $1
+        LIMIT 1
+      `,
+      [input.messageId],
+    );
+    const target = messageResult.rows[0];
+    if (!target || target.conversation_id !== input.conversationId) {
+      throw new ValidationError('Message is not part of this conversation.', {
+        field: 'messageId',
+      });
+    }
+
+    const memberResult = await db.query<MemberRow>(
+      `
+        SELECT *
+        FROM chat.conversation_members
         WHERE conversation_id = $1
           AND user_id = $2
-        RETURNING *
+        LIMIT 1
       `,
-      [input.conversationId, input.userId, input.messageId],
+      [input.conversationId, input.userId],
     );
-    if (!result.rows[0]) {
+    const current = memberResult.rows[0];
+    if (!current) {
       throw new NotFoundError(
         'CHAT_MEMBER_NOT_FOUND',
         'Conversation membership not found.',
       );
     }
-    return mapMember(result.rows[0]);
+
+    let cursorAt: Date | null = current.last_read_at;
+    if (current.last_read_message_id) {
+      const cursorMessage = await db.query<{ created_at: Date }>(
+        `
+          SELECT created_at
+          FROM chat.messages
+          WHERE id = $1
+          LIMIT 1
+        `,
+        [current.last_read_message_id],
+      );
+      if (cursorMessage.rows[0]) {
+        cursorAt = cursorMessage.rows[0].created_at;
+      }
+    }
+
+    const advanced = shouldAdvanceReadCursor({
+      currentCursorAt: cursorAt,
+      currentMessageId: current.last_read_message_id,
+      targetMessageId: target.id,
+      targetCreatedAt: target.created_at,
+    });
+
+    if (!advanced) {
+      return { member: mapMember(current), advanced: false };
+    }
+
+    // Anchor last_read_at to the message timestamp (not NOW()) so unread counts
+    // stay consistent with the message cursor after clock skew / delayed marks.
+    const updated = await db.query<MemberRow>(
+      `
+        UPDATE chat.conversation_members
+        SET
+          last_read_message_id = $3,
+          last_read_at = $4
+        WHERE conversation_id = $1
+          AND user_id = $2
+        RETURNING *
+      `,
+      [input.conversationId, input.userId, target.id, target.created_at],
+    );
+    if (!updated.rows[0]) {
+      throw new NotFoundError(
+        'CHAT_MEMBER_NOT_FOUND',
+        'Conversation membership not found.',
+      );
+    }
+    return { member: mapMember(updated.rows[0]), advanced: true };
   }
 
   async listReactions(messageId: string) {
@@ -916,7 +1184,11 @@ export class PostgresChatStore implements ChatStore {
     conversationId: string;
     requesterUserId: string;
   }) {
-    const member = await this.isMember(input.conversationId, input.requesterUserId);
+    const member = await this.isMember(
+      input.conversationId,
+      input.requesterUserId,
+      input.organizationId,
+    );
     if (!member) {
       throw new ForbiddenError(
         'CHAT_NOT_A_MEMBER',
@@ -957,10 +1229,12 @@ export class PostgresChatStore implements ChatStore {
     const actorMember = await this.isMember(
       input.conversationId,
       input.actorUserId,
+      input.organizationId,
     );
     const targetMember = await this.isMember(
       input.conversationId,
       input.targetUserId,
+      input.organizationId,
     );
     if (!actorMember || !targetMember) {
       throw new ForbiddenError(

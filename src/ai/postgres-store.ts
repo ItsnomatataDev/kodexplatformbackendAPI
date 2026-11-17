@@ -394,11 +394,11 @@ export class PostgresAiStore {
     };
   }
 
-  async getThread(organizationId: string, threadId: string) {
+  async getThread(organizationId: string, userId: string, threadId: string) {
     const result = await db.query(
       `SELECT * FROM ai.chat_threads
-       WHERE organization_id = $1 AND id = $2`,
-      [organizationId, threadId],
+       WHERE organization_id = $1 AND user_id = $2 AND id = $3`,
+      [organizationId, userId, threadId],
     );
     const row = result.rows[0];
     if (!row) {
@@ -436,6 +436,7 @@ export class PostgresAiStore {
 
   async updateThread(
     organizationId: string,
+    userId: string,
     threadId: string,
     patch: {
       title?: string;
@@ -444,18 +445,19 @@ export class PostgresAiStore {
       projectId?: string | null;
     },
   ) {
-    const current = await this.getThread(organizationId, threadId);
+    const current = await this.getThread(organizationId, userId, threadId);
     const result = await db.query(
       `UPDATE ai.chat_threads SET
-         title = $3,
-         metadata = $4::jsonb,
-         assistant_id = $5,
-         project_id = $6,
+         title = $4,
+         metadata = $5::jsonb,
+         assistant_id = $6,
+         project_id = $7,
          updated_at = NOW()
-       WHERE organization_id = $1 AND id = $2
+       WHERE organization_id = $1 AND user_id = $2 AND id = $3
        RETURNING *`,
       [
         organizationId,
+        userId,
         threadId,
         patch.title ?? current.title,
         JSON.stringify(patch.metadata ?? current.metadata),
@@ -465,15 +467,18 @@ export class PostgresAiStore {
         patch.projectId === undefined ? current.project_id : patch.projectId,
       ],
     );
+    if (!result.rows[0]) {
+      throw new NotFoundError('AI_THREAD_NOT_FOUND', 'Chat thread not found.');
+    }
     return mapThread(result.rows[0]);
   }
 
-  async deleteThread(organizationId: string, threadId: string) {
+  async deleteThread(organizationId: string, userId: string, threadId: string) {
     const result = await db.query(
       `DELETE FROM ai.chat_threads
-       WHERE organization_id = $1 AND id = $2
+       WHERE organization_id = $1 AND user_id = $2 AND id = $3
        RETURNING id`,
-      [organizationId, threadId],
+      [organizationId, userId, threadId],
     );
     if (!result.rows[0]) {
       throw new NotFoundError('AI_THREAD_NOT_FOUND', 'Chat thread not found.');
@@ -482,16 +487,31 @@ export class PostgresAiStore {
 
   async listMessages(
     organizationId: string,
+    userId: string,
     threadId: string,
     options?: { limit?: number },
   ) {
-    await this.getThread(organizationId, threadId);
-    const limit = Math.min(Math.max(options?.limit ?? 100, 1), 500);
+    return this.listRecentMessages(organizationId, userId, threadId, {
+      limit: options?.limit ?? 100,
+    });
+  }
+
+  async listRecentMessages(
+    organizationId: string,
+    userId: string,
+    threadId: string,
+    options?: { limit?: number },
+  ) {
+    await this.getThread(organizationId, userId, threadId);
+    const limit = Math.min(Math.max(options?.limit ?? 40, 1), 500);
     const result = await db.query(
-      `SELECT * FROM ai.chat_messages
-       WHERE organization_id = $1 AND thread_id = $2
-       ORDER BY created_at ASC
-       LIMIT $3`,
+      `SELECT * FROM (
+         SELECT * FROM ai.chat_messages
+         WHERE organization_id = $1 AND thread_id = $2
+         ORDER BY created_at DESC, id DESC
+         LIMIT $3
+       ) recent
+       ORDER BY created_at ASC, id ASC`,
       [organizationId, threadId, limit],
     );
     return result.rows.map((row) => mapMessage(row));
@@ -499,6 +519,7 @@ export class PostgresAiStore {
 
   async addMessage(
     organizationId: string,
+    userId: string,
     threadId: string,
     input: {
       role: 'user' | 'assistant' | 'system';
@@ -507,7 +528,7 @@ export class PostgresAiStore {
       metadata?: Record<string, unknown>;
     },
   ) {
-    await this.getThread(organizationId, threadId);
+    await this.getThread(organizationId, userId, threadId);
     const result = await db.query(
       `INSERT INTO ai.chat_messages (
          organization_id, thread_id, role, content, attachments, metadata

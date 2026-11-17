@@ -1033,6 +1033,22 @@ export class PostgresContentStore implements ContentStore {
     return mapMedia(result.rows[0]);
   }
 
+  async deleteScheduleAssetsByLibraryMediaId(
+    organizationId: string,
+    mediaId: string,
+  ) {
+    const result = await this.connection.query<{ count: string }>(
+      `WITH removed AS (
+         DELETE FROM content.schedule_assets
+         WHERE organization_id = $1 AND library_media_id = $2
+         RETURNING id
+       )
+       SELECT COUNT(*)::text AS count FROM removed`,
+      [organizationId, mediaId],
+    );
+    return Number(result.rows[0]?.count ?? 0);
+  }
+
   async countLibraryRefs(organizationId: string, mediaId: string) {
     const result = await this.connection.query<{ count: string }>(
       `SELECT COUNT(*)::text AS count FROM content.schedule_assets

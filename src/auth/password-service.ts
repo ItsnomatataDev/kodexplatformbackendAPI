@@ -241,7 +241,9 @@ export class PasswordService {
     if (
       !identity ||
       identity.deletedAt ||
-      identity.accountStatus === 'deleted'
+      identity.accountStatus === 'deleted' ||
+      identity.accountStatus === 'suspended' ||
+      identity.accountStatus === 'rejected'
     ) {
       throw new UnauthorizedError(
         'INVALID_RESET_TOKEN',

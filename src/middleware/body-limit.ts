@@ -10,7 +10,7 @@ export function isSecurityIngestPath(pathname: string) {
   return pathname === '/api/security/ingest' || pathname === '/api/security/ingest/';
 }
 
-/** Raw binary uploads stream to MinIO; do not buffer/decode them. */
+/** Raw binary uploads stream/buffer in-route; do not UTF-8-decode them here. */
 export function isContentStudioBinaryUploadPath(pathname: string) {
   return (
     /^\/api\/content-studio\/uploads\/sessions\/[^/]+\/parts\/\d+\/?$/.test(pathname) ||
@@ -19,7 +19,8 @@ export function isContentStudioBinaryUploadPath(pathname: string) {
     /^\/api\/documents\/(payslip-batches\/[^/]+\/items\/binary|upload\/binary)\/?$/.test(
       pathname,
     ) ||
-    /^\/api\/stock\/assets\/[^/]+\/images\/(asset|site)\/binary\/?$/.test(pathname)
+    /^\/api\/stock\/assets\/[^/]+\/images\/(asset|site)\/binary\/?$/.test(pathname) ||
+    /^\/api\/organization\/branding\/assets\/binary\/?$/.test(pathname)
   );
 }
 

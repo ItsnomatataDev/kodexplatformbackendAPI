@@ -1,10 +1,11 @@
 import { Hono } from 'hono';
 import { getAuth } from '../auth/middleware.js';
 import { env } from '../config/env.js';
+import { logger } from '../config/logger.js';
 import { streamStoredMedia } from '../content/media-stream.js';
 import type { FileStorage } from '../files/storage.js';
-import { ValidationError } from '../http/errors.js';
-import { llmChatCompletions, llmChatText } from '../kodex/llm-client.js';
+import { AppError, ServiceUnavailableError, ValidationError } from '../http/errors.js';
+import { llmChatCompletions } from '../kodex/llm-client.js';
 import { requireProductOrg } from '../products/staff.js';
 import {
   readJson,
@@ -13,12 +14,79 @@ import {
   requireUuidValue,
 } from '../work/http.js';
 import type { PostgresAiStore } from '../ai/postgres-store.js';
+import {
+  AI_INFERENCE_HISTORY_LIMIT,
+  AI_MESSAGE_PAGE_LIMIT,
+  clampMessageLimit,
+  coalesceAiThreadWork,
+  extractAssistantReply,
+  inferenceTurnsFromHistory,
+  shouldReusePendingUserTurn,
+  trustedSystemPrompt,
+  type InferenceChatMessage,
+} from '../ai/conversation.js';
+import { buildGatewayChatMessages } from '../ai/gateway-context.js';
+import { createKodexAiGatewayClient } from '../ai-gateway/client.js';
+import { isKodexAiWorkspaceGatewayConfigured } from '../ai-gateway/config.js';
 import { readListQuery } from '../http/list-query.js';
+
+export type WorkspaceGatewayChat = {
+  enabled: boolean;
+  chatMessages: (input: {
+    messages: InferenceChatMessage[];
+  }) => Promise<{ message: string }>;
+};
 
 export type AiRouteDependencies = {
   store: PostgresAiStore;
   files: FileStorage;
+  llmChatCompletions?: typeof llmChatCompletions;
+  workspaceGatewayChat?: WorkspaceGatewayChat;
 };
+
+function defaultWorkspaceGatewayChat(): WorkspaceGatewayChat {
+  const config = env.kodexAiGateway;
+  if (!config.workspaceChatEnabled) {
+    return {
+      enabled: false,
+      chatMessages: async () => {
+        throw new ServiceUnavailableError(
+          'KODEX_AI_GATEWAY_NOT_CONFIGURED',
+          'AI is temporarily unavailable. Please try again.',
+        );
+      },
+    };
+  }
+  if (!isKodexAiWorkspaceGatewayConfigured(config)) {
+    return {
+      enabled: true,
+      chatMessages: async () => {
+        throw new ServiceUnavailableError(
+          'KODEX_AI_GATEWAY_NOT_CONFIGURED',
+          'AI is temporarily unavailable. Please try again.',
+        );
+      },
+    };
+  }
+  const client = createKodexAiGatewayClient({
+    config,
+    logger: (event) => {
+      logger.info(
+        {
+          event: event.event,
+          operation: event.operation,
+          status: event.status,
+          code: event.code,
+        },
+        'kodex ai gateway',
+      );
+    },
+  });
+  return {
+    enabled: true,
+    chatMessages: (input) => client.chatMessages(input),
+  };
+}
 
 function authorize(auth: ReturnType<typeof getAuth>) {
   return requireProductOrg(auth);
@@ -37,8 +105,21 @@ function aiMediaProxyUrl(objectKey: string) {
   return `/api/ai/media?key=${encodeURIComponent(objectKey)}`;
 }
 
+function throwInferenceUnavailable(error: unknown): never {
+  logger.warn(
+    { errName: error instanceof Error ? error.name : 'unknown' },
+    'AI inference failed',
+  );
+  throw new ServiceUnavailableError(
+    'AI_INFERENCE_UNAVAILABLE',
+    'AI is temporarily unavailable. Please try again.',
+  );
+}
+
 export function createAiRoutes(dependencies: AiRouteDependencies) {
   const routes = new Hono();
+  const workspaceGateway =
+    dependencies.workspaceGatewayChat ?? defaultWorkspaceGatewayChat();
 
   // --- Assistants ---
 
@@ -245,7 +326,11 @@ export function createAiRoutes(dependencies: AiRouteDependencies) {
     const auth = getAuth(c);
     const organizationId = authorize(auth);
     const threadId = requireUuidValue(c.req.param('threadId'), 'threadId');
-    const thread = await dependencies.store.getThread(organizationId, threadId);
+    const thread = await dependencies.store.getThread(
+      organizationId,
+      auth.actor.userId,
+      threadId,
+    );
     return c.json({ thread, conversation: thread });
   });
 
@@ -254,18 +339,23 @@ export function createAiRoutes(dependencies: AiRouteDependencies) {
     const organizationId = authorize(auth);
     const threadId = requireUuidValue(c.req.param('threadId'), 'threadId');
     const body = await readJson(c);
-    const thread = await dependencies.store.updateThread(organizationId, threadId, {
-      title:
-        body.title === undefined
-          ? undefined
-          : (readOptionalString(body.title, 'title', 300) ?? undefined),
-      metadata:
-        body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
-          ? (body.metadata as Record<string, unknown>)
-          : undefined,
-      assistantId: (body.assistantId ?? body.assistant_id) as string | null | undefined,
-      projectId: (body.projectId ?? body.project_id) as string | null | undefined,
-    });
+    const thread = await dependencies.store.updateThread(
+      organizationId,
+      auth.actor.userId,
+      threadId,
+      {
+        title:
+          body.title === undefined
+            ? undefined
+            : (readOptionalString(body.title, 'title', 300) ?? undefined),
+        metadata:
+          body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+            ? (body.metadata as Record<string, unknown>)
+            : undefined,
+        assistantId: (body.assistantId ?? body.assistant_id) as string | null | undefined,
+        projectId: (body.projectId ?? body.project_id) as string | null | undefined,
+      },
+    );
     return c.json({ thread, conversation: thread });
   });
 
@@ -273,7 +363,11 @@ export function createAiRoutes(dependencies: AiRouteDependencies) {
     const auth = getAuth(c);
     const organizationId = authorize(auth);
     const threadId = requireUuidValue(c.req.param('threadId'), 'threadId');
-    await dependencies.store.deleteThread(organizationId, threadId);
+    await dependencies.store.deleteThread(
+      organizationId,
+      auth.actor.userId,
+      threadId,
+    );
     return c.body(null, 204);
   });
 
@@ -281,10 +375,18 @@ export function createAiRoutes(dependencies: AiRouteDependencies) {
     const auth = getAuth(c);
     const organizationId = authorize(auth);
     const threadId = requireUuidValue(c.req.param('threadId'), 'threadId');
-    const limit = Number(c.req.query('limit') ?? 100);
-    const messages = await dependencies.store.listMessages(organizationId, threadId, {
-      limit: Number.isFinite(limit) ? limit : 100,
-    });
+    const limit = Number(c.req.query('limit') ?? AI_MESSAGE_PAGE_LIMIT);
+    const messages = await dependencies.store.listMessages(
+      organizationId,
+      auth.actor.userId,
+      threadId,
+      {
+        limit: clampMessageLimit(
+          Number.isFinite(limit) ? limit : AI_MESSAGE_PAGE_LIMIT,
+          AI_MESSAGE_PAGE_LIMIT,
+        ),
+      },
+    );
     return c.json({ messages });
   });
 
@@ -293,20 +395,25 @@ export function createAiRoutes(dependencies: AiRouteDependencies) {
     const organizationId = authorize(auth);
     const threadId = requireUuidValue(c.req.param('threadId'), 'threadId');
     const body = await readJson(c);
-    const roleRaw = String(body.role ?? 'user');
-    if (roleRaw !== 'user' && roleRaw !== 'assistant' && roleRaw !== 'system') {
-      throw new ValidationError('role must be user, assistant, or system.');
+    const roleRaw = String(body.role ?? 'user').toLowerCase();
+    if (roleRaw !== 'user') {
+      throw new ValidationError('Only user messages can be created by the client.');
     }
     const content = readRequiredText(body.content, 'content', 50_000);
-    const message = await dependencies.store.addMessage(organizationId, threadId, {
-      role: roleRaw,
-      content,
-      attachments: Array.isArray(body.attachments) ? body.attachments : [],
-      metadata:
-        body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
-          ? (body.metadata as Record<string, unknown>)
-          : {},
-    });
+    const message = await dependencies.store.addMessage(
+      organizationId,
+      auth.actor.userId,
+      threadId,
+      {
+        role: 'user',
+        content,
+        attachments: Array.isArray(body.attachments) ? body.attachments : [],
+        metadata:
+          body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+            ? (body.metadata as Record<string, unknown>)
+            : {},
+      },
+    );
     return c.json({ message }, 201);
   });
 
@@ -315,12 +422,23 @@ export function createAiRoutes(dependencies: AiRouteDependencies) {
   routes.post('/chat', async (c) => {
     const auth = getAuth(c);
     const organizationId = authorize(auth);
+    const userId = auth.actor.userId;
     const body = await readJson(c);
     const message = readRequiredText(body.message, 'message', 50_000);
     let threadId = (body.threadId ?? body.conversationId ?? body.conversation_id ?? null) as
       | string
       | null;
     const assistantId = (body.assistantId ?? body.assistant_id ?? null) as string | null;
+    const clientMessageId =
+      readOptionalString(
+        body.clientMessageId ?? body.client_message_id,
+        'clientMessageId',
+        120,
+      ) ?? null;
+    const requestMetadata =
+      body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+        ? (body.metadata as Record<string, unknown>)
+        : {};
 
     let assistant = null as Awaited<ReturnType<PostgresAiStore['getAssistant']>> | null;
     if (assistantId) {
@@ -328,102 +446,115 @@ export function createAiRoutes(dependencies: AiRouteDependencies) {
     }
 
     if (!threadId) {
-      const thread = await dependencies.store.createThread(
-        organizationId,
-        auth.actor.userId,
-        {
-          title: message.slice(0, 80),
-          assistantId: assistant?.id ?? null,
-          projectId: (body.projectId ?? body.project_id ?? null) as string | null,
-          metadata: {
-            channel: body.channel ?? 'assistant',
-          },
+      const thread = await dependencies.store.createThread(organizationId, userId, {
+        title: message.slice(0, 80),
+        assistantId: assistant?.id ?? null,
+        projectId: (body.projectId ?? body.project_id ?? null) as string | null,
+        metadata: {
+          channel: body.channel ?? 'assistant',
         },
-      );
+      });
       threadId = thread.id;
     } else {
-      await dependencies.store.getThread(organizationId, threadId);
+      await dependencies.store.getThread(organizationId, userId, threadId);
     }
 
-    await dependencies.store.addMessage(organizationId, threadId, {
-      role: 'user',
-      content: message,
-      metadata:
-        body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
-          ? (body.metadata as Record<string, unknown>)
-          : {},
-    });
+    const complete = dependencies.llmChatCompletions ?? llmChatCompletions;
+    const activeThreadId = threadId;
 
-    const history = await dependencies.store.listMessages(organizationId, threadId, {
-      limit: 40,
-    });
-    const systemPrompt =
-      assistant?.system_prompt?.trim() ||
-      'You are Kode AI, a helpful workplace assistant for the organization.';
+    return coalesceAiThreadWork(
+      activeThreadId,
+      `${clientMessageId ?? ''}\n${message}`,
+      async () => {
+        await dependencies.store.getThread(organizationId, userId, activeThreadId);
+        const systemPrompt = trustedSystemPrompt(assistant?.system_prompt);
+        if (workspaceGateway.enabled) {
+          buildGatewayChatMessages({
+            history: [],
+            systemPrompt,
+            currentUserMessage: message,
+          });
+        }
+        const recent = await dependencies.store.listRecentMessages(
+          organizationId,
+          userId,
+          activeThreadId,
+          { limit: AI_INFERENCE_HISTORY_LIMIT },
+        );
+        if (!shouldReusePendingUserTurn(recent, message, clientMessageId)) {
+          await dependencies.store.addMessage(organizationId, userId, activeThreadId, {
+            role: 'user',
+            content: message,
+            metadata: {
+              ...requestMetadata,
+              ...(clientMessageId ? { clientMessageId } : {}),
+              source: 'chat',
+            },
+          });
+        }
 
-    let reply: string;
-    try {
-      if (history.length > 2) {
-        const data = await llmChatCompletions({
-          model: assistant?.model ?? null,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            ...history.map((item) => ({
-              role: item.role,
-              content: item.content,
-            })),
-          ],
+        const history = await dependencies.store.listRecentMessages(
+          organizationId,
+          userId,
+          activeThreadId,
+          { limit: AI_INFERENCE_HISTORY_LIMIT },
+        );
+        let reply: string;
+        try {
+          if (workspaceGateway.enabled) {
+            const context = buildGatewayChatMessages({
+              history,
+              systemPrompt,
+              currentUserMessage: message,
+            });
+            const result = await workspaceGateway.chatMessages({
+              messages: context.messages,
+            });
+            reply = result.message.trim();
+          } else {
+            const turns = inferenceTurnsFromHistory(history, systemPrompt);
+            const data = await complete({
+              model: assistant?.model ?? null,
+              messages: turns,
+            });
+            reply = extractAssistantReply(data);
+          }
+          if (!reply) {
+            throw new Error('empty_inference_reply');
+          }
+        } catch (error) {
+          if (error instanceof AppError) {
+            throw error;
+          }
+          throwInferenceUnavailable(error);
+        }
+
+        const assistantMessage = await dependencies.store.addMessage(
+          organizationId,
+          userId,
+          activeThreadId,
+          {
+            role: 'assistant',
+            content: reply,
+            metadata: { source: 'kodex' },
+          },
+        );
+
+        return c.json({
+          reply,
+          conversationId: activeThreadId,
+          threadId: activeThreadId,
+          assistantMessage: {
+            id: assistantMessage.id,
+            role: 'assistant' as const,
+            content: reply,
+            type: 'text',
+            createdAt: assistantMessage.created_at,
+            data: assistantMessage.metadata,
+          },
         });
-        const choices = data.choices;
-        const first = Array.isArray(choices) ? choices[0] : null;
-        const msg =
-          first && typeof first === 'object'
-            ? (first as Record<string, unknown>).message
-            : null;
-        const content =
-          msg && typeof msg === 'object'
-            ? (msg as Record<string, unknown>).content
-            : null;
-        reply =
-          (typeof content === 'string' ? content : '').trim() ||
-          'No response generated.';
-      } else {
-        reply = await llmChatText({
-          systemPrompt,
-          userMessage: message,
-          model: assistant?.model ?? null,
-        });
-      }
-    } catch (error) {
-      reply =
-        error instanceof Error
-          ? `AI is unavailable right now: ${error.message}`
-          : 'AI is unavailable right now.';
-    }
-
-    const assistantMessage = await dependencies.store.addMessage(
-      organizationId,
-      threadId,
-      {
-        role: 'assistant',
-        content: reply,
-        metadata: { source: 'kodex' },
       },
     );
-
-    return c.json({
-      reply,
-      conversationId: threadId,
-      threadId,
-      assistantMessage: {
-        id: assistantMessage.id,
-        role: 'assistant' as const,
-        content: reply,
-        type: 'text',
-        createdAt: assistantMessage.created_at,
-        data: assistantMessage.metadata,
-      },
-    });
   });
 
   // --- Uploads (MinIO) ---

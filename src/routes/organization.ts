@@ -8,7 +8,11 @@ import { ForbiddenError, NotFoundError, ServiceUnavailableError, ValidationError
 import type { FileStorage } from '../files/storage.js';
 import { streamStoredMedia } from '../content/media-stream.js';
 import { readListQuery } from '../http/list-query.js';
-import { isKodeOperatingRoleKey, pickDirectoryRoleKey } from '../organizations/role-model.js';
+import {
+  isKodeOperatingRoleKey,
+  isPrivilegedDirectoryRole,
+  pickDirectoryRoleKey,
+} from '../organizations/role-model.js';
 import { rejectTenancyOverrides } from '../organizations/http.js';
 import type { OrganizationDirectoryStore } from '../organizations/store.js';
 import { PROFILE_PICTURES_BUCKET } from '../organizations/buckets.js';
@@ -70,6 +74,15 @@ function readOperatingRoleKey(value: unknown, field = 'roleKey'): string {
     });
   }
   return roleKey;
+}
+
+function assertCanAssignRole(auth: AuthContext, roleKey: string) {
+  if (isPrivilegedDirectoryRole(roleKey) && !auth.membership.isAdminRole) {
+    throw new ForbiddenError(
+      'INSUFFICIENT_PERMISSION',
+      'Only administrators can assign administrator or IT roles.',
+    );
+  }
 }
 
 export function createOrganizationRoutes(
@@ -183,11 +196,17 @@ export function createOrganizationRoutes(
     const fullName =
       readOptionalString(body.fullName ?? body.full_name, 'fullName', 200) ?? '';
     const requestedRole = readOptionalString(body.roleKey ?? body.role, 'roleKey', 64) ?? '';
+    if (requestedRole) {
+      assertCanAssignRole(auth, requestedRole.trim().toLowerCase());
+    }
     const operatingRoles = await dependencies.store.listOperatingRoles(organizationId);
-    const roleKey = pickDirectoryRoleKey(operatingRoles, requestedRole, { allowAdmin: true });
+    const roleKey = pickDirectoryRoleKey(operatingRoles, requestedRole, {
+      allowAdmin: auth.membership.isAdminRole,
+    });
     if (!roleKey) {
       throw new ValidationError('The selected role is not available.', { field: 'roleKey' });
     }
+    assertCanAssignRole(auth, roleKey);
     const officeRaw = body.officeId ?? body.office_id;
     const officeId =
       officeRaw === undefined || officeRaw === null
@@ -239,6 +258,7 @@ export function createOrganizationRoutes(
     }
 
     const roleKey = readOperatingRoleKey(body.roleKey ?? body.role);
+    assertCanAssignRole(auth, roleKey);
     const officeRaw = body.officeId ?? body.office_id;
     const officeId =
       officeRaw === undefined
@@ -360,6 +380,7 @@ export function createOrganizationRoutes(
     }
 
     const roleKey = readOperatingRoleKey(body.roleKey ?? body.role);
+    assertCanAssignRole(auth, roleKey);
     const changeOffice =
       body.changeOffice === undefined && body.change_office === undefined
         ? body.officeId !== undefined || body.office_id !== undefined

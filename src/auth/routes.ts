@@ -189,19 +189,12 @@ export function createAuthRoutes(dependencies: AuthRouteDependencies) {
 
   routes.post('/refresh', async (c) => {
     const meta = requestMeta(c);
-    try {
-      await enforceRateLimit(
-        dependencies.rateLimiter,
-        `refresh:ip:${meta.ipAddress ?? 'unknown'}`,
-        300,
-        900,
-      );
-    } catch (error) {
-      // Never kick users out because Redis rate limiting is down.
-      if (!(error instanceof ServiceUnavailableError)) {
-        throw error;
-      }
-    }
+    await enforceRateLimit(
+      dependencies.rateLimiter,
+      `refresh:ip:${meta.ipAddress ?? 'unknown'}`,
+      300,
+      900,
+    );
 
     const body = await readJson(c);
     const refreshToken = readRefreshToken(c, readString(body.refresh_token));

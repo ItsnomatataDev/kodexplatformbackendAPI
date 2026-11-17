@@ -92,6 +92,31 @@ services:
       minio:
         condition: service_started
 
+  # Isolated Content Studio upload process. Caddy sends binary/part traffic
+  # here so a large video does not share the main API event loop.
+  api-uploads:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kode-vps-api-uploads
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env.vps
+    environment:
+      APP_ENV: staging
+      NODE_ENV: staging
+      HOST: 0.0.0.0
+      PORT: 3002
+      KODE_PROCESS_ROLE: uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
   content-studio-upload-maintenance:
     build:
       context: .
@@ -186,6 +211,8 @@ services:
       MEDIA_ORIGIN_BUCKET: content-review-assets
       MEDIA_ORIGIN_ACCESS_KEY: ${MEDIA_ORIGIN_ACCESS_KEY:?Dedicated read-only media origin key required}
       MEDIA_ORIGIN_SECRET_KEY: ${MEDIA_ORIGIN_SECRET_KEY:?Dedicated read-only media origin secret required}
+      MEDIA_INGEST_ACCESS_KEY: ${MEDIA_INGEST_ACCESS_KEY:-}
+      MEDIA_INGEST_SECRET_KEY: ${MEDIA_INGEST_SECRET_KEY:-}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:?}

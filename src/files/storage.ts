@@ -94,5 +94,6 @@ export interface FileStorage {
     rangeHeader?: string | null,
   ): Promise<ObjectStreamResult | null>;
   deleteObject(bucket: string, objectKey: string): Promise<void>;
+  listObjectKeys?(bucket: string, prefix: string): Promise<string[]>;
   ensureBucket?(bucket: string): Promise<void>;
 }
