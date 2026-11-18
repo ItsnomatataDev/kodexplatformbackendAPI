@@ -43,6 +43,9 @@ import type {
   ChecklistRecord,
   CommentRecord,
   LabelRecord,
+  ManualEntrySettings,
+  ManualTimeRequestRecord,
+  ManualTimeRequestStatus,
   SubmissionRecord,
   TimeEntryRecord,
   UpdateChecklistInput,
@@ -54,6 +57,16 @@ import type {
   WatcherRecord,
   WorkStore,
 } from '../work/store.js';
+import {
+  canManageManualEntrySettings,
+  canReviewManualTime,
+  isValidManualEntryReason,
+  MANUAL_ENTRY_MAX_SECONDS,
+  MANUAL_ENTRY_REASON_MIN_LENGTH,
+  resolveManualEntryAccess,
+  TIMER_BACKDATE_TOLERANCE_MS,
+  type ManualEntryAccess,
+} from '../work/manual-entry-policy.js';
 
 export type CardEcosystemDependencies = {
   store: WorkStore;
@@ -191,6 +204,100 @@ function serializeTimeEntry(entry: TimeEntryRecord) {
     userName: entry.userName ?? null,
     userEmail: entry.userEmail ?? null,
   };
+}
+
+function serializeManualTimeRequest(request: ManualTimeRequestRecord) {
+  return {
+    id: request.id,
+    organizationId: request.organizationId,
+    cardId: request.cardId,
+    userId: request.userId,
+    createdBy: request.createdBy,
+    seconds: request.seconds,
+    note: request.note,
+    startedAt: request.startedAt?.toISOString() ?? null,
+    endedAt: request.endedAt?.toISOString() ?? null,
+    isBillable: request.isBillable,
+    reason: request.reason,
+    status: request.status,
+    reviewedBy: request.reviewedBy,
+    reviewedAt: request.reviewedAt?.toISOString() ?? null,
+    reviewNote: request.reviewNote,
+    timeEntryId: request.timeEntryId,
+    createdAt: request.createdAt.toISOString(),
+    updatedAt: request.updatedAt.toISOString(),
+    cardTitle: request.cardTitle ?? null,
+    boardId: request.boardId ?? null,
+    boardName: request.boardName ?? null,
+    userName: request.userName ?? null,
+    userEmail: request.userEmail ?? null,
+    reviewerName: request.reviewerName ?? null,
+  };
+}
+
+function serializeManualEntrySettings(settings: ManualEntrySettings) {
+  return {
+    manualEntriesEnabled: settings.manualEntriesEnabled,
+    updatedAt: settings.updatedAt?.toISOString() ?? null,
+    updatedBy: settings.updatedBy,
+  };
+}
+
+function serializeManualEntryAccess(access: ManualEntryAccess) {
+  return {
+    mode: access.mode,
+    exempt: access.exempt,
+    shootBooking: access.shootBooking
+      ? {
+          id: access.shootBooking.id,
+          title: access.shootBooking.title,
+          location: access.shootBooking.location,
+          status: access.shootBooking.status,
+          startsAt: access.shootBooking.startsAt.toISOString(),
+          endsAt: access.shootBooking.endsAt.toISOString(),
+          vehicleLabel: access.shootBooking.vehicleLabel,
+        }
+      : null,
+  };
+}
+
+function assertManualRequestWindow(seconds: number, startedAt: Date | null, endedAt: Date | null) {
+  if (seconds < 60 || seconds > MANUAL_ENTRY_MAX_SECONDS) {
+    throw new ValidationError('Manual time must be between 1 minute and 24 hours.', {
+      field: 'seconds',
+    });
+  }
+  if (startedAt && endedAt && endedAt.getTime() < startedAt.getTime()) {
+    throw new ValidationError('endedAt must be after startedAt.', { field: 'endedAt' });
+  }
+  if (endedAt && endedAt.getTime() - Date.now() > TIMER_BACKDATE_TOLERANCE_MS) {
+    throw new ValidationError('Manual time cannot end in the future.', { field: 'endedAt' });
+  }
+}
+
+const sameInstant = (next: Date | null | undefined, current: Date | null) =>
+  next === undefined || (next?.getTime() ?? null) === (current?.getTime() ?? null);
+
+/** Restricted users may stop their own running timer; logged times stay as recorded. */
+function restrictOwnTimeEntryPatch(existing: TimeEntryRecord, patch: UpdateTimeEntryInput) {
+  const blocked = () =>
+    new ForbiddenError(
+      'MANUAL_ENTRY_RESTRICTED',
+      'Manual time entries are switched off, so recorded times cannot be changed. Add a manual entry with a reason for approval instead.',
+    );
+  if (!sameInstant(patch.startedAt, existing.startedAt)) throw blocked();
+  if (existing.endedAt === null && patch.endedAt) {
+    const start = existing.startedAt ?? existing.createdAt;
+    const end = patch.endedAt.getTime() > Date.now() ? new Date() : patch.endedAt;
+    if (end.getTime() < start.getTime()) {
+      throw new ValidationError('endedAt must be after startedAt.', { field: 'endedAt' });
+    }
+    patch.endedAt = end;
+    patch.seconds = Math.max(0, Math.round((end.getTime() - start.getTime()) / 1000));
+    return;
+  }
+  if (!sameInstant(patch.endedAt, existing.endedAt)) throw blocked();
+  if (patch.seconds !== undefined && patch.seconds !== existing.seconds) throw blocked();
 }
 
 function serializeChecklistItem(item: ChecklistItemRecord) {
@@ -701,16 +808,75 @@ export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) 
         field: 'seconds',
       });
     }
+    const note = readOptionalString(body.note, 'note', FIELD_LIMITS.timeEntryNote) ?? null;
+    let startedAt = readOptionalTimestamp(body.startedAt ?? body.started_at, 'startedAt') ?? null;
+    const endedAt = readOptionalTimestamp(body.endedAt ?? body.ended_at, 'endedAt') ?? null;
+    const isBillable = readOptionalBoolean(body.isBillable ?? body.is_billable, 'isBillable');
+    const settings = await dependencies.store.getManualEntrySettings(organizationId);
+    if (!settings.manualEntriesEnabled) {
+      const forSomeoneElse = userId !== auth.actor.userId;
+      if (forSomeoneElse && !canReviewManualTime(auth)) {
+        throw new ForbiddenError(
+          'MANUAL_ENTRY_RESTRICTED',
+          'Only approvers can log time for another person while manual entries are switched off.',
+        );
+      }
+      const access = forSomeoneElse
+        ? null
+        : await resolveManualEntryAccess(
+            dependencies.store,
+            auth,
+            userId,
+            startedAt ?? endedAt ?? new Date(),
+            settings,
+          );
+      if (access?.mode === 'approval') {
+        const isManual = endedAt !== null || seconds > 0;
+        if (!isManual) {
+          if (startedAt && Date.now() - startedAt.getTime() > TIMER_BACKDATE_TOLERANCE_MS) {
+            startedAt = new Date();
+          }
+        } else {
+          const reason = readOptionalString(body.reason, 'reason', FIELD_LIMITS.timeEntryNote);
+          if (!isValidManualEntryReason(reason)) {
+            throw new ForbiddenError(
+              'MANUAL_ENTRY_APPROVAL_REQUIRED',
+              `Manual time entries are switched off. Give a reason of at least ${MANUAL_ENTRY_REASON_MIN_LENGTH} characters and an approver will review it.`,
+            );
+          }
+          assertManualRequestWindow(seconds, startedAt, endedAt);
+          const request = await dependencies.store.createManualTimeRequest({
+            organizationId,
+            cardId,
+            userId,
+            createdBy: auth.actor.userId,
+            seconds,
+            note,
+            startedAt,
+            endedAt,
+            isBillable,
+            reason: reason!.trim(),
+          });
+          if (!request) {
+            throw new NotFoundError('CARD_NOT_FOUND', 'The card was not found.');
+          }
+          return c.json(
+            { manualTimeRequest: serializeManualTimeRequest(request), pendingApproval: true },
+            202,
+          );
+        }
+      }
+    }
     const entry = await dependencies.store.createTimeEntry({
       organizationId,
       cardId,
       userId,
       createdBy: auth.actor.userId,
       seconds,
-      note: readOptionalString(body.note, 'note', FIELD_LIMITS.timeEntryNote) ?? null,
-      startedAt: readOptionalTimestamp(body.startedAt ?? body.started_at, 'startedAt') ?? null,
-      endedAt: readOptionalTimestamp(body.endedAt ?? body.ended_at, 'endedAt') ?? null,
-      isBillable: readOptionalBoolean(body.isBillable ?? body.is_billable, 'isBillable'),
+      note,
+      startedAt,
+      endedAt,
+      isBillable,
     });
     if (!entry) {
       throw new NotFoundError('CARD_NOT_FOUND', 'The card was not found.');
@@ -993,6 +1159,8 @@ function isTimeStaff(auth: ReturnType<typeof getAuth>) {
   );
 }
 
+const MANUAL_TIME_REQUEST_STATUSES = new Set(['pending', 'approved', 'rejected', 'cancelled']);
+
 function parseQueryTimestamp(value: string | undefined, field: string) {
   if (!value?.trim()) {
     return undefined;
@@ -1061,6 +1229,153 @@ export function createTimeEntryRoutes(dependencies: CardEcosystemDependencies) {
     return c.json({ timeEntries: timeEntries.map(serializeTimeEntry) });
   });
 
+  routes.get('/manual-policy', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    authorize(auth, 'work.time_entries.read', 'work.time_entry', organizationId);
+    const at = parseQueryTimestamp(c.req.query('at'), 'at') ?? new Date();
+    const settings = await dependencies.store.getManualEntrySettings(organizationId);
+    const access = await resolveManualEntryAccess(
+      dependencies.store,
+      auth,
+      auth.actor.userId,
+      at,
+      settings,
+    );
+    return c.json({
+      settings: serializeManualEntrySettings(settings),
+      access: serializeManualEntryAccess(access),
+      reasonMinLength: MANUAL_ENTRY_REASON_MIN_LENGTH,
+      canManageSettings: canManageManualEntrySettings(auth),
+      canReview: canReviewManualTime(auth),
+    });
+  });
+
+  routes.put('/manual-settings', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    await authorizeMutation(c, auth, 'work.time_entries.read', 'work.time_entry', organizationId);
+    if (!canManageManualEntrySettings(auth)) {
+      throw new ForbiddenError(
+        'INSUFFICIENT_PERMISSION',
+        'Only IT and admins can change the manual time entry setting.',
+      );
+    }
+    const body = await readJson(c);
+    rejectIdentityOverrides(auth, c, body);
+    const enabled = readOptionalBoolean(body.manualEntriesEnabled, 'manualEntriesEnabled');
+    if (enabled === undefined) {
+      throw new ValidationError('manualEntriesEnabled must be true or false.', {
+        field: 'manualEntriesEnabled',
+      });
+    }
+    const settings = await dependencies.store.updateManualEntrySettings(
+      organizationId,
+      enabled,
+      auth.actor.userId,
+    );
+    return c.json({ settings: serializeManualEntrySettings(settings) });
+  });
+
+  routes.get('/manual-requests', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    authorize(auth, 'work.time_entries.read', 'work.time_entry', organizationId);
+    const orgScope = c.req.query('scope') === 'organization';
+    if (orgScope && !canReviewManualTime(auth)) {
+      throw new ForbiddenError(
+        'INSUFFICIENT_PERMISSION',
+        'Only approvers can see everyone’s manual time requests.',
+      );
+    }
+    const status = c.req.query('status');
+    if (status && !MANUAL_TIME_REQUEST_STATUSES.has(status)) {
+      throw new ValidationError('status is not a valid manual time request status.', {
+        field: 'status',
+      });
+    }
+    const limitRaw = Number.parseInt(c.req.query('limit') ?? '', 10);
+    const requests = await dependencies.store.listManualTimeRequests({
+      organizationId,
+      userId: orgScope ? null : auth.actor.userId,
+      status: (status as ManualTimeRequestStatus | undefined) ?? null,
+      limit: Number.isFinite(limitRaw) ? limitRaw : undefined,
+    });
+    return c.json({ manualTimeRequests: requests.map(serializeManualTimeRequest) });
+  });
+
+  for (const decision of ['approved', 'rejected'] as const) {
+    const path = decision === 'approved' ? 'approve' : 'reject';
+    routes.post(`/manual-requests/:requestId/${path}`, async (c) => {
+      const auth = getAuth(c);
+      rejectIdentityOverrides(auth, c);
+      const organizationId = requireOrganizationId(auth);
+      const requestId = requireId(c.req.param('requestId'), 'requestId');
+      await authorizeMutation(c, auth, 'work.time_entries.read', 'work.time_entry', organizationId, requestId);
+      if (!canReviewManualTime(auth)) {
+        throw new ForbiddenError(
+          'INSUFFICIENT_PERMISSION',
+          'Only admins, managers, and IT can review manual time.',
+        );
+      }
+      const body = await readJson(c).catch(() => ({}) as Record<string, unknown>);
+      rejectIdentityOverrides(auth, c, body);
+      const existing = await dependencies.store.getManualTimeRequestById(organizationId, requestId);
+      if (!existing) {
+        throw new NotFoundError('MANUAL_TIME_REQUEST_NOT_FOUND', 'The manual time request was not found.');
+      }
+      if (existing.userId === auth.actor.userId) {
+        throw new ForbiddenError('SELF_REVIEW', 'Someone else has to review your own manual time.');
+      }
+      const result = await dependencies.store.reviewManualTimeRequest(organizationId, requestId, {
+        decision,
+        reviewedBy: auth.actor.userId,
+        reviewNote:
+          readOptionalString(body.reviewNote ?? body.review_note, 'reviewNote', FIELD_LIMITS.timeEntryNote) ??
+          null,
+      });
+      if (result === null) {
+        throw new NotFoundError('MANUAL_TIME_REQUEST_NOT_FOUND', 'The manual time request was not found.');
+      }
+      if (result === 'not_pending') {
+        throw new ConflictError('MANUAL_TIME_REQUEST_REVIEWED', 'This manual time request was already handled.');
+      }
+      if (result === 'card_unavailable') {
+        throw new ConflictError(
+          'MANUAL_TIME_CARD_UNAVAILABLE',
+          'The task is archived or the person is no longer active, so the time cannot be added.',
+        );
+      }
+      return c.json({
+        manualTimeRequest: serializeManualTimeRequest(result.request),
+        timeEntry: result.timeEntry ? serializeTimeEntry(result.timeEntry) : null,
+      });
+    });
+  }
+
+  routes.delete('/manual-requests/:requestId', async (c) => {
+    const auth = getAuth(c);
+    rejectIdentityOverrides(auth, c);
+    const organizationId = requireOrganizationId(auth);
+    const requestId = requireId(c.req.param('requestId'), 'requestId');
+    await authorizeMutation(c, auth, 'work.time_entries.read', 'work.time_entry', organizationId, requestId);
+    const result = await dependencies.store.cancelManualTimeRequest(
+      organizationId,
+      requestId,
+      auth.actor.userId,
+    );
+    if (result === null) {
+      throw new NotFoundError('MANUAL_TIME_REQUEST_NOT_FOUND', 'The manual time request was not found.');
+    }
+    if (result === 'not_pending') {
+      throw new ConflictError('MANUAL_TIME_REQUEST_REVIEWED', 'This manual time request was already handled.');
+    }
+    return c.json({ manualTimeRequest: serializeManualTimeRequest(result) });
+  });
+
   routes.get('/:timeEntryId', async (c) => {
     const auth = getAuth(c);
     rejectIdentityOverrides(auth, c);
@@ -1114,6 +1429,19 @@ export function createTimeEntryRoutes(dependencies: CardEcosystemDependencies) {
     }
     if (Object.keys(patch).length === 0) {
       throw new ValidationError('No time entry fields were provided to update.');
+    }
+    if (!canManageManualEntrySettings(auth)) {
+      const settings = await dependencies.store.getManualEntrySettings(organizationId);
+      if (!settings.manualEntriesEnabled) {
+        const own = existing.userId === auth.actor.userId;
+        if (!own && !canReviewManualTime(auth)) {
+          throw new ForbiddenError(
+            'MANUAL_ENTRY_RESTRICTED',
+            'You can only change your own time entries while manual entries are switched off.',
+          );
+        }
+        if (own) restrictOwnTimeEntryPatch(existing, patch);
+      }
     }
     const entry = await dependencies.store.updateTimeEntry(organizationId, timeEntryId, patch);
     if (!entry) {

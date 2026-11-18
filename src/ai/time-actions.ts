@@ -1,5 +1,6 @@
 import { hasPermission } from '../authorization/permissions.js';
 import type { AuthContext } from '../authorization/types.js';
+import { resolveManualEntryAccess, type ManualEntryAccess } from '../work/manual-entry-policy.js';
 
 const MAX_MANUAL_SECONDS = 24 * 60 * 60;
 const HOUR_WORDS: Record<string, number> = {
@@ -68,7 +69,13 @@ export type TimeActionSource = {
     startedAt: Date | null;
     endedAt: Date | null;
   }): Promise<{ id: string; endedAt?: Date | null } | null>;
+  manualEntryAccess?(auth: AuthContext, at: Date): Promise<Pick<ManualEntryAccess, 'mode'>>;
 };
+
+async function defaultManualEntryAccess(auth: AuthContext, at: Date) {
+  const { postgresManualEntryPolicySource } = await import('../work/manual-entries-postgres.js');
+  return resolveManualEntryAccess(postgresManualEntryPolicySource, auth, auth.actor.userId, at);
+}
 
 type TimeIntent =
   | { kind: 'status'; scope: 'own' | 'team' }
@@ -332,6 +339,10 @@ async function runTimeIntent(auth: AuthContext, source: TimeActionSource, intent
 
   if (intent.seconds > MAX_MANUAL_SECONDS || intent.seconds < 60) {
     return 'I can add between 1 minute and 24 hours of manual time. Nothing was changed.';
+  }
+  const access = await (source.manualEntryAccess ?? defaultManualEntryAccess)(auth, new Date());
+  if (access.mode === 'approval') {
+    return 'Manual time entries are switched off, so I cannot add that time directly. Open My Time, choose Add manual entry, and give a reason. It only counts once an approver accepts it. Nothing was changed.';
   }
   const picked = await requireTaskCard(auth, source, intent.task);
   if ('error' in picked) return picked.error;

@@ -442,6 +442,83 @@ export type ListTimeEntriesInput = {
   limit?: number;
 };
 
+export type ManualEntrySettings = {
+  manualEntriesEnabled: boolean;
+  updatedAt: Date | null;
+  updatedBy: string | null;
+};
+
+export type VehicleShootMatch = {
+  id: string;
+  title: string;
+  location: string | null;
+  status: string;
+  startsAt: Date;
+  endsAt: Date;
+  vehicleLabel: string | null;
+};
+
+export type ManualTimeRequestStatus = 'pending' | 'approved' | 'rejected' | 'cancelled';
+
+export type ManualTimeRequestRecord = {
+  id: string;
+  organizationId: string;
+  cardId: string;
+  userId: string;
+  createdBy: string;
+  seconds: number;
+  note: string | null;
+  startedAt: Date | null;
+  endedAt: Date | null;
+  isBillable: boolean;
+  reason: string;
+  status: ManualTimeRequestStatus;
+  reviewedBy: string | null;
+  reviewedAt: Date | null;
+  reviewNote: string | null;
+  timeEntryId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  cardTitle?: string | null;
+  boardId?: string | null;
+  boardName?: string | null;
+  userName?: string | null;
+  userEmail?: string | null;
+  reviewerName?: string | null;
+};
+
+export type CreateManualTimeRequestInput = {
+  organizationId: string;
+  cardId: string;
+  userId: string;
+  createdBy: string;
+  seconds: number;
+  note?: string | null;
+  startedAt?: Date | null;
+  endedAt?: Date | null;
+  isBillable?: boolean;
+  reason: string;
+};
+
+export type ListManualTimeRequestsInput = {
+  organizationId: string;
+  userId?: string | null;
+  status?: ManualTimeRequestStatus | null;
+  limit?: number;
+};
+
+export type ReviewManualTimeRequestInput = {
+  decision: 'approved' | 'rejected';
+  reviewedBy: string;
+  reviewNote?: string | null;
+};
+
+export type ReviewManualTimeRequestResult =
+  | { request: ManualTimeRequestRecord; timeEntry: TimeEntryRecord | null }
+  | 'not_pending'
+  | 'card_unavailable'
+  | null;
+
 export type ChecklistItemRecord = {
   id: string;
   checklistId: string;
@@ -645,6 +722,39 @@ export interface CardEcosystemStore {
     organizationId: string,
     userId?: string | null,
   ): Promise<TimeEntryRecord[]>;
+
+  getManualEntrySettings(organizationId: string): Promise<ManualEntrySettings>;
+  updateManualEntrySettings(
+    organizationId: string,
+    manualEntriesEnabled: boolean,
+    actorUserId: string,
+  ): Promise<ManualEntrySettings>;
+  findVehicleShootForDay(
+    organizationId: string,
+    userId: string,
+    dayStart: Date,
+    dayEnd: Date,
+  ): Promise<VehicleShootMatch | null>;
+  createManualTimeRequest(
+    input: CreateManualTimeRequestInput,
+  ): Promise<ManualTimeRequestRecord | null>;
+  listManualTimeRequests(
+    input: ListManualTimeRequestsInput,
+  ): Promise<ManualTimeRequestRecord[]>;
+  getManualTimeRequestById(
+    organizationId: string,
+    requestId: string,
+  ): Promise<ManualTimeRequestRecord | null>;
+  reviewManualTimeRequest(
+    organizationId: string,
+    requestId: string,
+    input: ReviewManualTimeRequestInput,
+  ): Promise<ReviewManualTimeRequestResult>;
+  cancelManualTimeRequest(
+    organizationId: string,
+    requestId: string,
+    userId: string,
+  ): Promise<ManualTimeRequestRecord | 'not_pending' | null>;
 
   listChecklistsByCard(
     organizationId: string,

@@ -20,10 +20,17 @@ import type {
   CreateLabelInput,
   CreateSubmissionInput,
   CreateTimeEntryInput,
+  CreateManualTimeRequestInput,
   ColumnRecord,
   LabelRecord,
+  ListManualTimeRequestsInput,
   ListTimeEntriesInput,
+  ManualEntrySettings,
+  ManualTimeRequestRecord,
   MoveCardInput,
+  ReviewManualTimeRequestInput,
+  ReviewManualTimeRequestResult,
+  VehicleShootMatch,
   OrganizationMemberRecord,
   SubmissionRecord,
   TimeEntryRecord,
@@ -54,6 +61,9 @@ export class MemoryBoardStore implements WorkStore {
   private readonly submissions = new Map<string, SubmissionRecord>();
   private readonly attachments = new Map<string, AttachmentRecord>();
   private readonly timeEntries = new Map<string, TimeEntryRecord>();
+  private readonly manualEntrySettings = new Map<string, ManualEntrySettings>();
+  private readonly manualTimeRequests = new Map<string, ManualTimeRequestRecord>();
+  readonly vehicleShoots: Array<VehicleShootMatch & { organizationId: string; userId: string }> = [];
   private readonly checklists = new Map<string, ChecklistRecord>();
   private readonly checklistItems = new Map<string, ChecklistItemRecord>();
 
@@ -1191,6 +1201,139 @@ export class MemoryBoardStore implements WorkStore {
       running: true,
       limit: 500,
     });
+  }
+
+  async getManualEntrySettings(organizationId: string): Promise<ManualEntrySettings> {
+    return (
+      this.manualEntrySettings.get(organizationId) ?? {
+        manualEntriesEnabled: true,
+        updatedAt: null,
+        updatedBy: null,
+      }
+    );
+  }
+
+  async updateManualEntrySettings(
+    organizationId: string,
+    manualEntriesEnabled: boolean,
+    actorUserId: string,
+  ) {
+    const settings = { manualEntriesEnabled, updatedAt: new Date(), updatedBy: actorUserId };
+    this.manualEntrySettings.set(organizationId, settings);
+    return settings;
+  }
+
+  async findVehicleShootForDay(
+    organizationId: string,
+    userId: string,
+    dayStart: Date,
+    dayEnd: Date,
+  ) {
+    const match = this.vehicleShoots.find(
+      (shoot) =>
+        shoot.organizationId === organizationId &&
+        shoot.userId === userId &&
+        (shoot.status === 'pending' || shoot.status === 'approved') &&
+        shoot.startsAt < dayEnd &&
+        shoot.endsAt > dayStart,
+    );
+    if (!match) return null;
+    const { organizationId: _org, userId: _user, ...shoot } = match;
+    return shoot;
+  }
+
+  async createManualTimeRequest(input: CreateManualTimeRequestInput) {
+    const card = await this.getCardById(input.organizationId, input.cardId);
+    const member = await this.getOrganizationMember(input.organizationId, input.userId);
+    if (!card || !member) {
+      return null;
+    }
+    const now = new Date();
+    const request: ManualTimeRequestRecord = {
+      id: randomUUID(),
+      organizationId: input.organizationId,
+      cardId: input.cardId,
+      userId: input.userId,
+      createdBy: input.createdBy,
+      seconds: input.seconds,
+      note: input.note ?? null,
+      startedAt: input.startedAt ?? null,
+      endedAt: input.endedAt ?? null,
+      isBillable: input.isBillable ?? false,
+      reason: input.reason,
+      status: 'pending',
+      reviewedBy: null,
+      reviewedAt: null,
+      reviewNote: null,
+      timeEntryId: null,
+      createdAt: now,
+      updatedAt: now,
+      cardTitle: card.title,
+      boardId: card.boardId,
+    };
+    this.manualTimeRequests.set(request.id, request);
+    return { ...request };
+  }
+
+  async listManualTimeRequests(input: ListManualTimeRequestsInput) {
+    return [...this.manualTimeRequests.values()]
+      .filter(
+        (request) =>
+          request.organizationId === input.organizationId &&
+          (!input.userId || request.userId === input.userId) &&
+          (!input.status || request.status === input.status),
+      )
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, input.limit ?? 200)
+      .map((request) => ({ ...request }));
+  }
+
+  async getManualTimeRequestById(organizationId: string, requestId: string) {
+    const request = this.manualTimeRequests.get(requestId);
+    return request && request.organizationId === organizationId ? { ...request } : null;
+  }
+
+  async reviewManualTimeRequest(
+    organizationId: string,
+    requestId: string,
+    input: ReviewManualTimeRequestInput,
+  ): Promise<ReviewManualTimeRequestResult> {
+    const request = this.manualTimeRequests.get(requestId);
+    if (!request || request.organizationId !== organizationId) return null;
+    if (request.status !== 'pending') return 'not_pending';
+    let timeEntry: TimeEntryRecord | null = null;
+    if (input.decision === 'approved') {
+      timeEntry = await this.createTimeEntry({
+        organizationId,
+        cardId: request.cardId,
+        userId: request.userId,
+        createdBy: request.createdBy,
+        seconds: request.seconds,
+        note: request.note,
+        startedAt: request.startedAt,
+        endedAt: request.endedAt,
+        isBillable: request.isBillable,
+      });
+      if (!timeEntry) return 'card_unavailable';
+    }
+    request.status = input.decision;
+    request.reviewedBy = input.reviewedBy;
+    request.reviewedAt = new Date();
+    request.reviewNote = input.reviewNote ?? null;
+    request.timeEntryId = timeEntry?.id ?? null;
+    request.updatedAt = new Date();
+    return { request: { ...request }, timeEntry };
+  }
+
+  async cancelManualTimeRequest(organizationId: string, requestId: string, userId: string) {
+    const request = this.manualTimeRequests.get(requestId);
+    if (!request || request.organizationId !== organizationId || request.userId !== userId) {
+      return null;
+    }
+    if (request.status !== 'pending') return 'not_pending' as const;
+    request.status = 'cancelled';
+    request.updatedAt = new Date();
+    return { ...request };
   }
 
   async listChecklistsByCard(organizationId: string, cardId: string) {

@@ -5,6 +5,11 @@ import { ConflictError } from '../http/errors.js';
 import { runTimeEntryAutoStop } from './auto-stop.js';
 import { autoClockOutBoundary, secondsBetween } from '../attendance/harare.js';
 import { END_OF_DAY_TIME } from '../attendance/end-of-day.js';
+import {
+  findVehicleShootForDayInDb,
+  getManualEntrySettingsFromDb,
+  updateManualEntrySettingsInDb,
+} from './manual-entries-postgres.js';
 import type {
   AssigneeRecord,
   AttachmentRecord,
@@ -26,10 +31,16 @@ import type {
   CreateLabelInput,
   CreateSubmissionInput,
   CreateTimeEntryInput,
+  CreateManualTimeRequestInput,
   ColumnRecord,
   LabelRecord,
+  ListManualTimeRequestsInput,
   ListTimeEntriesInput,
+  ManualTimeRequestRecord,
+  ManualTimeRequestStatus,
   MoveCardInput,
+  ReviewManualTimeRequestInput,
+  ReviewManualTimeRequestResult,
   OrganizationMemberRecord,
   SubmissionRecord,
   TimeEntryRecord,
@@ -584,6 +595,89 @@ const TIME_ENTRY_COLUMNS = `
   entry.seconds, entry.note, entry.started_at, entry.ended_at, entry.is_billable,
   entry.auto_stopped_at, entry.created_at, entry.updated_at
 `;
+
+type ManualTimeRequestRow = {
+  id: string;
+  organization_id: string;
+  card_id: string;
+  user_id: string;
+  created_by: string;
+  seconds: number;
+  note: string | null;
+  started_at: Date | null;
+  ended_at: Date | null;
+  is_billable: boolean;
+  reason: string;
+  status: ManualTimeRequestStatus;
+  reviewed_by: string | null;
+  reviewed_at: Date | null;
+  review_note: string | null;
+  time_entry_id: string | null;
+  created_at: Date;
+  updated_at: Date;
+  card_title: string | null;
+  board_id: string | null;
+  board_name: string | null;
+  user_name: string | null;
+  user_email: string | null;
+  reviewer_name: string | null;
+};
+
+const MANUAL_TIME_REQUEST_SELECT = `
+  SELECT
+    request.id, request.organization_id, request.card_id, request.user_id, request.created_by,
+    request.seconds, request.note, request.started_at, request.ended_at, request.is_billable,
+    request.reason, request.status, request.reviewed_by, request.reviewed_at, request.review_note,
+    request.time_entry_id, request.created_at, request.updated_at,
+    card.title AS card_title,
+    card.board_id,
+    board.name AS board_name,
+    profile.full_name AS user_name,
+    users.email AS user_email,
+    reviewer.full_name AS reviewer_name
+  FROM work.manual_time_requests request
+  LEFT JOIN work.cards card
+    ON card.id = request.card_id
+   AND card.organization_id = request.organization_id
+  LEFT JOIN work.boards board
+    ON board.id = card.board_id
+   AND board.organization_id = card.organization_id
+  LEFT JOIN identity.user_profiles profile
+    ON profile.user_id = request.user_id
+  LEFT JOIN identity.users users
+    ON users.id = request.user_id
+  LEFT JOIN identity.user_profiles reviewer
+    ON reviewer.user_id = request.reviewed_by
+`;
+
+function mapManualTimeRequest(row: ManualTimeRequestRow): ManualTimeRequestRecord {
+  return {
+    id: row.id,
+    organizationId: row.organization_id,
+    cardId: row.card_id,
+    userId: row.user_id,
+    createdBy: row.created_by,
+    seconds: row.seconds,
+    note: row.note,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    isBillable: row.is_billable,
+    reason: row.reason,
+    status: row.status,
+    reviewedBy: row.reviewed_by,
+    reviewedAt: row.reviewed_at,
+    reviewNote: row.review_note,
+    timeEntryId: row.time_entry_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    cardTitle: row.card_title,
+    boardId: row.board_id,
+    boardName: row.board_name,
+    userName: row.user_name,
+    userEmail: row.user_email,
+    reviewerName: row.reviewer_name,
+  };
+}
 
 function mapTimeEntry(row: TimeEntryRow): TimeEntryRecord {
   return {
@@ -2452,6 +2546,187 @@ export class PostgresBoardStore implements WorkStore {
       running: true,
       limit: 500,
     });
+  }
+
+  async getManualEntrySettings(organizationId: string) {
+    return getManualEntrySettingsFromDb(organizationId);
+  }
+
+  async updateManualEntrySettings(
+    organizationId: string,
+    manualEntriesEnabled: boolean,
+    actorUserId: string,
+  ) {
+    return updateManualEntrySettingsInDb(organizationId, manualEntriesEnabled, actorUserId);
+  }
+
+  async findVehicleShootForDay(
+    organizationId: string,
+    userId: string,
+    dayStart: Date,
+    dayEnd: Date,
+  ) {
+    return findVehicleShootForDayInDb(organizationId, userId, dayStart, dayEnd);
+  }
+
+  async createManualTimeRequest(input: CreateManualTimeRequestInput) {
+    const member = await this.getOrganizationMember(input.organizationId, input.userId);
+    if (!member) {
+      return null;
+    }
+    const result = await db.query<{ id: string }>(
+      `
+        INSERT INTO work.manual_time_requests (
+          organization_id, card_id, user_id, created_by, seconds, note,
+          started_at, ended_at, is_billable, reason
+        )
+        SELECT card.organization_id, card.id, $3, $4, $5, $6, $7, $8, COALESCE($9, FALSE), $10
+        FROM work.cards card
+        WHERE card.organization_id = $1
+          AND card.id = $2
+          AND card.archived_at IS NULL
+        RETURNING id
+      `,
+      [
+        input.organizationId,
+        input.cardId,
+        input.userId,
+        input.createdBy,
+        input.seconds,
+        input.note ?? null,
+        input.startedAt ?? null,
+        input.endedAt ?? null,
+        input.isBillable ?? null,
+        input.reason,
+      ],
+    );
+    const id = result.rows[0]?.id;
+    return id ? this.getManualTimeRequestById(input.organizationId, id) : null;
+  }
+
+  async listManualTimeRequests(input: ListManualTimeRequestsInput) {
+    const limit = Math.min(Math.max(input.limit ?? 200, 1), 500);
+    const result = await db.query<ManualTimeRequestRow>(
+      `${MANUAL_TIME_REQUEST_SELECT}
+        WHERE request.organization_id = $1
+          AND ($2::uuid IS NULL OR request.user_id = $2)
+          AND ($3::text IS NULL OR request.status = $3)
+        ORDER BY (request.status = 'pending') DESC, request.created_at DESC
+        LIMIT $4`,
+      [input.organizationId, input.userId ?? null, input.status ?? null, limit],
+    );
+    return result.rows.map(mapManualTimeRequest);
+  }
+
+  async getManualTimeRequestById(organizationId: string, requestId: string) {
+    const result = await db.query<ManualTimeRequestRow>(
+      `${MANUAL_TIME_REQUEST_SELECT}
+        WHERE request.organization_id = $1 AND request.id = $2`,
+      [organizationId, requestId],
+    );
+    return result.rows[0] ? mapManualTimeRequest(result.rows[0]) : null;
+  }
+
+  async reviewManualTimeRequest(
+    organizationId: string,
+    requestId: string,
+    input: ReviewManualTimeRequestInput,
+  ): Promise<ReviewManualTimeRequestResult> {
+    const outcome = await withTransaction(async (client) => {
+      const locked = await client.query<{
+        status: string;
+        card_id: string;
+        user_id: string;
+        created_by: string;
+        seconds: number;
+        note: string | null;
+        started_at: Date | null;
+        ended_at: Date | null;
+        is_billable: boolean;
+      }>(
+        `SELECT status, card_id, user_id, created_by, seconds, note, started_at, ended_at, is_billable
+           FROM work.manual_time_requests
+          WHERE organization_id = $1 AND id = $2
+          FOR UPDATE`,
+        [organizationId, requestId],
+      );
+      const current = locked.rows[0];
+      if (!current) return null;
+      if (current.status !== 'pending') return 'not_pending' as const;
+      let entry: TimeEntryRecord | null = null;
+      if (input.decision === 'approved') {
+        const inserted = await client.query<TimeEntryRow>(
+          `
+            INSERT INTO work.time_entries (
+              id, card_id, organization_id, user_id, created_by, seconds, note,
+              started_at, ended_at, is_billable, created_at, updated_at
+            )
+            SELECT gen_random_uuid(), card.id, card.organization_id, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW()
+            FROM work.cards card
+            JOIN organizations.memberships membership
+              ON membership.organization_id = card.organization_id
+             AND membership.user_id = $3
+             AND membership.status = 'active'
+            WHERE card.organization_id = $1
+              AND card.id = $2
+              AND card.archived_at IS NULL
+            RETURNING ${TIME_ENTRY_RETURNING}
+          `,
+          [
+            organizationId,
+            current.card_id,
+            current.user_id,
+            current.created_by,
+            current.seconds,
+            current.note,
+            current.started_at,
+            current.ended_at,
+            current.is_billable,
+          ],
+        );
+        if (!inserted.rows[0]) return 'card_unavailable' as const;
+        entry = mapTimeEntry(inserted.rows[0]);
+        await this.refreshTrackedSeconds(organizationId, current.card_id, client);
+      }
+      await client.query(
+        `UPDATE work.manual_time_requests
+            SET status = $3, reviewed_by = $4, reviewed_at = NOW(), review_note = $5,
+                time_entry_id = $6, updated_at = NOW()
+          WHERE organization_id = $1 AND id = $2`,
+        [organizationId, requestId, input.decision, input.reviewedBy, input.reviewNote ?? null, entry?.id ?? null],
+      );
+      return { entry, cardId: current.card_id, seconds: current.seconds };
+    });
+    if (outcome === null || typeof outcome === 'string') {
+      return outcome;
+    }
+    if (outcome.entry) {
+      const card = await this.getCardById(organizationId, outcome.cardId);
+      if (card) {
+        await this.insertCardUpdate(card, input.reviewedBy, 'time_logged', 'Approved manual time', {
+          seconds: outcome.seconds,
+          manualTimeRequestId: requestId,
+        });
+      }
+    }
+    const request = await this.getManualTimeRequestById(organizationId, requestId);
+    return request ? { request, timeEntry: outcome.entry } : null;
+  }
+
+  async cancelManualTimeRequest(organizationId: string, requestId: string, userId: string) {
+    const result = await db.query<{ id: string }>(
+      `UPDATE work.manual_time_requests
+          SET status = 'cancelled', updated_at = NOW()
+        WHERE organization_id = $1 AND id = $2 AND user_id = $3 AND status = 'pending'
+        RETURNING id`,
+      [organizationId, requestId, userId],
+    );
+    if (result.rows[0]) {
+      return this.getManualTimeRequestById(organizationId, requestId);
+    }
+    const existing = await this.getManualTimeRequestById(organizationId, requestId);
+    if (!existing || existing.userId !== userId) return null;
+    return 'not_pending' as const;
   }
 
   async listChecklistsByCard(organizationId: string, cardId: string) {

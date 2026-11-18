@@ -48,6 +48,7 @@ function auth(partial: {
 function source(options: {
   running?: TimeRunningRow[];
   cards?: TimeCardMatch[];
+  manualMode?: 'direct' | 'approval';
 } = {}) {
   const created: Array<Parameters<TimeActionSource['createEntry']>[0]> = [];
   const time: TimeActionSource = {
@@ -62,6 +63,9 @@ function source(options: {
     async createEntry(input) {
       created.push(input);
       return { id: 'entry-1', endedAt: input.endedAt };
+    },
+    async manualEntryAccess() {
+      return { mode: options.manualMode ?? 'direct' };
     },
   };
   return { time, created };
@@ -125,6 +129,14 @@ test('two hours of manual time is a closed 7200 second entry', async () => {
     created[0].endedAt!.getTime() - created[0].startedAt!.getTime(),
     7200 * 1000,
   );
+});
+
+test('KODEX does not add manual time when it needs approval', async () => {
+  const { time, created } = source({ cards: [homepage], manualMode: 'approval' });
+  const reply = await resolveTimeChat(auth({}), 'add 2 hours of manual time to Homepage', time);
+  assert.match(reply ?? '', /switched off/);
+  assert.match(reply ?? '', /Nothing was changed/);
+  assert.equal(created.length, 0);
 });
 
 test('start or add hours does not guess', async () => {
