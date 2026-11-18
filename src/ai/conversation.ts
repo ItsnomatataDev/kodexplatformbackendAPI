@@ -1,5 +1,12 @@
 import { documentsFromMetadata, messageContentForModel } from './document-text.js';
 
+export function shouldContinueLatestThread(threadId: string | null, newThread: unknown) {
+  if (threadId) {
+    return false;
+  }
+  return newThread !== true && newThread !== 'true';
+}
+
 export const AI_INFERENCE_HISTORY_LIMIT = 40;
 export const AI_MESSAGE_PAGE_LIMIT = 100;
 export const AI_MESSAGE_MAX_LIMIT = 500;

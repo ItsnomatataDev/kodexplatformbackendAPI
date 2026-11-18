@@ -8,6 +8,11 @@ import { Hono } from 'hono';
 import { env } from './config/env.js';
 import {createDefaultAuthDependencies, createDefaultAuthLifecycle,createDefaultMeDependencies,} from './auth/defaults.js';
 import { createAuthMiddleware } from './auth/middleware.js';
+import { assertAuthenticatedAccount } from './auth/account.js';
+import { claimInternalAuth, createInternalApi, KODEX_INTERNAL_HEADER } from './ai/agent/internal-api.js';
+import { setAgentRuntime, type AgentRuntime } from './ai/agent/service.js';
+import { PostgresAgentStore } from './ai/agent/store.js';
+import { createWebTools } from './ai/agent/web.js';
 import type { AuthDependencies } from './auth/middleware.js';
 import { createAuthRoutes, type AuthRouteDependencies } from './auth/routes.js';
 import { SignupService } from './auth/signup.js';
@@ -118,6 +123,8 @@ import { PostgresItStore } from './it/postgres-store.js';
 import { createItRoutes } from './routes/it.js';
 import { PostgresAiStore } from './ai/postgres-store.js';
 import { createAiRoutes } from './routes/ai.js';
+import { searchBoards, searchContentClients } from './ai/navigation-search.js';
+import { searchActiveCards } from './work/card-search.js';
 import { createAutomationRoutes } from './routes/automation.js';
 import { PostgresBoardStore } from './work/postgres-store.js';
 import type { WorkStore } from './work/store.js';
@@ -334,6 +341,11 @@ export function createApp(options: CreateAppOptions = {}) {
     if (c.req.method === 'GET' && c.req.path === '/api/content-studio/media') {
       return next();
     }
+    const internalAuth = claimInternalAuth(c.req.header(KODEX_INTERNAL_HEADER));
+    if (internalAuth) {
+      c.set('auth', internalAuth);
+      return next();
+    }
     return apiAuth(c, next);
   });
   api.route('/me', createMeRoutes(meWithFiles));
@@ -444,7 +456,63 @@ export function createApp(options: CreateAppOptions = {}) {
       onUserAccessRevoked: revokeAccountAccess,
     }),
   );
-  api.route('/ai', createAiRoutes({ store: aiWorkspace, files }));
+  const agent: AgentRuntime = {
+    api: createInternalApi(app),
+    store: new PostgresAgentStore(),
+    threads: aiWorkspace,
+    resolveAuth: async (userId) => {
+      const context = await authDependencies.resolveAuthContext(userId);
+      assertAuthenticatedAccount(context);
+      return context;
+    },
+    findCards: (organizationId, query) => searchActiveCards(organizationId, query),
+    listMembers: (organizationId) => attendance.listMembers(organizationId),
+    web: createWebTools(),
+    notify: async ({ auth, title, message, entityId }) => {
+      await notifications.create({
+        organizationId: auth.membership.organizationId,
+        recipientUserId: auth.actor.userId,
+        type: 'kodex_assistant',
+        title,
+        message: message.slice(0, 500),
+        entityType: 'kodex_assistant',
+        entityId,
+        actionUrl: '/ai-assistant',
+        priority: 'medium',
+        category: 'assistant',
+      });
+    },
+  };
+  setAgentRuntime(agent);
+  api.route('/ai', createAiRoutes({
+    store: aiWorkspace,
+    files,
+    agent,
+    workspace: {
+      attendance,
+      tickets,
+      leave,
+      time: {
+        listRunning: (organizationId, userId) => boards.listRunningTimeEntries(organizationId, userId),
+        findCards: (organizationId, query) => searchActiveCards(organizationId, query),
+        createEntry: (input) => boards.createTimeEntry({
+          organizationId: input.organizationId,
+          cardId: input.cardId,
+          userId: input.userId,
+          createdBy: input.userId,
+          seconds: input.seconds,
+          note: input.note,
+          startedAt: input.startedAt,
+          endedAt: input.endedAt,
+        }),
+      },
+      navigation: {
+        findContentClients: (organizationId, officeId, query) =>
+          searchContentClients(organizationId, officeId, query),
+        findBoards: (organizationId, query) => searchBoards(organizationId, query),
+      },
+    },
+  }));
   api.route('/automation', createAutomationRoutes({ store: aiWorkspace }));
 
 

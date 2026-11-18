@@ -553,6 +553,20 @@ export class PostgresAiStore {
     return mapMessage(result.rows[0]);
   }
 
+  async updateMessageMetadata(
+    organizationId: string,
+    threadId: string,
+    messageId: string,
+    patch: Record<string, unknown>,
+  ) {
+    await db.query(
+      `UPDATE ai.chat_messages
+       SET metadata = metadata || $4::jsonb
+       WHERE organization_id = $1 AND thread_id = $2 AND id = $3`,
+      [organizationId, threadId, messageId, JSON.stringify(patch)],
+    );
+  }
+
 
   async listFlows(
     organizationId: string,

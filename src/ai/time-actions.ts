@@ -271,9 +271,15 @@ export async function timerFacts(auth: AuthContext, source: TimeActionSource) {
   return lines.join('\n');
 }
 
-export async function resolveTimeChat(auth: AuthContext, message: string, source: TimeActionSource) {
+export async function resolveTimeChat(
+  auth: AuthContext,
+  message: string,
+  source: TimeActionSource,
+  options: { readOnly?: boolean } = {},
+) {
   const intent = parseTimeRequest(message);
   if (!intent) return null;
+  if (options.readOnly && (intent.kind === 'start' || intent.kind === 'log')) return null;
   try {
     return await runTimeIntent(auth, source, intent);
   } catch {
