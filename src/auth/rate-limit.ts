@@ -16,11 +16,15 @@ export async function enforceRateLimit(
   key: string,
   limit: number,
   windowSeconds: number,
+  message?: (retryAfterSeconds: number) => string,
 ): Promise<void> {
   const result = await limiter.consume(key, limit, windowSeconds);
 
   if (!result.allowed) {
-    throw new TooManyRequestsError(result.retryAfterSeconds);
+    throw new TooManyRequestsError(
+      result.retryAfterSeconds,
+      message?.(result.retryAfterSeconds),
+    );
   }
 }
 

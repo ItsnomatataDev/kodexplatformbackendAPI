@@ -927,6 +927,68 @@ test('mounted session creation remains disabled until the feature flag is enable
   assert.equal(repository.sessions.size, 0);
 });
 
+test('upload-session rate limiting returns an upload-specific retry message', async () => {
+  const { service, repository, content: contentFixture } = newService();
+  const content = {
+    ...contentFixture.content,
+    async getSchedule(organizationId: string, scheduleId: string) {
+      return organizationId === orgA && scheduleId === SCHEDULE_ID
+        ? { id: scheduleId, organizationId, officeId: OFFICE_ID, clientId: null }
+        : null;
+    },
+  } as unknown as ContentStore;
+  const rateLimiter = new MemoryRateLimiter(['development']);
+  const app = new Hono();
+  app.onError(errorHandler);
+  app.use('*', async (c, next) => {
+    c.set('auth', authContext({ actor: { userId: userA } }));
+    c.set('rateLimiter', rateLimiter);
+    c.set('rateLimitPolicies', {
+      uploadSession: { limit: 1, windowSeconds: 3600 },
+      uploadPart: { limit: 1000, windowSeconds: 60 },
+    } as never);
+    await next();
+  });
+  app.route(
+    '/api/content-studio/uploads',
+    createResumableUploadRoutes({
+      service,
+      repository,
+      content,
+      directory: {
+        async getOffice(organizationId: string, officeId: string) {
+          return organizationId === orgA && officeId === OFFICE_ID
+            ? { slug: 'test-office' }
+            : null;
+        },
+      } as never,
+    }),
+  );
+
+  const created = await app.request('/api/content-studio/uploads/sessions', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      scheduleId: SCHEDULE_ID,
+      filename: 'clip.mp4',
+      mimeType: 'video/mp4',
+      fileSizeBytes: PART_BYTES,
+    }),
+  });
+  assert.equal(created.status, 201);
+  const { session } = await created.json() as { session: { sessionId: string } };
+
+  const completed = await app.request(
+    `/api/content-studio/uploads/sessions/${session.sessionId}/complete`,
+    { method: 'POST' },
+  );
+  assert.equal(completed.status, 429);
+  assert.ok(Number(completed.headers.get('Retry-After')) > 0);
+  const body = await completed.json() as { error: { message: string } };
+  assert.match(body.error.message, /Content Studio upload limit reached/);
+  assert.equal(repository.sessions.get(session.sessionId)?.state, 'uploading');
+});
+
 test('mounted session route hides sessions across organizations before storage access', async () => {
   const { service, repository, multipart } = newService();
   const session = await createUpload(service, PART_BYTES);

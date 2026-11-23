@@ -434,7 +434,7 @@ export const env = {
       windowSeconds: durationFromEnv('WORK_ATTACHMENT_RATE_WINDOW_SECONDS', 60, 1, 3_600),
     },
     uploadSession: {
-      limit: countFromEnv('CONTENT_STUDIO_UPLOAD_SESSION_RATE_LIMIT', 10, 1, 100),
+      limit: countFromEnv('CONTENT_STUDIO_UPLOAD_SESSION_RATE_LIMIT', 30, 1, 100),
       windowSeconds: durationFromEnv(
         'CONTENT_STUDIO_UPLOAD_SESSION_RATE_WINDOW_SECONDS',
         3_600,

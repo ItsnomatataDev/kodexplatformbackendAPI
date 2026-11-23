@@ -182,6 +182,11 @@ export function createResumableUploadRoutes(dependencies: {
       `content-upload:${kind}:user:${organizationId}:${auth.actor.userId}`,
       policy.limit,
       policy.windowSeconds,
+      (retryAfterSeconds) => {
+        const minutes = Math.max(1, Math.ceil(retryAfterSeconds / 60));
+        const unit = minutes === 1 ? 'minute' : 'minutes';
+        return `Content Studio upload limit reached. Try again in about ${minutes} ${unit}.`;
+      },
     );
     if (kind === 'uploadPart') {
       await enforceRateLimit(

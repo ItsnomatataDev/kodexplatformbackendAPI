@@ -169,7 +169,8 @@ quotas, enforced in PostgreSQL under organization/user advisory locks:
 | Concurrent parts per user | 4 |
 | Concurrent parts per organization | 16 |
 
-The rate-limit defaults are 10 session mutations per user per hour and 1,000
+The rate-limit defaults are 30 session mutations per user per hour (enough for
+10 create/complete upload cycles with retry headroom) and 1,000
 parts per user per minute, with a separate organization part-rate ceiling.
 These defaults are configurable and should be tuned only after observing
 production resource use.
@@ -193,7 +194,7 @@ settings have validated defaults in `src/config/env.ts`.
 | `CONTENT_STUDIO_UPLOAD_MAX_CONCURRENT_PARTS_PER_SESSION` | `4` |
 | `CONTENT_STUDIO_UPLOAD_MAX_CONCURRENT_PARTS_PER_USER` | `8` |
 | `CONTENT_STUDIO_UPLOAD_MAX_CONCURRENT_PARTS_PER_ORGANIZATION` | `16` |
-| `CONTENT_STUDIO_UPLOAD_SESSION_RATE_LIMIT` | `10` per configured session-rate window |
+| `CONTENT_STUDIO_UPLOAD_SESSION_RATE_LIMIT` | `30` per configured session-rate window |
 | `CONTENT_STUDIO_UPLOAD_SESSION_RATE_WINDOW_SECONDS` | `3600` |
 | `CONTENT_STUDIO_UPLOAD_PART_RATE_LIMIT` | `1000` per configured part-rate window |
 | `CONTENT_STUDIO_UPLOAD_PART_RATE_WINDOW_SECONDS` | `60` |
