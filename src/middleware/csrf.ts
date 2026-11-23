@@ -34,13 +34,11 @@ export function csrfMiddleware(allowedOrigins: string[]) {
       const csrfCookie = getCookie(c, CSRF_COOKIE);
       const csrfHeader = c.req.header('x-csrf-token');
 
-      if (csrfCookie) {
-        if (!csrfHeader || !tokensMatch(csrfCookie, csrfHeader)) {
-          throw new ForbiddenError(
-            'CSRF_TOKEN_INVALID',
-            'The CSRF token is missing or invalid.',
-          );
-        }
+      if (!csrfCookie || !csrfHeader || !tokensMatch(csrfCookie, csrfHeader)) {
+        throw new ForbiddenError(
+          'CSRF_TOKEN_INVALID',
+          'The CSRF token is missing or invalid.',
+        );
       }
     }
 

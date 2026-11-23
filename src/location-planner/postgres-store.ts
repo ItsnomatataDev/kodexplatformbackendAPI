@@ -1,6 +1,16 @@
 import { db } from '../db/pool.js';
 import { NotFoundError, ValidationError } from '../http/errors.js';
 import { calendarDateKey, dateKey } from './dates.js';
+import {
+  lastDateOfMonth,
+  monthStartFromDateKey,
+  previousMonthEndFromDateKey,
+  previousMonthStartFromDateKey,
+} from './month-end.js';
+import {
+  isLocationPlannerAdminRole,
+  isThreeLittleBirdsOffice,
+} from './tlb-office.js';
 import { expandWeeklyOffDates } from './weekly-off.js';
 
 function mapRowDates(row: Record<string, unknown>, keys: string[]) {
@@ -72,11 +82,24 @@ export class PostgresLocationPlannerStore {
       ),
     ]);
 
-    const members = await db.query(
-      `SELECT u.id, p.full_name, u.email, m.role_key AS primary_role, p.department
+    const members = await db.query<{
+      id: string;
+      full_name: string | null;
+      email: string | null;
+      primary_role: string | null;
+      department: string | null;
+      office_slug: string | null;
+      office_name: string | null;
+      is_admin_role: boolean | null;
+    }>(
+      `SELECT u.id, p.full_name, u.email, m.role_key AS primary_role, p.department,
+              office.slug AS office_slug, office.name AS office_name,
+              COALESCE(role.is_admin_role, FALSE) AS is_admin_role
        FROM organizations.memberships m
        JOIN identity.users u ON u.id = m.user_id
        LEFT JOIN identity.user_profiles p ON p.user_id = u.id
+       LEFT JOIN organizations.offices office ON office.id = m.office_id
+       LEFT JOIN organizations.roles role ON role.id = m.role_id
        WHERE m.organization_id = $1
          AND m.status = 'active'
          AND COALESCE(u.account_status, 'active') <> 'deleted'
@@ -91,14 +114,21 @@ export class PostgresLocationPlannerStore {
       list.push(String(row.skill));
       skillsByEmployee.set(id, list);
     }
-    const employees = members.rows.map((row) => ({
-      id: row.id,
-      full_name: row.full_name ?? null,
-      email: row.email ?? null,
-      primary_role: row.primary_role ?? null,
-      department: row.department ?? null,
-      skills: skillsByEmployee.get(String(row.id)) ?? [],
-    }));
+    const employees = members.rows
+      .filter(
+        (row) =>
+          isThreeLittleBirdsOffice(row.office_slug, row.office_name) &&
+          !isLocationPlannerAdminRole(row.primary_role, row.is_admin_role),
+      )
+      .map((row) => ({
+        id: row.id,
+        full_name: row.full_name ?? null,
+        email: row.email ?? null,
+        primary_role: row.primary_role ?? null,
+        department: row.department ?? null,
+        office_slug: row.office_slug ?? null,
+        skills: skillsByEmployee.get(String(row.id)) ?? [],
+      }));
 
     const nameById = new Map(
       employees.map((e) => [
@@ -151,7 +181,10 @@ export class PostgresLocationPlannerStore {
       employees.map((e) => [String(e.id), (e.email as string | null) ?? null]),
     );
 
-    const availability = [...oneOffAvailability, ...weeklyAvailability];
+    const tlbEmployeeIds = new Set(employees.map((employee) => String(employee.id)));
+    const availability = [...oneOffAvailability, ...weeklyAvailability].filter((item) =>
+      tlbEmployeeIds.has(String(item.user_id)),
+    );
 
     const shapedAssignments = assignments.rows.map((row) => {
       const assignment = mapRowDates(row, [
@@ -404,51 +437,62 @@ export class PostgresLocationPlannerStore {
     return result.rows[0];
   }
 
+  async deleteOffDay(organizationId: string, offDayId: string) {
+    const result = await db.query(
+      `DELETE FROM location_planner.tlb_off_days
+       WHERE organization_id = $1 AND id = $2
+       RETURNING id`,
+      [organizationId, offDayId],
+    );
+    if (!result.rows[0]) throw new NotFoundError('OFF_DAY_NOT_FOUND', 'Off day not found.');
+  }
+
+  async deactivateWeeklyOffDay(organizationId: string, ruleId: string) {
+    const result = await db.query(
+      `UPDATE location_planner.tlb_weekly_off_days
+       SET is_active = FALSE
+       WHERE organization_id = $1 AND id = $2 AND is_active = TRUE
+       RETURNING id`,
+      [organizationId, ruleId],
+    );
+    if (!result.rows[0]) throw new NotFoundError('WEEKLY_OFF_DAY_NOT_FOUND', 'Weekly off day not found.');
+  }
+
   /**
-   * Copy the most recent complete Mon–Sun week onto empty days from fillFrom through monthEnd.
-   * Skips days that already have any non-cancelled assignment, and people marked off that weekday/date.
+   * Copy last month's weekday roster onto empty days of the target month.
+   * Each weekday uses the last date that weekday was rostered in the previous month.
+   * People already placed, or marked off, are skipped; other seats on that day still copy.
    */
   async fillMonthSchedule(
     organizationId: string,
     createdBy: string | null,
     input: { monthStart: string; fromDate?: string | null },
   ) {
-    const monthStart = String(input.monthStart).slice(0, 10);
-    const monthStartDate = new Date(`${monthStart}T12:00:00.000Z`);
-    if (Number.isNaN(monthStartDate.getTime())) {
+    const monthStartRaw = String(input.monthStart).slice(0, 10);
+    if (Number.isNaN(new Date(`${monthStartRaw}T12:00:00.000Z`).getTime())) {
       throw new ValidationError('monthStart must be a valid YYYY-MM-DD date.');
     }
-    const monthEndDate = new Date(
-      Date.UTC(monthStartDate.getUTCFullYear(), monthStartDate.getUTCMonth() + 1, 0, 12),
-    );
-    const monthEnd = monthEndDate.toISOString().slice(0, 10);
+    const monthStart = monthStartFromDateKey(monthStartRaw);
+    const monthEnd = `${monthStart.slice(0, 8)}${String(lastDateOfMonth(monthStart)).padStart(2, '0')}`;
     const fillFromRaw = input.fromDate ? String(input.fromDate).slice(0, 10) : monthStart;
     const fillFrom = fillFromRaw < monthStart ? monthStart : fillFromRaw > monthEnd ? monthEnd : fillFromRaw;
+    const patternStart = previousMonthStartFromDateKey(monthStart);
+    const patternEnd = previousMonthEndFromDateKey(monthStart);
 
-    const pattern = await db.query<{ start_date: string }>(
-      `SELECT start_date::text AS start_date
+    const sourceDays = await db.query<{ weekday: number; src_date: string }>(
+      `SELECT EXTRACT(DOW FROM start_date)::int AS weekday,
+              MAX(start_date)::text AS src_date
        FROM location_planner.employee_assignments
        WHERE organization_id = $1
          AND status <> 'cancelled'
-         AND start_date < $2::date
-       GROUP BY start_date
-       HAVING COUNT(*) > 0
-       ORDER BY start_date DESC
-       LIMIT 14`,
-      [organizationId, fillFrom],
+         AND start_date >= $2::date
+         AND start_date <= $3::date
+       GROUP BY 1`,
+      [organizationId, patternStart, patternEnd],
     );
-    if (!pattern.rows.length) {
-      throw new ValidationError('No prior week pattern found to copy.');
+    if (!sourceDays.rows.length) {
+      throw new ValidationError('No last-month schedule found to copy.');
     }
-
-    // Prefer a contiguous 7-day window ending at the latest source day.
-    const sourceDates = pattern.rows.map((r) => r.start_date).sort();
-    const latest = sourceDates[sourceDates.length - 1]!;
-    const latestDate = new Date(`${latest}T12:00:00.000Z`);
-    const patternStartDate = new Date(latestDate);
-    patternStartDate.setUTCDate(patternStartDate.getUTCDate() - 6);
-    const patternStart = patternStartDate.toISOString().slice(0, 10);
-    const patternEnd = latest;
 
     const sourceRows = await db.query(
       `SELECT employee_id, slot_id, location_id, temporary_role_id,
@@ -457,9 +501,8 @@ export class PostgresLocationPlannerStore {
        FROM location_planner.employee_assignments
        WHERE organization_id = $1
          AND status <> 'cancelled'
-         AND start_date >= $2::date
-         AND start_date <= $3::date`,
-      [organizationId, patternStart, patternEnd],
+         AND start_date IN (${sourceDays.rows.map((_, index) => `$${index + 2}`).join(', ')})`,
+      [organizationId, ...sourceDays.rows.map((row) => row.src_date)],
     );
 
     const byWeekday = new Map<number, typeof sourceRows.rows>();
@@ -479,23 +522,17 @@ export class PostgresLocationPlannerStore {
     while (cursor <= end) {
       const targetDate = cursor.toISOString().slice(0, 10);
       const weekday = cursor.getUTCDay();
-      const existing = await db.query(
-        `SELECT 1 FROM location_planner.employee_assignments
-         WHERE organization_id = $1 AND status <> 'cancelled'
-           AND start_date <= $2::date AND end_date >= $2::date
-         LIMIT 1`,
-        [organizationId, targetDate],
-      );
-      if (existing.rows[0]) {
-        skippedCount += 1;
-        cursor.setUTCDate(cursor.getUTCDate() + 1);
-        continue;
-      }
-
       const templates = byWeekday.get(weekday) ?? [];
       let dayInserted = 0;
       for (const template of templates) {
         const employeeId = String(template.employee_id);
+        const existing = await db.query(
+          `SELECT 1 FROM location_planner.employee_assignments
+           WHERE organization_id = $1 AND employee_id = $2 AND status <> 'cancelled'
+             AND start_date <= $3::date AND end_date >= $3::date
+           LIMIT 1`,
+          [organizationId, employeeId, targetDate],
+        );
         const weeklyOff = await db.query(
           `SELECT 1 FROM location_planner.tlb_weekly_off_days
            WHERE organization_id = $1 AND employee_id = $2 AND weekday = $3 AND is_active = TRUE
@@ -508,7 +545,7 @@ export class PostgresLocationPlannerStore {
            LIMIT 1`,
           [organizationId, employeeId, targetDate],
         );
-        if (weeklyOff.rows[0] || oneOff.rows[0]) {
+        if (existing.rows[0] || weeklyOff.rows[0] || oneOff.rows[0]) {
           skippedCount += 1;
           continue;
         }

@@ -1,5 +1,8 @@
 import { ConflictError, NotFoundError, ValidationError } from '../http/errors.js';
-import { pickDirectoryRoleKey } from '../organizations/role-model.js';
+import {
+  isPublicSignupRole,
+  pickDirectoryRoleKey,
+} from '../organizations/role-model.js';
 import type { OrganizationDirectoryStore, OrganizationRecord } from '../organizations/store.js';
 import { hashPassword, validatePassword } from './passwords.js';
 import { normalizeEmail } from './login.js';
@@ -61,7 +64,7 @@ export class SignupService {
       this.config.store.listOperatingRoles(organization.id),
       this.config.store.listOffices(organization.id),
     ]);
-    const publicRoles = roles.filter((role) => !role.isAdminRole);
+    const publicRoles = roles.filter(isPublicSignupRole);
     return {
       organization: {
         id: organization.id,

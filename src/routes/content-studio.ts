@@ -41,7 +41,10 @@ import {
   contentScheduleObjectKey,
 } from '../content/buckets.js';
 import { logger } from '../config/logger.js';
+import { sendAttendanceEmail, type SimpleEmail } from '../email/attendance-mailer.js';
+import { APP_URL } from '../email/branded-templates.js';
 import { persistMediaUpload } from '../content/upload.js';
+import { purgeContentStudioObject } from '../content/purge-object.js';
 import { streamStoredMedia } from '../content/media-stream.js';
 import { sharedMediaCapabilityStore } from '../content/redis-capability.js';
 import { mediaCapabilityStore } from '../content/media-capability.js';
@@ -62,6 +65,7 @@ export type ContentStudioRouteDependencies = {
   directory: OrganizationDirectoryStore;
   resumableUploadService?: ResumableUploadService;
   uploadSessionRepository?: UploadSessionRepository;
+  sendEmail?: (message: SimpleEmail) => Promise<boolean>;
 };
 
 const CONTENT_STUDIO_BLOCKED_OFFICE_SLUGS = new Set(['three-little-birds']);
@@ -410,6 +414,25 @@ export function createContentStudioRoutes(
   const routes = new Hono();
   const capabilities = env.appEnv === 'development' ? mediaCapabilityStore : sharedMediaCapabilityStore();
 
+  async function purgeIfUnreferenced(
+    organizationId: string,
+    bucket: string,
+    storagePath: string | null,
+  ) {
+    if (!storagePath) return;
+    const [assetRefs, libraryRefs] = await Promise.all([
+      dependencies.store.countAssetsUsingStoragePath(organizationId, storagePath),
+      dependencies.store.countClientMediaUsingPath(organizationId, storagePath),
+    ]);
+    if (assetRefs === 0 && libraryRefs === 0) {
+      await purgeContentStudioObject({
+        files: dependencies.files,
+        bucket,
+        objectKey: storagePath,
+      });
+    }
+  }
+
   if (dependencies.resumableUploadService && dependencies.uploadSessionRepository) {
     routes.route(
       '/uploads',
@@ -554,6 +577,69 @@ export function createContentStudioRoutes(
       },
     );
     return c.json({ client: serializeClient(client), pin });
+  });
+
+  routes.post('/clients/:clientId/review-email', async (c) => {
+    const auth = getAuth(c);
+    const organizationId = authorizeContent(auth, 'content_studio.manage');
+    const clientId = requireUuidValue(c.req.param('clientId'), 'clientId');
+    const body = await readJson(c);
+    const officeId = requireOfficeId(
+      auth,
+      readOptionalString(body.officeId ?? body.office_id, 'officeId', 80),
+    );
+    const scheduleId = requireUuidValue(body.scheduleId ?? body.schedule_id, 'scheduleId');
+    const authorName =
+      readOptionalString(body.authorName ?? body.author_name, 'authorName', 200) ??
+      'Your content team';
+    const existing = await dependencies.store.getClient(organizationId, officeId, clientId);
+    if (!existing) {
+      throw new NotFoundError('CONTENT_CLIENT_NOT_FOUND', 'Client was not found.');
+    }
+    const recipient = existing.email?.trim().toLowerCase();
+    if (!recipient) {
+      throw new ValidationError(
+        `${existing.companyName} has no client email configured. Add a contact email in client details first.`,
+        { field: 'email' },
+      );
+    }
+    const schedule = await dependencies.store.getSchedule(organizationId, scheduleId);
+    if (!schedule || schedule.clientId !== clientId) {
+      throw new NotFoundError('CONTENT_SCHEDULE_NOT_FOUND', 'Schedule was not found.');
+    }
+
+    const pin = generateNumericPin(6);
+    const pinExpiresAt = contentReviewLinkExpiresAt(90);
+    const client = await dependencies.store.updateClient(organizationId, officeId, clientId, {
+      loginPinHash: hashClientPin(existing.portalToken, pin),
+      pinLastGeneratedAt: new Date(),
+      pinExpiresAt,
+    });
+    const origin = (env.appPublicUrl || APP_URL).replace(/\/+$/, '');
+    const portalUrl = `${origin}/client-portal/${encodeURIComponent(client.portalToken)}`;
+    const emailed = await (dependencies.sendEmail ?? sendAttendanceEmail)({
+      to: recipient,
+      subject: `[Client review] ${schedule.title} is ready for your approval`,
+      firstName: existing.contactName?.trim().split(/\s+/)[0] || undefined,
+      actionUrl: portalUrl,
+      actionLabel: 'Open client portal',
+      text: [
+        `${authorName} shared "${schedule.title}" for your review in the ${existing.companyName} client portal.`,
+        '',
+        'Sign in with these details to approve posts or request changes:',
+        '',
+        `Portal link: ${portalUrl}`,
+        `Email: ${recipient}`,
+        `PIN: ${pin}`,
+        '',
+        `This PIN replaces any earlier PIN and is valid until ${pinExpiresAt.toISOString().slice(0, 10)}.`,
+      ].join('\n'),
+    });
+    if (!emailed) {
+      logger.warn({ clientId, scheduleId }, 'Client review email was not delivered');
+      return c.json({ client: serializeClient(client), portalUrl, emailed, pin });
+    }
+    return c.json({ client: serializeClient(client), portalUrl, emailed });
   });
 
   routes.delete('/clients/:clientId', async (c) => {
@@ -769,21 +855,7 @@ export function createContentStudioRoutes(
 
     for (const asset of assets) {
       if (!asset.storagePath || asset.libraryMediaId) continue;
-      const [assetRefs, libraryRefs] = await Promise.all([
-        dependencies.store.countAssetsUsingStoragePath(
-          organizationId,
-          asset.storagePath,
-        ),
-        dependencies.store.countClientMediaUsingPath(
-          organizationId,
-          asset.storagePath,
-        ),
-      ]);
-      if (assetRefs === 0 && libraryRefs === 0) {
-        await dependencies.files
-          .deleteObject(asset.bucket, asset.storagePath)
-          .catch((err) => logger.error({ err, organizationId }, 'Content media deletion requires reconciliation'));
-      }
+      await purgeIfUnreferenced(organizationId, asset.bucket, asset.storagePath);
     }
 
     return c.json({ ok: true });
@@ -1036,23 +1108,19 @@ export function createContentStudioRoutes(
     const organizationId = authorizeContent(auth, 'content_studio.manage');
     const assetId = requireUuidValue(c.req.param('assetId'), 'assetId');
     const asset = await dependencies.store.deleteAsset(organizationId, assetId);
-    if (asset.storagePath && !asset.libraryMediaId) {
-      const [assetRefs, libraryRefs] = await Promise.all([
-        dependencies.store.countAssetsUsingStoragePath(
+    if (asset.libraryMediaId) {
+      const stillAttached = await dependencies.store.countLibraryRefs(
+        organizationId,
+        asset.libraryMediaId,
+      );
+      if (stillAttached === 0) {
+        await dependencies.store.deleteClientMedia(
           organizationId,
-          asset.storagePath,
-        ),
-        dependencies.store.countClientMediaUsingPath(
-          organizationId,
-          asset.storagePath,
-        ),
-      ]);
-      if (assetRefs === 0 && libraryRefs === 0) {
-        await dependencies.files
-          .deleteObject(asset.bucket, asset.storagePath)
-          .catch((err) => logger.error({ err, organizationId }, 'Content media deletion requires reconciliation'));
+          asset.libraryMediaId,
+        ).catch(() => undefined);
       }
     }
+    await purgeIfUnreferenced(organizationId, asset.bucket, asset.storagePath);
     return c.json({ ok: true, asset: serializeAsset(asset) });
   });
 
@@ -1304,29 +1372,12 @@ export function createContentStudioRoutes(
     const auth = getAuth(c);
     const organizationId = authorizeContent(auth, 'content_studio.manage');
     const mediaId = requireUuidValue(c.req.param('mediaId'), 'mediaId');
-    const refs = await dependencies.store.countLibraryRefs(organizationId, mediaId);
-    if (refs > 0) {
-      throw new ValidationError(
-        'This library file is still attached to a schedule. Detach it first.',
-        { field: 'mediaId' },
-      );
-    }
+    await dependencies.store.deleteScheduleAssetsByLibraryMediaId(
+      organizationId,
+      mediaId,
+    );
     const media = await dependencies.store.deleteClientMedia(organizationId, mediaId);
-    if (media.storagePath) {
-      const remaining = await dependencies.store.countClientMediaUsingPath(
-        organizationId,
-        media.storagePath,
-      );
-      const assetRefs = await dependencies.store.countAssetsUsingStoragePath(
-        organizationId,
-        media.storagePath,
-      );
-      if (remaining === 0 && assetRefs === 0) {
-        await dependencies.files
-          .deleteObject(media.bucket, media.storagePath)
-          .catch((err) => logger.error({ err, organizationId }, 'Content media deletion requires reconciliation'));
-      }
-    }
+    await purgeIfUnreferenced(organizationId, media.bucket, media.storagePath);
     return c.json({ ok: true });
   });
 
@@ -1355,7 +1406,7 @@ export function createContentStudioRoutes(
       playbackId: capability ? createHash('sha256').update(capability).digest('hex') : null,
       method: c.req.method,
       path: c.req.path,
-      // Never include arbitrary header text, URLs, object names, or credentials.
+      // Never include arbitrary header text, URLs, object names, or credentials.//
       range: !range ? null : /^bytes=[0-9,-]{1,100}$/.test(range) ? range : 'malformed',
     });
     const granted = capability ? await capabilities.consume(capability) : null;

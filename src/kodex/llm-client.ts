@@ -1,15 +1,55 @@
 /**
  * OpenAI-compatible LLM client for KODEX.
  *
- * Prefer the company / internal gateway when ready:
- *   LLM_BASE_URL=https://llm.internal/v1
- *   LLM_API_KEY=...
+ * Preferred company endpoint (Bearer token, same shape as OpenAI):
+ *   KODEX_BASE_URL=https://ai-api.tmctechsolutions.com/v1
+ *   KODEX_TOKEN=kodex_...
+ *   model kodex or harold, stream false
  *
- * Falls back to OpenAI during cutover:
- *   OPENAI_API_KEY / OPENAI_BASE_URL
+ * Other gateways:
+ *   LLM_BASE_URL / LLM_API_KEY
+ *   OPENAI_BASE_URL / OPENAI_API_KEY
  *
  * CURSOR_API_KEY (crsr_…) is for Cursor Agents / SDK — not KODEX chat/vision.
  */
+
+import { TooManyRequestsError } from '../http/errors.js';
+
+const KODEX_BUSY_STATUS = 429;
+/** Kept well under the 120s browser timeout so a queued request still has time to run. */
+export const KODEX_DEFAULT_BUSY_WAIT_MS = 45_000;
+
+type BusyWaitOptions = {
+  busyWaitMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+};
+
+function busyRetryDelayMs(response: Response) {
+  const seconds = Number(response.headers.get('retry-after'));
+  return Number.isFinite(seconds) && seconds > 0 ? Math.min(seconds, 10) * 1000 : 3000;
+}
+
+/** The gateway has one shared inference slot; wait for capacity instead of failing the user. */
+async function sendWaitingForCapacity(
+  send: () => Promise<Response>,
+  options: BusyWaitOptions = {},
+) {
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const deadline = Date.now() + (options.busyWaitMs ?? KODEX_DEFAULT_BUSY_WAIT_MS);
+  for (;;) {
+    const response = await send();
+    if (response.status !== KODEX_BUSY_STATUS) return response;
+    const delay = busyRetryDelayMs(response);
+    await response.body?.cancel().catch(() => undefined);
+    if (Date.now() + delay > deadline) {
+      throw new TooManyRequestsError(
+        Math.ceil(delay / 1000),
+        'KODEX AI is busy with other requests right now. Please try again in a minute.',
+      );
+    }
+    await sleep(delay);
+  }
+}
 
 export type LlmMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool' | string;
@@ -21,9 +61,12 @@ export type LlmConfig = {
   baseUrl: string;
   apiKey: string;
   usingInternal: boolean;
+  usingKodex: boolean;
   chatModel: string;
   miniChatModel: string;
 };
+
+const KODEX_MODELS = new Set(['kodex', 'harold']);
 
 function trimSlash(value: string) {
   return value.replace(/\/+$/, '');
@@ -34,25 +77,48 @@ function optionalEnv(name: string) {
 }
 
 export function getLlmConfig(): LlmConfig {
+  const kodexBase = optionalEnv('KODEX_BASE_URL');
+  const kodexToken = optionalEnv('KODEX_TOKEN');
   const internalBase = optionalEnv('LLM_BASE_URL');
   const openaiBase = optionalEnv('OPENAI_BASE_URL') || 'https://api.openai.com/v1';
-  const apiKey = optionalEnv('LLM_API_KEY') || optionalEnv('OPENAI_API_KEY');
-  const usingInternal = Boolean(internalBase);
+  const usingKodex = Boolean(kodexBase && kodexToken);
+  const apiKey = usingKodex
+    ? kodexToken
+    : optionalEnv('LLM_API_KEY') || optionalEnv('OPENAI_API_KEY');
+  const usingInternal = usingKodex || Boolean(internalBase);
+  const kodexModel = optionalEnv('KODEX_CHAT_MODEL');
+  const chatModel = usingKodex
+    ? KODEX_MODELS.has(kodexModel)
+      ? kodexModel
+      : 'kodex'
+    : optionalEnv('LLM_CHAT_MODEL') || optionalEnv('OPENAI_CHAT_MODEL') || 'gpt-4o-mini';
+  const miniChatModel = usingKodex
+    ? chatModel
+    : optionalEnv('LLM_CHAT_MINI_MODEL') ||
+      optionalEnv('OPENAI_CHAT_MODEL') ||
+      optionalEnv('LLM_CHAT_MODEL') ||
+      'gpt-4o-mini';
 
   return {
-    baseUrl: trimSlash(internalBase || openaiBase),
+    baseUrl: trimSlash(kodexBase || internalBase || openaiBase),
     apiKey,
     usingInternal,
-    chatModel:
-      optionalEnv('LLM_CHAT_MODEL') ||
-      optionalEnv('OPENAI_CHAT_MODEL') ||
-      'gpt-4o-mini',
-    miniChatModel:
-      optionalEnv('LLM_CHAT_MINI_MODEL') ||
-      optionalEnv('OPENAI_CHAT_MODEL') ||
-      optionalEnv('LLM_CHAT_MODEL') ||
-      'gpt-4o-mini',
+    usingKodex,
+    chatModel,
+    miniChatModel,
   };
+}
+
+export function prefersKodexOpenAi(config = getLlmConfig()) {
+  return config.usingKodex && Boolean(config.apiKey) && Boolean(config.baseUrl);
+}
+
+export function resolveLlmModel(requested: string | null | undefined, config = getLlmConfig()) {
+  const value = requested?.trim() || config.miniChatModel;
+  if (config.usingKodex && !KODEX_MODELS.has(value)) {
+    return config.chatModel;
+  }
+  return value;
 }
 
 export function isLlmReady(config = getLlmConfig()) {
@@ -62,7 +128,7 @@ export function isLlmReady(config = getLlmConfig()) {
 export function assertLlmConfigured(config = getLlmConfig()) {
   if (!config.apiKey) {
     throw new Error(
-      'KODEX is not configured. Set LLM_API_KEY (preferred) or OPENAI_API_KEY for the company LLM gateway.',
+      'KODEX is not configured. Set KODEX_TOKEN and KODEX_BASE_URL for the company LLM.',
     );
   }
   return config;
@@ -71,14 +137,17 @@ export function assertLlmConfigured(config = getLlmConfig()) {
 async function llmFetch(path: string, body: Record<string, unknown>) {
   const config = assertLlmConfigured();
   const url = `${config.baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
+  const payload = JSON.stringify(body);
+  const response = await sendWaitingForCapacity(() =>
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: payload,
+    }),
+  );
 
   const text = await response.text();
   let data: unknown = null;
@@ -116,10 +185,11 @@ export async function llmChatCompletions(params: {
 }) {
   const config = getLlmConfig();
   return llmFetch('/chat/completions', {
-    model: params.model?.trim() || config.miniChatModel,
+    model: resolveLlmModel(params.model, config),
     messages: params.messages,
     temperature: params.temperature,
     max_tokens: params.maxTokens,
+    stream: false,
     ...(params.responseFormat ? { response_format: params.responseFormat } : {}),
   });
 }
@@ -150,6 +220,97 @@ export async function llmChatText(params: {
       ? (message as Record<string, unknown>).content
       : null;
   return (typeof content === 'string' ? content : '').trim() || 'No response generated.';
+}
+
+export function kodexMediaAnalyzeUrl(baseUrl: string) {
+  return `${new URL(baseUrl).origin}/api/v1/ai/media/analyze`;
+}
+
+export type KodexImageAnalysis = {
+  description: string;
+  mood: string;
+  mainSubject: string;
+  summary: string;
+};
+
+function textValue(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (Array.isArray(value)) {
+    return value.map((item) => textValue(item)).filter(Boolean).join(', ');
+  }
+  return '';
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+export function readKodexImageAnalysis(body: unknown): KodexImageAnalysis {
+  const root = recordValue(body) ?? {};
+  const analysis = recordValue(root.analysis) ?? root;
+  const description =
+    textValue(analysis.description) ||
+    textValue(analysis.sceneDescription) ||
+    textValue(analysis.summary);
+  const mood = textValue(analysis.mood);
+  const mainSubject = textValue(analysis.mainSubject) || textValue(analysis.subject);
+  const summary = [
+    mainSubject ? `Subject: ${mainSubject}` : '',
+    description ? `Description: ${description}` : '',
+    mood ? `Mood: ${mood}` : '',
+  ].filter(Boolean).join('\n');
+  return {
+    description: description || summary,
+    mood,
+    mainSubject,
+    summary: summary || description,
+  };
+}
+
+/** Content Studio image reading. Chat completions reject image parts. */
+export async function kodexAnalyzeImage(params: {
+  bytes: Buffer;
+  fileName?: string;
+  contentType?: string;
+  fetchImpl?: (url: string, init: RequestInit) => Promise<Response>;
+} & BusyWaitOptions): Promise<KodexImageAnalysis> {
+  const config = assertLlmConfigured();
+  if (!config.usingKodex) {
+    throw new Error('KODEX image analysis requires KODEX_TOKEN and KODEX_BASE_URL.');
+  }
+  const form = new FormData();
+  const contentType = params.contentType?.trim() || 'image/png';
+  form.append(
+    'image',
+    new Blob([new Uint8Array(params.bytes)], { type: contentType }),
+    params.fileName?.trim() || 'image.png',
+  );
+  const response = await sendWaitingForCapacity(
+    () =>
+      (params.fetchImpl ?? fetch)(kodexMediaAnalyzeUrl(config.baseUrl), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${config.apiKey}` },
+        body: form,
+      }),
+    params,
+  );
+  const text = await response.text();
+  let data: unknown = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+  if (!response.ok) {
+    throw new Error(`KODEX vision error (${response.status}).`);
+  }
+  const analysis = readKodexImageAnalysis(data);
+  if (!analysis.summary) {
+    throw new Error('KODEX vision returned no image description.');
+  }
+  return analysis;
 }
 
 /** Vision via chat completions (portable across OpenAI-compatible gateways). */

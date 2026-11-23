@@ -16,6 +16,12 @@ import {
   contentClientObjectKey,
   contentScheduleObjectKey,
 } from '../buckets.js';
+import {
+  createMediaIngestUrl,
+  MEDIA_INGEST_GRANT_TTL_SECONDS,
+} from '../../media-platform/playback/ingest-url.js';
+import type { IngestGrantStore } from '../../media-platform/playback/ingest-grant.js';
+import { mediaPrefixMatches } from './media-prefix.js';
 import type {
   CreateUploadSession,
   PublicUploadSession,
@@ -54,6 +60,11 @@ export type ResumableUploadConfig = {
   maxConcurrentPartsPerSession: number;
   maxConcurrentPartsPerUser: number;
   maxConcurrentPartsPerOrganization: number;
+  ingest?: {
+    publicBaseUrl: string;
+    secret: string;
+    grants: IngestGrantStore;
+  };
 };
 
 export type CreateResumableUploadInput = {
@@ -72,6 +83,7 @@ function publicParts(parts: MultipartPart[]) {
 export function publicUploadSession(
   session: UploadSession,
   parts: MultipartPart[],
+  ingest?: PublicUploadSession['ingest'],
 ): PublicUploadSession {
   return {
     sessionId: session.id,
@@ -84,48 +96,9 @@ export function publicUploadSession(
     partCount: session.expectedPartCount,
     expiresAt: session.expiresAt.toISOString(),
     committedParts: publicParts(parts),
+    ...(ingest ? { ingest } : {}),
     ...(session.completionResult ? { result: session.completionResult } : {}),
   };
-}
-
-function mediaPrefixMatches(mimeType: string, prefix: Uint8Array) {
-  const ascii = String.fromCharCode(...prefix.subarray(0, Math.min(prefix.length, 512)));
-  const starts = (...bytes: number[]) =>
-    bytes.every((byte, index) => prefix[index] === byte);
-
-  switch (mimeType) {
-    case 'image/jpeg':
-      return starts(0xff, 0xd8, 0xff);
-    case 'image/png':
-      return starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
-    case 'image/gif':
-      return ascii.startsWith('GIF87a') || ascii.startsWith('GIF89a');
-    case 'image/webp':
-      return ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'WEBP';
-    case 'image/avif':
-      return ascii.slice(4, 8) === 'ftyp' && /^(avif|avis)$/.test(ascii.slice(8, 12));
-    case 'image/svg+xml': {
-      const normalized = ascii.replace(/^\uFEFF/, '').trimStart();
-      return (
-        /^(?:<\?xml[^>]*>\s*)?<svg(?:\s|>)/i.test(normalized) &&
-        !/<!DOCTYPE|<!ENTITY/i.test(normalized)
-      );
-    }
-    case 'video/mp4':
-      return (
-        ascii.slice(4, 8) === 'ftyp' &&
-        /^(?:isom|iso[2-9]|mp4[12]|avc1|M4V |MSNV)$/.test(ascii.slice(8, 12))
-      );
-    case 'video/quicktime':
-      return ascii.slice(4, 8) === 'ftyp' && ascii.slice(8, 10) === 'qt';
-    case 'video/webm':
-    case 'video/x-matroska':
-      return starts(0x1a, 0x45, 0xdf, 0xa3);
-    case 'video/x-msvideo':
-      return ascii.startsWith('RIFF') && ascii.slice(8, 12) === 'AVI ';
-    default:
-      return false;
-  }
 }
 
 function validateStream(
@@ -239,6 +212,7 @@ export class ResumableUploadService {
     if (expectedPartCount > MAX_PARTS) {
       throw new PayloadTooLargeError('Upload requires too many parts.');
     }
+    await this.releaseEmptyOwnedUploads(input.organizationId, input.createdBy);
     const sessionId = randomUUID();
     const objectKey = input.target.type === 'schedule_asset'
       ? contentScheduleObjectKey({
@@ -298,14 +272,14 @@ export class ResumableUploadService {
         if (providerUploadId) {
           await this.dependencies.repository.attachProviderUpload(session.id, providerUploadId);
         } else {
-          return publicUploadSession(session, []);
+          return this.present(session, []);
         }
       } catch (recoveryError) {
         logger.error(
           { sessionId: session.id, err: recoveryError },
           'content_studio_upload_initiation_recovery_deferred',
         );
-        return publicUploadSession(session, []);
+        return this.present(session, []);
       }
     }
     return this.get(input.organizationId, input.createdBy, session.id);
@@ -321,7 +295,7 @@ export class ResumableUploadService {
     } else {
       parts = await this.dependencies.repository.listParts(session.id);
     }
-    return publicUploadSession(session, parts);
+    return this.present(session, parts);
   }
 
   async uploadPart(
@@ -417,7 +391,7 @@ export class ResumableUploadService {
     );
     if (session.state === 'completed') {
       return {
-        session: publicUploadSession(
+        session: await this.present(
           session,
           await this.dependencies.repository.listParts(session.id),
         ),
@@ -467,7 +441,7 @@ export class ResumableUploadService {
         result,
       );
       return {
-        session: publicUploadSession(
+        session: await this.present(
           completed,
           await this.dependencies.repository.listParts(session.id),
         ),
@@ -686,6 +660,59 @@ export class ResumableUploadService {
       this.dependencies.config.terminalRetentionMs,
       limit,
     );
+  }
+
+  private async releaseEmptyOwnedUploads(organizationId: string, createdBy: string) {
+    const idle = await this.dependencies.repository.listEmptyActiveOwned(
+      organizationId,
+      createdBy,
+    );
+    for (const session of idle) {
+      try {
+        await this.cancel(organizationId, createdBy, session.id);
+      } catch (error) {
+        logger.warn(
+          { sessionId: session.id, err: error },
+          'content_studio_empty_upload_release_deferred',
+        );
+      }
+    }
+  }
+
+  private async present(session: UploadSession, parts: MultipartPart[]) {
+    return publicUploadSession(session, parts, await this.issueIngestDescriptor(session));
+  }
+
+  private async issueIngestDescriptor(session: UploadSession) {
+    const ingest = this.dependencies.config.ingest;
+    if (!ingest || session.state !== 'uploading' || !session.providerUploadId) {
+      return undefined;
+    }
+    try {
+      const minted = createMediaIngestUrl({
+        sessionId: session.id,
+        secret: ingest.secret,
+        publicBaseUrl: ingest.publicBaseUrl,
+      });
+      await ingest.grants.issue(
+        {
+          signature: minted.signature,
+          sessionId: session.id,
+          organizationId: session.organizationId,
+          userId: session.createdBy,
+          bucket: session.bucket,
+          objectKey: session.objectKey,
+          uploadId: session.providerUploadId,
+          expectedPartCount: session.expectedPartCount,
+          expiresAt: minted.expiresAt,
+        },
+        MEDIA_INGEST_GRANT_TTL_SECONDS * 1000,
+      );
+      return { putUrlPrefix: minted.putUrlPrefix };
+    } catch (error) {
+      logger.error({ sessionId: session.id, err: error }, 'content_studio_ingest_grant_deferred');
+      return undefined;
+    }
   }
 
   private async requireOwned(

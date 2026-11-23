@@ -23,6 +23,12 @@ test('VPS validator rejects loopback regression, topology drift and public data 
     (c) => { c.services.api.environment.APP_ENV = 'production'; },
     (c) => { c.services.postgres.ports[0].host_ip = '0.0.0.0'; },
     (c) => { c.services.api.ports = [{ target: 3000 }]; },
+    (c) => {
+      c.services['api-uploads'] = {
+        network_mode: 'host',
+        environment: { HOST: '0.0.0.0', PORT: '3000', KODE_PROCESS_ROLE: 'uploads' },
+      };
+    },
   ]) {
     const config = valid();
     change(config);

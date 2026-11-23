@@ -24,24 +24,33 @@ const HTTP_REQUEST_TIMEOUT_MS = 30 * 60 * 1000;
 
 server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
 
-const stopAttendanceScheduler = startAttendanceScheduler();
+const isUploadProcess = env.processRole === 'uploads';
+const stopAttendanceScheduler = isUploadProcess
+  ? () => undefined
+  : startAttendanceScheduler();
 
-void getChatRealtimeHub()
-  .start()
-  .catch((error) => {
-    logger.warn(
-      { err: error instanceof Error ? error.message : String(error) },
-      'Chat realtime hub failed to start',
-    );
-  });
+if (!isUploadProcess) {
+  void getChatRealtimeHub()
+    .start()
+    .catch((error) => {
+      logger.warn(
+        { err: error instanceof Error ? error.message : String(error) },
+        'Chat realtime hub failed to start',
+      );
+    });
+}
 
 logger.info(
   {
     host: env.host,
     port: env.port,
     appEnv: env.appEnv,
-    websocket: true,
+    processRole: env.processRole,
+    websocket: !isUploadProcess,
     requestTimeoutMs: server.requestTimeout,
+    kodexWorkspaceGateway: env.kodexAiGateway.workspaceChatEnabled,
+    kodexVisionGateway: env.kodexAiGateway.enabled,
+    kodexGatewayHost: env.kodexAiGateway.baseUrl,
   },
   'Kode Platform API started',
 );
@@ -71,7 +80,9 @@ async function shutdown(signal: string) {
 
   try {
     stopAttendanceScheduler();
-    await getChatRealtimeHub().stop();
+    if (!isUploadProcess) {
+      await getChatRealtimeHub().stop();
+    }
     await closeHttpServer();
     await closeAllRedisRateLimiters();
     await closeMediaCapabilities();

@@ -74,7 +74,7 @@ Parameters:
 
 Plaintext passwords are never stored or logged. Hashes are never returned.
 
-Password rules: at least 4 characters, at most 128 characters, must not equal
+Password rules: at least 12 characters, at most 128 characters, must not equal
 the account email. There is no 12-character minimum.
 
 ## Access tokens

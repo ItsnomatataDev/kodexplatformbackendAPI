@@ -1,6 +1,8 @@
 import { logger } from '../config/logger.js';
 import { runAttendanceAutoClockOut } from './auto-clock-out.js';
+import { runLocationPlannerMonthEndReminder } from '../location-planner/month-end-reminder.js';
 import { runTimeEntryAutoStop } from '../work/auto-stop.js';
+import { runDueScheduledActions } from '../ai/agent/service.js';
 
 const TICK_MS = 60_000;
 
@@ -12,13 +14,16 @@ export function startAttendanceScheduler() {
     if (ticking) return;
     ticking = true;
     try {
-      const results = await Promise.allSettled([
-        runAttendanceAutoClockOut(),
-        runTimeEntryAutoStop(),
-      ]);
+      const jobs = [
+        { name: 'attendance', run: runAttendanceAutoClockOut },
+        { name: 'time_entries', run: runTimeEntryAutoStop },
+        { name: 'location_planner_month_end', run: runLocationPlannerMonthEndReminder },
+        { name: 'kodex_scheduled_actions', run: () => runDueScheduledActions() },
+      ] as const;
+      const results = await Promise.allSettled(jobs.map((job) => job.run()));
       results.forEach((result, index) => {
         if (result.status === 'rejected') {
-          logger.error({ err: result.reason, job: index === 0 ? 'attendance' : 'time_entries' },
+          logger.error({ err: result.reason, job: jobs[index]?.name },
             'End-of-day job failed');
         }
       });
@@ -33,8 +38,14 @@ export function startAttendanceScheduler() {
   };
 
   void tick();
-  logger.info({ intervalMs: TICK_MS, cutoff: '18:00 Africa/Harare', jobs: ['attendance', 'time_entries'] },
-    'End-of-day scheduler started');
+  logger.info(
+    {
+      intervalMs: TICK_MS,
+      cutoff: '18:00 Africa/Harare',
+      jobs: ['attendance', 'time_entries', 'location_planner_month_end', 'kodex_scheduled_actions'],
+    },
+    'End-of-day scheduler started',
+  );
   const timer = setInterval(() => {
     void tick();
   }, TICK_MS);

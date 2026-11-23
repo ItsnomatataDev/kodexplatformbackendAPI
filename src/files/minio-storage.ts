@@ -32,6 +32,20 @@ function encodeKey(objectKey: string) {
     .join('/');
 }
 
+function awsUriEncode(value: string) {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (character) =>
+    `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+function canonicalQuery(params?: Record<string, string>) {
+  if (!params) return '';
+  return Object.keys(params)
+    .sort()
+    .map((key) => `${awsUriEncode(key)}=${awsUriEncode(params[key] ?? '')}`)
+    .join('&');
+}
+
 const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
 
 function headerNumber(headers: Headers, name: string) {
@@ -66,7 +80,9 @@ export class MinioFileStorage implements FileStorage {
     if (!response.ok) {
       throw new ServiceUnavailableError(
         'OBJECT_STORAGE_UNAVAILABLE',
-        `Object storage rejected upload (HTTP ${response.status}).`,
+        response.status === 404
+          ? `Object storage bucket "${input.bucket}" was not found.`
+          : `Object storage rejected upload (HTTP ${response.status}).`,
       );
     }
   }
@@ -240,6 +256,42 @@ export class MinioFileStorage implements FileStorage {
     }
   }
 
+  async listObjectKeys(bucket: string, prefix: string) {
+    const keys: string[] = [];
+    let continuation: string | undefined;
+    for (let page = 0; page < 50; page += 1) {
+      const query: Record<string, string> = {
+        'list-type': '2',
+        prefix,
+      };
+      if (continuation) query['continuation-token'] = continuation;
+      const response = await this.request('GET', bucket, '', undefined, {}, undefined, {
+        query,
+      });
+      if (!response.ok) {
+        throw new ServiceUnavailableError(
+          'OBJECT_STORAGE_UNAVAILABLE',
+          'Object storage is unavailable.',
+        );
+      }
+      const xml = await response.text();
+      for (const match of xml.matchAll(/<Key>([^<]+)<\/Key>/g)) {
+        const key = match[1]
+          .replace(/&amp;/g, '&')
+          .replace(/&lt;/g, '<')
+          .replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"')
+          .replace(/&apos;/g, "'");
+        if (key) keys.push(key);
+      }
+      const truncated = /<IsTruncated>\s*true\s*<\/IsTruncated>/i.test(xml);
+      const next = xml.match(/<NextContinuationToken>([^<]+)<\/NextContinuationToken>/);
+      if (!truncated || !next?.[1]) break;
+      continuation = next[1];
+    }
+    return keys;
+  }
+
   /** Read-only bucket probe. Does not create buckets. */
   async headBucket(bucket: string): Promise<number> {
     const response = await this.request('HEAD', bucket, '');
@@ -279,7 +331,7 @@ export class MinioFileStorage implements FileStorage {
     body?: Buffer | ReadableStream<Uint8Array>,
     extraHeaders: Record<string, string> = {},
     payloadHashOverride?: string,
-    options?: { streamBody?: boolean },
+    options?: { streamBody?: boolean; query?: Record<string, string> },
   ) {
     if (!this.options.accessKey || !this.options.secretKey) {
       throw new ServiceUnavailableError(
@@ -319,10 +371,11 @@ export class MinioFileStorage implements FileStorage {
       .map((name) => `${name}:${headers[name]}\n`)
       .join('');
     const signedHeaders = signedHeaderNames.join(';');
+    const query = canonicalQuery(options?.query);
     const canonicalRequest = [
       method,
       canonicalUri,
-      '',
+      query,
       canonicalHeaders,
       signedHeaders,
       payloadHash,
@@ -347,7 +400,7 @@ export class MinioFileStorage implements FileStorage {
 
     try {
       return await this.dispatch(
-        `${url.origin}${canonicalUri}`,
+        `${url.origin}${canonicalUri}${query ? `?${query}` : ''}`,
         {
           method,
           headers,

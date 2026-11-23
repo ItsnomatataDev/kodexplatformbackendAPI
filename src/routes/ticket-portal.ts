@@ -2,9 +2,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
 import { env } from '../config/env.js';
 import { decodeStrictBase64 } from '../http/base64.js';
-import { NotFoundError, ValidationError } from '../http/errors.js';
+import { NotFoundError, ServiceUnavailableError, ValidationError } from '../http/errors.js';
 import { FIELD_LIMITS } from '../http/limits.js';
 import type { FileStorage } from '../files/storage.js';
+import { sendAttendanceEmail, type SimpleEmail } from '../email/attendance-mailer.js';
+import type { NotificationStore } from '../notifications/store.js';
+import { sendTicketFollowUp, TICKET_FOLLOW_UP_MAX_CHARS } from '../tickets/follow-up.js';
 import {
   readJson,
   readOptionalString,
@@ -22,6 +25,8 @@ import {
 export type TicketPortalRouteDependencies = {
   store: TicketStore;
   files: FileStorage;
+  notifications?: NotificationStore;
+  sendEmail?: (message: SimpleEmail) => Promise<boolean>;
 };
 
 const SHEARWATER_OFFICE_SLUGS = new Set([
@@ -57,7 +62,7 @@ function isAllowedTicketAttachment(contentType: string, filename: string) {
   ) {
     return true;
   }
-  return /\.(png|jpe?g|gif|webp|heic|heif|pdf|txt)$/i.test(filename);
+  return /\.(png|jpe?g|gif|webp|heic|heif|pdf|txt|docx|xlsx|pptx)$/i.test(filename);
 }
 
 function serializePublicTicket(ticket: Awaited<ReturnType<TicketStore['getByTrackingToken']>>) {
@@ -260,6 +265,52 @@ export function createTicketPortalRoutes(
       throw new NotFoundError('TICKET_NOT_FOUND', 'Ticket not found.');
     }
     return c.json({ id: comment.id }, 201);
+  });
+
+  routes.post('/tickets/:token/follow-up', async (c) => {
+    const token = requireUuidValue(c.req.param('token'), 'token');
+    const body = await readJson(c);
+    const ticket = await dependencies.store.getByTrackingToken(token);
+    if (!ticket) {
+      throw new NotFoundError('TICKET_NOT_FOUND', 'Ticket not found.');
+    }
+    if (!dependencies.notifications) {
+      throw new ServiceUnavailableError(
+        'FOLLOW_UP_UNAVAILABLE',
+        'Follow-ups are not available.',
+      );
+    }
+    const message = readRequiredText(
+      body.message ?? body.body,
+      'message',
+      TICKET_FOLLOW_UP_MAX_CHARS,
+    );
+    const { comment, emailed } = await sendTicketFollowUp({
+      notifications: dependencies.notifications,
+      sendEmail: dependencies.sendEmail ?? sendAttendanceEmail,
+      ticket,
+      message,
+      requesterUserId: ticket.userId,
+      requesterName: ticket.externalName ?? ticket.requesterName,
+      requesterEmail: ticket.requesterEmail,
+      createComment: (commentBody) =>
+        dependencies.store.createPublicComment({
+          trackingToken: token,
+          body: commentBody,
+          requesterName: null,
+          requesterEmail: null,
+        }),
+    });
+    return c.json(
+      {
+        follow_up: {
+          ticket_id: ticket.id,
+          comment_id: comment?.id ?? null,
+          emailed,
+        },
+      },
+      201,
+    );
   });
 
   routes.get('/tickets/:token/attachments/:attachmentId/content', async (c) => {

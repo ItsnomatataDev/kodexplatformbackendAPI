@@ -144,6 +144,17 @@ export class MemoryFileStorage implements FileStorage {
     this.objects.delete(this.key(bucket, objectKey));
   }
 
+  async listObjectKeys(bucket: string, prefix: string) {
+    const needle = `${bucket}:`;
+    const keys: string[] = [];
+    for (const stored of this.objects.keys()) {
+      if (!stored.startsWith(needle)) continue;
+      const objectKey = stored.slice(needle.length);
+      if (objectKey.startsWith(prefix)) keys.push(objectKey);
+    }
+    return keys;
+  }
+
   async ensureBucket(_bucket: string) {
     // Memory storage has no buckets to create.
   }

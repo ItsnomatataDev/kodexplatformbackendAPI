@@ -146,6 +146,7 @@ export async function runChatAssist(params: {
   const isMember = await params.store.isMember(
     conversationId,
     params.auth.actor.userId,
+    params.organizationId,
   );
   if (!isMember) {
     throw new ForbiddenError(
@@ -198,7 +199,7 @@ export async function runChatAssist(params: {
       ? new Date(Date.now() + disappearingSeconds * 1000)
       : null;
 
-  const message = await params.store.sendMessage({
+  const { message } = await params.store.sendMessage({
     organizationId: params.organizationId,
     conversationId,
     senderId: params.auth.actor.userId,

@@ -305,8 +305,8 @@ export class MemoryOrganizationDirectoryStore
 
     if (existingMembership) {
       existingMembership.roleKey = role.roleKey;
-      existingMembership.status = 'active';
-      existingMembership.accountStatus = 'active';
+      existingMembership.status = 'pending';
+      existingMembership.accountStatus = existing.accountStatus;
       existingMembership.officeId =
         input.officeId ?? existingMembership.officeId;
       existingMembership.fullName =
@@ -325,23 +325,21 @@ export class MemoryOrganizationDirectoryStore
         employeeCode: null,
         roleKey: role.roleKey,
         officeId: input.officeId ?? null,
-        status: 'active',
-        accountStatus: 'active',
+        status: 'pending',
+        accountStatus: existing.accountStatus,
       });
     }
 
     const user = this.users.find((row) => row.userId === existing.userId);
     if (user) {
-      user.accountStatus = 'active';
-      user.isActive = true;
       user.fullName = user.fullName ?? (input.fullName.trim() || null);
     }
 
     return {
-      status: 'linked',
+      status: 'invite_created',
       userId: existing.userId,
       membershipId: existingMembership?.membershipId ?? membershipId,
-      message: 'User linked successfully and marked active.',
+      message: 'Invitation created. Account approval is still required.',
     };
   }
 
@@ -509,6 +507,10 @@ export class MemoryOrganizationDirectoryStore
       }
     }
 
+    if (member.roleKey === 'admin' && role.roleKey !== 'admin') {
+      this.assertNotLastActiveAdmin(input.organizationId, input.userId);
+    }
+
     member.roleKey = role.roleKey;
     if (input.changeOffice) {
       member.officeId = input.officeId ?? null;
@@ -548,7 +550,7 @@ export class MemoryOrganizationDirectoryStore
     if (remaining.length < 1) {
       throw new ForbiddenError(
         'LAST_ADMIN',
-        'You cannot suspend or delete the last active administrator.',
+        'You cannot remove the last active administrator.',
       );
     }
   }

@@ -23,9 +23,26 @@ function fixture() {
     canReadLegacyAttachment: async () => false,
     getConversation: async () => ({ id: conversation, type: 'group', disappearingSeconds: null }),
     sendMessage: async (input: SendMessageInput) => {
-      const row = { ...input, id: '44444444-4444-4444-4444-444444444444', createdAt: new Date(), updatedAt: new Date(), isEdited: false, isDeleted: false } as ChatMessageRecord;
+      const row = {
+        id: '44444444-4444-4444-4444-444444444444',
+        conversationId: input.conversationId,
+        organizationId: input.organizationId,
+        senderId: input.senderId,
+        body: input.body ?? null,
+        messageType: input.messageType ?? 'text',
+        replyToMessageId: input.replyToMessageId ?? null,
+        attachmentUrl: input.attachmentUrl ?? null,
+        attachmentName: input.attachmentName ?? null,
+        metadata: input.metadata ?? {},
+        isEdited: false,
+        isDeleted: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        clientMessageId: input.clientMessageId ?? null,
+        expiresAt: input.expiresAt ?? null,
+      } as ChatMessageRecord;
       messages.push(row);
-      return row;
+      return { message: row, created: true };
     },
     listMessages: async () => messages,
     listReactionsForMessages: async () => [],
@@ -50,7 +67,10 @@ function fixture() {
 for (const contentType of ['image/png', 'application/pdf']) {
   test(`recipient retrieves uploaded ${contentType} bytes and persisted reference`, async () => {
     const { app, messages, post } = fixture();
-    const bytes = Buffer.from([0, 255, 128, 25, 42]);
+    const bytes =
+      contentType === 'image/png'
+        ? Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 1, 2, 3])
+        : Buffer.from([0, 255, 128, 25, 42]);
     const upload = await post('/attachments', { conversationId: conversation, fileName: 'shared-file', contentType, contentBase64: bytes.toString('base64') });
     assert.equal(upload.status, 201, await upload.clone().text());
     const { attachment } = await upload.json() as { attachment: { url: string } };

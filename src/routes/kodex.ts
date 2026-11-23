@@ -84,7 +84,7 @@ export function createKodexRoutes(dependencies: KodexRouteDependencies) {
       ready: isLlmReady(),
       providerHint: isLlmReady()
         ? 'openai-compatible'
-        : 'Set LLM_API_KEY or OPENAI_API_KEY for the company KODEX gateway',
+        : 'Set KODEX_TOKEN and KODEX_BASE_URL for the company KODEX gateway',
     });
   });
 

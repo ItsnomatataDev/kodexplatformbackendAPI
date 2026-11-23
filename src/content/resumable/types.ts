@@ -87,6 +87,10 @@ export interface UploadSessionRepository {
     createdBy: string,
     sessionId: string,
   ): Promise<UploadSession | null>;
+  listEmptyActiveOwned(
+    organizationId: string,
+    createdBy: string,
+  ): Promise<UploadSession[]>;
   claimPart(
     organizationId: string,
     createdBy: string,
@@ -152,6 +156,10 @@ export interface UploadSessionRepository {
   purgeTerminal(retentionMs: number, limit: number): Promise<number>;
 }
 
+export type PublicUploadIngest = {
+  putUrlPrefix: string;
+};
+
 export type PublicUploadSession = {
   sessionId: string;
   state: UploadState;
@@ -163,5 +171,6 @@ export type PublicUploadSession = {
   partCount: number;
   expiresAt: string;
   committedParts: Array<Pick<MultipartPart, 'partNumber' | 'sizeBytes'>>;
+  ingest?: PublicUploadIngest;
   result?: Record<string, unknown>;
 };

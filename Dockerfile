@@ -62,14 +62,6 @@ EXPOSE 3200
 HEALTHCHECK NONE
 CMD ["node", "dist/media-platform/playback/auth-server.js"]
 
-# Opt-in independent authentication runtime; ordinary API remains the default final target.
-FROM runtime AS infrastructure
-ENV INFRA_ENABLED=false INFRA_PORT=3101 INFRA_HOST=0.0.0.0
-EXPOSE 3101
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3101/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-CMD ["node", "dist/infrastructure/server.js"]
-
 FROM runtime AS content-studio-upload-maintenance
 HEALTHCHECK NONE
 ENV CONTENT_STUDIO_UPLOAD_MAINTENANCE_INTERVAL_SECONDS=300

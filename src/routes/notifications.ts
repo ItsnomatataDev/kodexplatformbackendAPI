@@ -4,6 +4,9 @@ import { rejectClientUserOverride } from "../auth/account.js";
 import { assertAuthorized } from "../authorization/authorize.js";
 import { requireOrganizationId } from "../authorization/organization.js";
 import { isUuid } from "../auth/uuid.js";
+import { env } from "../config/env.js";
+import { resolveEmailAction } from "../email/email-action.js";
+import { APP_URL } from "../email/branded-templates.js";
 import { NotFoundError, ValidationError } from "../http/errors.js";
 import { rateLimitWork } from "../http/work-rate-limit.js";
 import {
@@ -252,6 +255,13 @@ export function createNotificationRoutes(
           field: "userIds",
         });
       }
+    }
+    await dependencies.store.assertActiveOrgRecipients(
+      organizationId,
+      uniqueRecipients,
+    );
+
+    for (const recipientUserId of uniqueRecipients) {
       const result = await dependencies.store.create({
         organizationId,
         recipientUserId,
@@ -278,6 +288,7 @@ export function createNotificationRoutes(
     if (sendEmail) {
       const contacts = await dependencies.store.getRecipientEmails(
         uniqueRecipients,
+        organizationId,
       );
       const { sendAttendanceEmail } = await import(
         "../email/attendance-mailer.js"
@@ -302,7 +313,7 @@ export function createNotificationRoutes(
 
   routes.post("/email", async (c) => {
     const auth = getAuth(c);
-    authorizeInbox(auth, "notifications.create");
+    const organizationId = authorizeInbox(auth, "notifications.create");
     await rateLimitWork(c, "mutation");
     const body = await readJson(c);
     const to =
@@ -319,18 +330,39 @@ export function createNotificationRoutes(
         : typeof body.message === "string"
           ? body.message
           : null;
-    const html = typeof body.html === "string" ? body.html : undefined;
-    if (!to || !subject || (!text && !html)) {
-      throw new ValidationError("to, subject, and text (or html) are required.");
+    if (!to || !subject || !text) {
+      throw new ValidationError("to, subject, and text are required.");
+    }
+    const member = await dependencies.store.findActiveMemberByEmail(
+      organizationId,
+      to,
+    );
+    if (!member) {
+      throw new ValidationError(
+        "Email can only be sent to an active member of this organization.",
+        { field: "to" },
+      );
     }
     const { sendAttendanceEmail } = await import(
       "../email/attendance-mailer.js"
     );
+    const action = resolveEmailAction(
+      {
+        actionUrl: body.actionUrl ?? body.action_url,
+        actionLabel: body.actionLabel ?? body.action_label,
+        html: body.html,
+      },
+      env.appPublicUrl || APP_URL,
+    );
     const sent = await sendAttendanceEmail({
-      to,
+      to: member.email,
       subject,
-      text: text ?? subject,
-      htmlBody: html,
+      text:
+        action && !text.includes(action.actionUrl)
+          ? `${text}\n\n${action.actionUrl}`
+          : text,
+      actionUrl: action?.actionUrl,
+      actionLabel: action?.actionLabel,
     });
     return c.json({ ok: sent });
   });

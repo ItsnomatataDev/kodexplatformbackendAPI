@@ -6,6 +6,10 @@ import { db } from '../db/pool.js';
 import { withTransaction, type TransactionClient } from '../db/transaction.js';
 import { ConflictError, NotFoundError, ValidationError } from '../http/errors.js';
 import { KODE_OPERATING_ROLE_KEYS } from './role-model.js';
+import {
+  applyDirectoryAccountAction,
+  assertNotLastActiveAdmin,
+} from './account-lifecycle.js';
 import type {
   ApproveMemberInput,
   CreateSelfSignupInput,
@@ -23,7 +27,6 @@ import type {
   RejectMemberInput,
   UpdateMemberAccessInput,
 } from './store.js';
-import { applyDirectoryAccountAction } from './account-lifecycle.js';
 
 type OrganizationRow = {
   id: string;
@@ -551,11 +554,11 @@ export class PostgresOrganizationDirectoryStore
             removed_at,
             removed_by
           )
-          VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, NULL, NULL)
+          VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, NULL, NULL)
           ON CONFLICT (organization_id, user_id) DO UPDATE SET
             role_id = EXCLUDED.role_id,
             role_key = EXCLUDED.role_key,
-            status = 'active',
+            status = 'pending',
             invited_by = EXCLUDED.invited_by,
             office_id = COALESCE(EXCLUDED.office_id, organizations.memberships.office_id),
             joined_at = COALESCE(organizations.memberships.joined_at, EXCLUDED.joined_at),
@@ -574,18 +577,6 @@ export class PostgresOrganizationDirectoryStore
           input.officeId ?? null,
           now,
         ],
-      );
-
-      await client.query(
-        `
-          UPDATE identity.users
-          SET
-            account_status = 'active',
-            is_active = TRUE,
-            updated_at = NOW()
-          WHERE id = $1
-        `,
-        [existing.userId],
       );
 
       await client.query(
@@ -609,27 +600,14 @@ export class PostgresOrganizationDirectoryStore
             deletion_reason
           )
           VALUES (
-            $1, $2, $3, $4, NOW(), $5,
+            $1, $2, $3, $4, NULL, NULL,
             NULL, NULL, NULL,
             FALSE, NULL, NULL, NULL,
             NULL, NULL, NULL
           )
           ON CONFLICT (user_id) DO UPDATE SET
             full_name = COALESCE(identity.user_profiles.full_name, EXCLUDED.full_name),
-            primary_role_key = EXCLUDED.primary_role_key,
             office_id = COALESCE(EXCLUDED.office_id, identity.user_profiles.office_id),
-            approved_at = NOW(),
-            approved_by = EXCLUDED.approved_by,
-            rejected_at = NULL,
-            rejected_by = NULL,
-            rejection_reason = NULL,
-            is_suspended = FALSE,
-            suspended_at = NULL,
-            suspended_by = NULL,
-            suspension_reason = NULL,
-            deleted_at = NULL,
-            deleted_by = NULL,
-            deletion_reason = NULL,
             updated_at = NOW()
         `,
         [
@@ -637,7 +615,6 @@ export class PostgresOrganizationDirectoryStore
           input.fullName.trim() || existing.fullName,
           role.roleKey,
           input.officeId ?? null,
-          input.invitedBy,
         ],
       );
 
@@ -652,10 +629,10 @@ export class PostgresOrganizationDirectoryStore
       );
 
       return {
-        status: 'linked',
+        status: 'invite_created',
         userId: existing.userId,
         membershipId: membership.rows[0]?.id ?? membershipId,
-        message: 'User linked successfully and marked active.',
+        message: 'Invitation created. Account approval is still required.',
       };
     });
   }
@@ -967,6 +944,15 @@ export class PostgresOrganizationDirectoryStore
       }
 
       const role = await resolveRole(client, input.organizationId, input.roleKey);
+      const remainingAdmin =
+        role.roleKey === 'admin' || Boolean(role.isAdminRole);
+      if (!remainingAdmin) {
+        await assertNotLastActiveAdmin(
+          client,
+          input.organizationId,
+          input.userId,
+        );
+      }
       if (input.changeOffice) {
         await assertOfficeInOrganization(
           client,

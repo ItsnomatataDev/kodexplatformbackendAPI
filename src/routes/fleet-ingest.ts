@@ -72,7 +72,7 @@ export function createFleetIngestRoutes(
 
     /*
      * The ingest token owns the organization identity.
-     * organizationId supplied by n8n is deliberately not trusted.
+     * organizationId supplied by the sender is deliberately not trusted.
      */
     if (
       typeof body.organizationId === 'string' &&

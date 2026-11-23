@@ -52,7 +52,7 @@ async function requireMember(
   return row;
 }
 
-async function assertNotLastActiveAdmin(
+export async function assertNotLastActiveAdmin(
   client: Queryable,
   organizationId: string,
   targetUserId: string,
@@ -90,7 +90,7 @@ async function assertNotLastActiveAdmin(
   if ((remaining.rows[0]?.count as number) < 1) {
     throw new ForbiddenError(
       'LAST_ADMIN',
-      'You cannot suspend or delete the last active administrator.',
+      'You cannot remove the last active administrator.',
     );
   }
 }

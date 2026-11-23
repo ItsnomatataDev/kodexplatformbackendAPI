@@ -17,6 +17,7 @@ import {
   parseEmailDeliveryConfig,
 } from './email-delivery.js';
 import { readTlsCaFile } from './tls.js';
+import { parseKodexAiGatewayConfig } from '../ai-gateway/config.js';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -56,6 +57,14 @@ function requiredEnabled(name: string): true {
   }
 
   return true;
+}
+
+function processRoleFromEnv(): 'api' | 'uploads' {
+  const value = optional('KODE_PROCESS_ROLE', 'api');
+  if (value !== 'api' && value !== 'uploads') {
+    throw new Error('KODE_PROCESS_ROLE must be api or uploads.');
+  }
+  return value;
 }
 
 function portFromEnv(name: string, fallback: number): number {
@@ -240,6 +249,7 @@ export const env = {
   appEnv,
   nodeEnv,
   allowProduction,
+  processRole: processRoleFromEnv(),
 
   port: portFromEnv('PORT', 3000),
   host,
@@ -392,7 +402,7 @@ export const env = {
     ),
     maxConcurrentPartsPerOrganization: countFromEnv(
       'CONTENT_STUDIO_UPLOAD_MAX_CONCURRENT_PARTS_PER_ORGANIZATION',
-      16,
+      32,
       1,
       64,
     ),
@@ -482,4 +492,11 @@ export const env = {
   cursor: {
     apiKey: optional('CURSOR_API_KEY', ''),
   },
+
+  /**
+   * Ubuntu KODEX AI Gateway. Default disabled; unused at process startup.
+   * Dedicated application credential only — not LLM_* / OPENAI_* and not
+   * the gateway's local-development token.
+   */
+  kodexAiGateway: parseKodexAiGatewayConfig(process.env),
 } as const;

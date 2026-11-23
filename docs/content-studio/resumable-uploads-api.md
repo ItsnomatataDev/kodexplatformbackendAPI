@@ -19,12 +19,20 @@ organization/target access and binds the session to its original uploader.
 Session IDs do not grant access. Organization, bucket, object key, multipart
 upload ID, ETags, and the completion manifest are server-controlled.
 
+The active organization roles `media_team` and `social_media` require
+`content_studio.read` and `content_studio.manage` for upload and playback.
+Migration `0074_content_studio_media_role_permissions.sql` reapplies those
+grants to active role rows so existing role records are repaired on rollout.
+
 The raw part body is streamed directly to MinIO and is not passed through the
 general text-body buffer. `Content-Length` and the actual stream length must
 equal the expected size for that part. The first part also receives a bounded
 media-signature check. Non-final parts are at least 5 MiB. The server reconciles
 the provider's committed parts with PostgreSQL before returning progress and
 before completion.
+
+Video records are not treated as duplicates based only on filename and size;
+those fields cannot distinguish different video contents.
 
 ## Requests and responses
 
@@ -128,6 +136,10 @@ schedule upload or `{ "session": PublicUploadSession, "media": ... }` for a
 client-library upload. Repeated completion returns the same finalized record.
 The returned record has the existing Content Studio media-processing fields;
 processing remains asynchronous through the existing worker.
+For Kode resumable uploads, a null `webPlaybackStatus` means the source object
+was stored but no legacy processing status was recorded. The upload manager
+shows `Uploaded` in that case; CDN HLS readiness is tracked separately and is
+resolved when staff playback is requested.
 
 ### Cancel
 

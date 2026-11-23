@@ -828,6 +828,88 @@ test('invitation rejects invalid addresses and unauthorized callers without send
   assert.equal(sends, 0);
 });
 
+test('managers cannot assign administrator or IT roles', async () => {
+  const store = new MemoryOrganizationDirectoryStore();
+  seedDirectory(store);
+  const managerApp = createDirectoryApp(
+    async () =>
+      authContext({
+        membership: {
+          roleKey: 'manager',
+          isAdminRole: false,
+          isManagerRole: true,
+        },
+      }),
+    store,
+  );
+  const authorization = await bearer(userA);
+  const invited = await json(
+    await managerApp.request('/api/organization/members/invite', {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        email: 'new.admin@example.com',
+        fullName: 'Would Be Admin',
+        roleKey: 'admin',
+        officeId: officeA,
+      }),
+    }),
+  );
+  assert.equal(invited.error?.code, 'INSUFFICIENT_PERMISSION');
+
+  const access = await json(
+    await managerApp.request(`/api/organization/members/${userC}/access`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ roleKey: 'it' }),
+    }),
+  );
+  assert.equal(access.error?.code, 'INSUFFICIENT_PERMISSION');
+});
+
+test('demoting the last active administrator is rejected', async () => {
+  const store = new MemoryOrganizationDirectoryStore();
+  seedDirectory(store);
+  const manager = '77777777-7777-7777-7777-777777777777';
+  seedActiveMember(store, {
+    organizationId: orgA,
+    userId: manager,
+    roleKey: 'manager',
+    officeId: officeA,
+    fullName: 'Pat Manager',
+    email: 'manager@example.com',
+  });
+  const app = createDirectoryApp(
+    async () =>
+      authContext({
+        actor: { userId: manager, email: 'manager@example.com' },
+        membership: {
+          roleKey: 'manager',
+          isAdminRole: false,
+          isManagerRole: true,
+        },
+      }),
+    store,
+  );
+  const denied = await json(
+    await app.request(`/api/organization/members/${userA}/access`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: await bearer(manager),
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ roleKey: 'media_team' }),
+    }),
+  );
+  assert.equal(denied.error?.code, 'LAST_ADMIN');
+});
+
 test('directory managers can suspend, restore, soft-delete, and hard-delete members', async () => {
   const store = new MemoryOrganizationDirectoryStore();
   seedDirectory(store);

@@ -1,5 +1,6 @@
 import { createMediaPlatformRoutes, type MediaControlPlaneStore } from './routes/media-platform.js';
-import { sharedPlaybackGrantStore, revokePlaybackGrantsForUser } from './media-platform/playback/api-grants.js';
+import { sharedPlaybackGrantStore, sharedIngestGrantStore, revokePlaybackGrantsForUser } from './media-platform/playback/api-grants.js';
+import type { IngestGrantStore } from './media-platform/playback/ingest-grant.js';
 import type { PlaybackGrantStore } from './media-platform/playback/redis-grant.js';
 import { PostgresMediaPlatformStore } from './media-platform/postgres-store.js';
 import './types/hono.js';
@@ -7,6 +8,11 @@ import { Hono } from 'hono';
 import { env } from './config/env.js';
 import {createDefaultAuthDependencies, createDefaultAuthLifecycle,createDefaultMeDependencies,} from './auth/defaults.js';
 import { createAuthMiddleware } from './auth/middleware.js';
+import { assertAuthenticatedAccount } from './auth/account.js';
+import { claimInternalAuth, createInternalApi, KODEX_INTERNAL_HEADER } from './ai/agent/internal-api.js';
+import { setAgentRuntime, type AgentRuntime } from './ai/agent/service.js';
+import { PostgresAgentStore } from './ai/agent/store.js';
+import { createWebTools } from './ai/agent/web.js';
 import type { AuthDependencies } from './auth/middleware.js';
 import { createAuthRoutes, type AuthRouteDependencies } from './auth/routes.js';
 import { SignupService } from './auth/signup.js';
@@ -46,10 +52,14 @@ import { MinioFileStorage } from './files/minio-storage.js';
 import { MinioMultipartFileStorage } from './files/minio-multipart-storage.js';
 import type { FileStorage, MultipartFileStorage } from './files/storage.js';
 import { PostgresNotificationStore } from './notifications/postgres-store.js';
+import { PostgresPushSubscriptionStore } from './notifications/push-store.js';
+import { PushAwareNotificationStore } from './notifications/push-aware-store.js';
 import type { NotificationStore } from './notifications/store.js';
 import { createNotificationRoutes } from './routes/notifications.js';
+import { createPushRoutes } from './routes/push.js';
 import { PostgresTicketStore } from './tickets/postgres-store.js';
 import type { TicketStore } from './tickets/store.js';
+import { sendAttendanceEmail, type SimpleEmail } from './email/attendance-mailer.js';
 import { createTicketRoutes } from './routes/tickets.js';
 import { PostgresAttendanceStore } from './attendance/postgres-store.js';
 import type { AttendanceStore } from './attendance/store.js';
@@ -88,6 +98,7 @@ import { PostgresFleetStore } from './fleet/postgres-store.js';
 import { createFleetRoutes } from './routes/fleet.js';
 import { createFleetIngestRoutes } from './routes/fleet-ingest.js';
 import { PostgresMeetingsStore } from './meetings/postgres-store.js';
+import { createCallsRoutes } from './routes/calls.js';
 import {
   createMeetingsRoutes,
   createPublicMeetingGuestRoutes,
@@ -112,6 +123,8 @@ import { PostgresItStore } from './it/postgres-store.js';
 import { createItRoutes } from './routes/it.js';
 import { PostgresAiStore } from './ai/postgres-store.js';
 import { createAiRoutes } from './routes/ai.js';
+import { searchBoards, searchContentClients } from './ai/navigation-search.js';
+import { searchActiveCards } from './work/card-search.js';
 import { createAutomationRoutes } from './routes/automation.js';
 import { PostgresBoardStore } from './work/postgres-store.js';
 import type { WorkStore } from './work/store.js';
@@ -128,11 +141,14 @@ export type CreateAppOptions = {
   boards?: WorkStore;
   notifications?: NotificationStore;
   tickets?: TicketStore;
+  sendTicketEmail?: (message: SimpleEmail) => Promise<boolean>;
+  sendContentEmail?: (message: SimpleEmail) => Promise<boolean>;
   attendance?: AttendanceStore;
   chat?: ChatStore;
   content?: ContentStore;
   mediaPlatform?: MediaControlPlaneStore;
   mediaPlayback?: { secret: string; publicBaseUrl: string; grants?: PlaybackGrantStore };
+  mediaIngest?: { secret: string; publicBaseUrl: string; grants?: IngestGrantStore };
   files?: FileStorage;
   multipartFiles?: MultipartFileStorage;
   uploadSessionRepository?: UploadSessionRepository;
@@ -142,6 +158,21 @@ export type CreateAppOptions = {
   rateLimiter?: RateLimiter;
   rateLimitPolicies?: Partial<WorkRateLimitPolicies>;
 };
+
+function isAllowedIngestBase(url: string, allowHttp: boolean) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+      return false;
+    }
+    if (allowHttp) {
+      return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+    }
+    return parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
 
 export function createApp(options: CreateAppOptions = {}) {
   const app = new Hono();
@@ -162,8 +193,13 @@ export function createApp(options: CreateAppOptions = {}) {
   };
   const corsOrigins = options.corsOrigins ?? env.cors.allowedOrigins;
   const boards = options.boards ?? new PostgresBoardStore();
+  const pushSubscriptions = new PostgresPushSubscriptionStore();
   const notifications =
-    options.notifications ?? new PostgresNotificationStore();
+    options.notifications ??
+    new PushAwareNotificationStore(
+      new PostgresNotificationStore(),
+      pushSubscriptions,
+    );
   const tickets = options.tickets ?? new PostgresTicketStore();
   const attendance = options.attendance ?? new PostgresAttendanceStore();
   const chat = options.chat ?? new PostgresChatStore();
@@ -205,6 +241,21 @@ export function createApp(options: CreateAppOptions = {}) {
   };
   const uploadSessionRepository =
     options.uploadSessionRepository ?? new PostgresUploadSessionRepository();
+  const ingestPublicBaseUrl = (
+    options.mediaIngest?.publicBaseUrl ??
+    process.env.MEDIA_INGEST_PUBLIC_BASE_URL ??
+    ''
+  ).replace(/\/+$/, '');
+  const ingestSecret =
+    options.mediaIngest?.secret ?? process.env.MEDIA_PLAYBACK_SIGNING_SECRET ?? '';
+  const ingestEnabled = Boolean(
+    ingestPublicBaseUrl &&
+      ingestSecret &&
+      isAllowedIngestBase(
+        ingestPublicBaseUrl,
+        Boolean(options.mediaIngest) || env.appEnv === 'development',
+      ),
+  );
   const resumableUploadService =
     options.resumableUploadService ??
     new ResumableUploadService({
@@ -229,6 +280,16 @@ export function createApp(options: CreateAppOptions = {}) {
         maxConcurrentPartsPerUser: env.contentStudioUploads.maxConcurrentPartsPerUser,
         maxConcurrentPartsPerOrganization:
           env.contentStudioUploads.maxConcurrentPartsPerOrganization,
+        ...(ingestEnabled
+          ? {
+              ingest: {
+                publicBaseUrl: ingestPublicBaseUrl,
+                secret: ingestSecret,
+                grants:
+                  options.mediaIngest?.grants ?? sharedIngestGrantStore(),
+              },
+            }
+          : {}),
       },
     });
   const rateLimiter = options.rateLimiter ?? authLifecycle.rateLimiter;
@@ -280,6 +341,11 @@ export function createApp(options: CreateAppOptions = {}) {
     if (c.req.method === 'GET' && c.req.path === '/api/content-studio/media') {
       return next();
     }
+    const internalAuth = claimInternalAuth(c.req.header(KODEX_INTERNAL_HEADER));
+    if (internalAuth) {
+      c.set('auth', internalAuth);
+      return next();
+    }
     return apiAuth(c, next);
   });
   api.route('/me', createMeRoutes(meWithFiles));
@@ -316,7 +382,16 @@ export function createApp(options: CreateAppOptions = {}) {
   api.route('/checklists', createChecklistRoutes(ecosystem));
   api.route('/checklist-items', createChecklistItemRoutes(ecosystem));
   api.route('/notifications', createNotificationRoutes({ store: notifications }));
-  api.route('/tickets', createTicketRoutes({ store: tickets, files }));
+  api.route('/push', createPushRoutes({ store: pushSubscriptions }));
+  api.route(
+    '/tickets',
+    createTicketRoutes({
+      store: tickets,
+      files,
+      notifications,
+      sendEmail: options.sendTicketEmail ?? sendAttendanceEmail,
+    }),
+  );
   api.route('/attendance', createAttendanceRoutes({ store: attendance }));
   api.route(
     '/chat',
@@ -335,6 +410,7 @@ export function createApp(options: CreateAppOptions = {}) {
       directory: organizationDirectory,
       resumableUploadService,
       uploadSessionRepository,
+      sendEmail: options.sendContentEmail ?? sendAttendanceEmail,
     }),
   );
   api.route('/media-platform', createMediaPlatformRoutes({
@@ -359,6 +435,10 @@ export function createApp(options: CreateAppOptions = {}) {
   api.route('/stock', createStockRoutes({ store: stock, files }));
   api.route('/fleet', createFleetRoutes({ store: fleet }));
   api.route('/meetings', createMeetingsRoutes({ store: meetingsStore }));
+  api.route(
+    '/calls',
+    createCallsRoutes({ store: meetingsStore, notifications }),
+  );
   api.route('/obligations', createObligationsRoutes({ store: obligations }));
   api.route(
     '/location-planner',
@@ -376,7 +456,63 @@ export function createApp(options: CreateAppOptions = {}) {
       onUserAccessRevoked: revokeAccountAccess,
     }),
   );
-  api.route('/ai', createAiRoutes({ store: aiWorkspace, files }));
+  const agent: AgentRuntime = {
+    api: createInternalApi(app),
+    store: new PostgresAgentStore(),
+    threads: aiWorkspace,
+    resolveAuth: async (userId) => {
+      const context = await authDependencies.resolveAuthContext(userId);
+      assertAuthenticatedAccount(context);
+      return context;
+    },
+    findCards: (organizationId, query) => searchActiveCards(organizationId, query),
+    listMembers: (organizationId) => attendance.listMembers(organizationId),
+    web: createWebTools(),
+    notify: async ({ auth, title, message, entityId }) => {
+      await notifications.create({
+        organizationId: auth.membership.organizationId,
+        recipientUserId: auth.actor.userId,
+        type: 'kodex_assistant',
+        title,
+        message: message.slice(0, 500),
+        entityType: 'kodex_assistant',
+        entityId,
+        actionUrl: '/ai-assistant',
+        priority: 'medium',
+        category: 'assistant',
+      });
+    },
+  };
+  setAgentRuntime(agent);
+  api.route('/ai', createAiRoutes({
+    store: aiWorkspace,
+    files,
+    agent,
+    workspace: {
+      attendance,
+      tickets,
+      leave,
+      time: {
+        listRunning: (organizationId, userId) => boards.listRunningTimeEntries(organizationId, userId),
+        findCards: (organizationId, query) => searchActiveCards(organizationId, query),
+        createEntry: (input) => boards.createTimeEntry({
+          organizationId: input.organizationId,
+          cardId: input.cardId,
+          userId: input.userId,
+          createdBy: input.userId,
+          seconds: input.seconds,
+          note: input.note,
+          startedAt: input.startedAt,
+          endedAt: input.endedAt,
+        }),
+      },
+      navigation: {
+        findContentClients: (organizationId, officeId, query) =>
+          searchContentClients(organizationId, officeId, query),
+        findBoards: (organizationId, query) => searchBoards(organizationId, query),
+      },
+    },
+  }));
   api.route('/automation', createAutomationRoutes({ store: aiWorkspace }));
 
 
@@ -400,6 +536,8 @@ export function createApp(options: CreateAppOptions = {}) {
     createTicketPortalRoutes({
       store: tickets,
       files,
+      notifications,
+      sendEmail: options.sendTicketEmail ?? sendAttendanceEmail,
     }),
   );
 

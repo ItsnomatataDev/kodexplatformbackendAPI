@@ -5,6 +5,8 @@ import type { AddressInfo } from 'node:net';
 import { createMediaPlaybackSignature } from './token.js';
 import { createMediaAuthServer } from './auth-server.js';
 import { MemoryPlaybackGrantStore } from './redis-grant.js';
+import { MemoryIngestGrantStore } from './ingest-grant.js';
+import { createMediaIngestUrl } from './ingest-url.js';
 import { verifyMediaEdgeRequest } from './edge-auth.js';
 import { ServiceUnavailableError } from '../../http/errors.js';
 
@@ -495,6 +497,82 @@ test('fails closed when grant storage is unavailable', async () => {
       headers: { 'X-Original-URI': validUri() },
     });
     assert.equal(response.status, 503);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('ingest authorize fails closed without ingest signer and denies missing grants', async () => {
+  await withServer(async (baseUrl) => {
+    const minted = createMediaIngestUrl({
+      sessionId: ASSET_ID,
+      secret: SECRET,
+      publicBaseUrl: 'https://media.example.invalid',
+    });
+    const missing = await fetch(`${baseUrl}/authorize-ingest`, {
+      headers: { 'X-Original-URI': `${minted.path}1` },
+    });
+    assert.equal(missing.status, 503);
+  });
+});
+
+test('ingest authorize signs a PUT origin URI for a valid grant', async () => {
+  const ingestGrants = new MemoryIngestGrantStore();
+  const minted = createMediaIngestUrl({
+    sessionId: ASSET_ID,
+    secret: SECRET,
+    publicBaseUrl: 'https://media.example.invalid',
+  });
+  await ingestGrants.issue(
+    {
+      signature: minted.signature,
+      sessionId: ASSET_ID,
+      organizationId: ORG_ID,
+      userId: USER_ID,
+      bucket: 'content-review-assets',
+      objectKey: 'org/file.mp4',
+      uploadId: 'provider-1',
+      expectedPartCount: 9,
+      expiresAt: minted.expiresAt,
+    },
+    300_000,
+  );
+  const playbackGrants = new MemoryPlaybackGrantStore();
+  const server = createMediaAuthServer(
+    SECRET,
+    undefined,
+    'http://minio:9000',
+    playbackGrants,
+    {
+      grants: ingestGrants,
+      signer: {
+        async sign(input) {
+          return `http://minio:9000/${input.bucket}/${input.objectKey}?uploadId=${input.uploadId}&partNumber=${input.partNumber}`;
+        },
+      },
+    },
+  );
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
+  try {
+    const address = server.address() as AddressInfo;
+    const allowed = await fetch(`http://127.0.0.1:${address.port}/authorize-ingest`, {
+      headers: { 'X-Original-URI': `${minted.path}3` },
+    });
+    assert.equal(allowed.status, 204);
+    assert.equal(
+      allowed.headers.get('x-media-origin-uri'),
+      '/content-review-assets/org/file.mp4?uploadId=provider-1&partNumber=3',
+    );
+    const denied = await fetch(`http://127.0.0.1:${address.port}/authorize-ingest`, {
+      headers: { 'X-Original-URI': `${minted.path}99` },
+    });
+    assert.equal(denied.status, 403);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

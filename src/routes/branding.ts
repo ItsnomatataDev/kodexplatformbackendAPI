@@ -4,14 +4,18 @@ import { assertAuthorized } from '../authorization/authorize.js';
 import { hasPermission } from '../authorization/permissions.js';
 import { requireOrganizationId } from '../authorization/organization.js';
 import type { AuthContext } from '../authorization/types.js';
+import { env } from '../config/env.js';
+import { logger } from '../config/logger.js';
 import {
   ForbiddenError,
   NotFoundError,
   PayloadTooLargeError,
+  ServiceUnavailableError,
   ValidationError,
 } from '../http/errors.js';
 import { streamStoredMedia } from '../content/media-stream.js';
 import type { FileStorage } from '../files/storage.js';
+import { readBodyWithLimit } from '../middleware/body-limit.js';
 import {
   readJson,
   readOptionalString,
@@ -117,48 +121,80 @@ function requireBinaryUploadSize(c: {
   return size;
 }
 
+/**
+ * Prefer the dedicated branding bucket; if it cannot be created (common on
+ * locked-down MinIO), fall back to the env default bucket which already exists.
+ */
+function brandingWriteBuckets(): string[] {
+  const fallback = env.minio.bucket?.trim();
+  if (fallback && fallback !== ORGANIZATION_BRANDING_BUCKET) {
+    return [ORGANIZATION_BRANDING_BUCKET, fallback];
+  }
+  return [ORGANIZATION_BRANDING_BUCKET];
+}
+
+function brandingReadBuckets(): string[] {
+  return brandingWriteBuckets();
+}
+
 async function putBinary(
   files: FileStorage,
   input: {
     objectKey: string;
-    body: ReadableStream<Uint8Array>;
+    body: Buffer;
     contentType: string;
-    contentLength: number;
   },
 ) {
-  await files.ensureBucket?.(ORGANIZATION_BRANDING_BUCKET);
-  const put =
-    files.putObjectStream?.bind(files) ??
-    (async (streamInput: {
-      bucket: string;
-      objectKey: string;
-      body: ReadableStream<Uint8Array> | Buffer;
-      contentType?: string | null;
-      contentLength: number;
-    }) => {
-      const chunks: Uint8Array[] = [];
-      const reader = (streamInput.body as ReadableStream<Uint8Array>).getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (value) chunks.push(value);
-      }
-      await files.putObject({
-        bucket: streamInput.bucket,
-        objectKey: streamInput.objectKey,
-        body: Buffer.concat(chunks.map((c) => Buffer.from(c))),
-        contentType: streamInput.contentType,
-      });
-    });
+  const buckets = brandingWriteBuckets();
+  let lastError: unknown;
 
-  await put({
-    bucket: ORGANIZATION_BRANDING_BUCKET,
-    objectKey: input.objectKey,
-    body: input.body,
-    contentType: input.contentType,
-    contentLength: input.contentLength,
-  });
+  for (const bucket of buckets) {
+    try {
+      await files.ensureBucket?.(bucket);
+      await files.putObject({
+        bucket,
+        objectKey: input.objectKey,
+        body: input.body,
+        contentType: input.contentType,
+      });
+      if (bucket !== ORGANIZATION_BRANDING_BUCKET) {
+        logger.warn(
+          { bucket, objectKey: input.objectKey },
+          'Stored branding asset in fallback MinIO bucket',
+        );
+      }
+      return;
+    } catch (error) {
+      lastError = error;
+      logger.warn(
+        {
+          bucket,
+          objectKey: input.objectKey,
+          code:
+            error instanceof ServiceUnavailableError ? error.code : undefined,
+          message: error instanceof Error ? error.message : String(error),
+        },
+        'Branding upload failed for bucket; trying next',
+      );
+    }
+  }
+
+  if (lastError instanceof Error) throw lastError;
+  throw new ServiceUnavailableError(
+    'OBJECT_STORAGE_UNAVAILABLE',
+    'Object storage is unavailable.',
+  );
 }
+
+const BRANDING_IMAGE_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'image/svg+xml',
+  'image/x-icon',
+  'image/vnd.microsoft.icon',
+]);
 
 /** Public (unauthenticated) host resolution + branding-by-host. */
 export function createPublicBrandingRoutes(
@@ -474,14 +510,28 @@ export function createBrandingRoutes(dependencies: BrandingRouteDependencies) {
       decodeURIComponent(
         c.req.query('filename') ?? c.req.header('x-kode-filename') ?? 'asset.bin',
       );
-    const contentType =
+    const contentTypeRaw =
       readOptionalString(
         c.req.header('content-type') ?? c.req.header('x-kode-content-type'),
         'contentType',
         200,
       ) ?? 'application/octet-stream';
+    const contentType = contentTypeRaw.split(';', 1)[0]?.trim().toLowerCase() || 'application/octet-stream';
+    const normalizedType = contentType === 'image/jpg' ? 'image/jpeg' : contentType;
     if (!c.req.raw.body) {
       throw new ValidationError('Request body is required.', { field: 'body' });
+    }
+    if (!BRANDING_IMAGE_TYPES.has(normalizedType)) {
+      throw new ValidationError(
+        'Please choose a JPG, PNG, WebP, GIF, SVG, or ICO image.',
+      );
+    }
+
+    // Buffer like /api/me/avatar/binary — streaming the raw request into MinIO
+    // fails when body-limit (or proxies) have already touched the stream.
+    const body = Buffer.from(await readBodyWithLimit(c.req.raw, MAX_BRANDING_UPLOAD_BYTES));
+    if (body.length !== sizeBytes) {
+      throw new ValidationError('The upload was incomplete. Please choose the image again.');
     }
 
     const objectKey = organizationBrandingObjectKey({
@@ -491,9 +541,8 @@ export function createBrandingRoutes(dependencies: BrandingRouteDependencies) {
     });
     await putBinary(dependencies.files, {
       objectKey,
-      body: c.req.raw.body,
-      contentType,
-      contentLength: sizeBytes,
+      body,
+      contentType: normalizedType,
     });
 
     const assetPath = `/api/organization/branding/assets?objectKey=${encodeURIComponent(objectKey)}`;
@@ -529,15 +578,33 @@ export function createBrandingRoutes(dependencies: BrandingRouteDependencies) {
     if (!objectKey || !objectKey.startsWith(`${organizationId}/`)) {
       throw new ValidationError('objectKey is invalid.', { field: 'objectKey' });
     }
-    return streamStoredMedia({
-      files: dependencies.files,
-      bucket: ORGANIZATION_BRANDING_BUCKET,
-      objectKey,
-      rangeHeader: c.req.header('range'),
-      cacheControl: 'private, max-age=3600',
-      notFoundCode: 'ASSET_NOT_FOUND',
-      notFoundMessage: 'Branding asset was not found.',
-    });
+
+    // Assets may live in the dedicated branding bucket or the env default
+    // bucket (fallback when CreateBucket is denied on MinIO).
+    let lastNotFound: unknown;
+    for (const bucket of brandingReadBuckets()) {
+      try {
+        return await streamStoredMedia({
+          files: dependencies.files,
+          bucket,
+          objectKey,
+          rangeHeader: c.req.header('range'),
+          cacheControl: 'private, max-age=3600',
+          notFoundCode: 'ASSET_NOT_FOUND',
+          notFoundMessage: 'Branding asset was not found.',
+        });
+      } catch (error) {
+        if (error instanceof NotFoundError) {
+          lastNotFound = error;
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw (
+      lastNotFound ??
+      new NotFoundError('ASSET_NOT_FOUND', 'Branding asset was not found.')
+    );
   });
 
   routes.get('/domains', async (c) => {

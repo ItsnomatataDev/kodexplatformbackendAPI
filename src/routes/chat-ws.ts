@@ -166,6 +166,7 @@ export function createChatWebSocketRoutes(dependencies: ChatWsDependencies) {
             const isMember = await dependencies.store.isMember(
               conversationId,
               userId,
+              organizationId,
             );
             if (!isMember) {
               ws.send(
@@ -201,6 +202,7 @@ export function createChatWebSocketRoutes(dependencies: ChatWsDependencies) {
             const isMember = await dependencies.store.isMember(
               conversationId,
               userId,
+              organizationId,
             );
             if (!isMember) return;
             const activityRaw = parsed.payload?.activity;

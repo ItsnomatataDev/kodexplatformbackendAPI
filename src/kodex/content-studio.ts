@@ -2,6 +2,18 @@ import { ServiceUnavailableError, ValidationError } from '../http/errors.js';
 import type { FileStorage } from '../files/storage.js';
 import { CONTENT_REVIEW_ASSETS_BUCKET } from '../content/buckets.js';
 import {
+  createKodexAiGatewayClient,
+  KODEX_AI_GATEWAY_MAX_IMAGE_BYTES,
+  type KodexAiAnalyzeInput,
+  type KodexAiGatewayClient,
+  type KodexAiGatewayLogEvent,
+} from '../ai-gateway/client.js';
+import {
+  isKodexAiGatewayConfigured,
+  parseKodexAiGatewayConfig,
+} from '../ai-gateway/config.js';
+import type { KodexAiAnalyzeResult } from '../ai-gateway/vision-response.js';
+import {
   isLlmReady,
   llmChatText,
   llmVisionText,
@@ -62,8 +74,25 @@ export type ContentStudioAnalyzeOutput = {
   facebookCaption: string;
 };
 
-function requireLlm() {
-  if (!isLlmReady()) {
+const CONTENT_STUDIO_LLM_ANALYZE_MAX_BYTES = 12 * 1024 * 1024;
+
+export type ContentStudioVisionGateway = {
+  isConfigured(): boolean;
+  analyzeImage(
+    input: KodexAiAnalyzeInput,
+    parseOptions?: { unreviewedCaptions?: 'reject' | 'omit' },
+  ): Promise<KodexAiAnalyzeResult>;
+};
+
+export type AnalyzeContentStudioMediaDependencies = {
+  gatewayClient?: ContentStudioVisionGateway | null;
+  llmVisionText?: typeof llmVisionText;
+  isLlmReady?: () => boolean;
+  gatewayLogger?: (event: KodexAiGatewayLogEvent) => void;
+};
+
+function requireLlm(check: () => boolean = isLlmReady) {
+  if (!check()) {
     throw new ServiceUnavailableError(
       'KODEX_NOT_CONFIGURED',
       'KODEX requires LLM_API_KEY (or OPENAI_API_KEY). Cursor API keys are for agents, not captions.',
@@ -230,14 +259,57 @@ function bytesToBase64(bytes: Buffer) {
   return bytes.toString('base64');
 }
 
-async function resolveImageDataUrl(params: {
+function toDataUrl(mime: string, bytes: Buffer) {
+  return `data:${mime};base64,${bytesToBase64(bytes)}`;
+}
+
+function sizeLimitError(maxBytes: number, field: string) {
+  const mib = Math.round(maxBytes / (1024 * 1024));
+  return new ValidationError(`Image exceeds the ${mib} MiB analysis limit.`, {
+    field,
+  });
+}
+
+function parseImageDataUrl(value: string, field: string): { mime: string; bytes: Buffer } {
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+)(?:;charset=[^;]+)?;base64,([\s\S]+)$/.exec(
+    value.trim(),
+  );
+  if (!match) {
+    throw new ValidationError('Provide storagePath (preferred) or a data:image URL for analysis.', {
+      field,
+    });
+  }
+  const mime = match[1];
+  const bytes = Buffer.from(match[2], 'base64');
+  if (bytes.length === 0) {
+    throw new ValidationError('Image bytes are required.', { field });
+  }
+  return { mime, bytes };
+}
+
+type ResolvedAnalyzeImage = {
+  bytes: Buffer;
+  mime: string;
+  field: 'storagePath' | 'imageDataUrl' | 'imageUrl';
+};
+
+function assertImageWithinLimit(bytes: Buffer, maxBytes: number, field: string) {
+  if (bytes.byteLength > maxBytes) {
+    throw sizeLimitError(maxBytes, field);
+  }
+}
+
+async function resolveAnalyzeImage(params: {
   files: FileStorage;
   organizationId: string;
   input: ContentStudioAnalyzeInput;
-}) {
-  const { files, organizationId, input } = params;
+  maxBytes: number;
+}): Promise<ResolvedAnalyzeImage> {
+  const { files, organizationId, input, maxBytes } = params;
   if (input.imageDataUrl?.startsWith('data:image/')) {
-    return input.imageDataUrl;
+    const parsed = parseImageDataUrl(input.imageDataUrl, 'imageDataUrl');
+    assertImageWithinLimit(parsed.bytes, maxBytes, 'imageDataUrl');
+    return { ...parsed, field: 'imageDataUrl' };
   }
 
   const storagePath = input.storagePath?.trim() || null;
@@ -254,10 +326,8 @@ async function resolveImageDataUrl(params: {
           field: 'storagePath',
         });
       }
-      if (head.sizeBytes != null && head.sizeBytes > 12 * 1024 * 1024) {
-        throw new ValidationError('Image exceeds 12MB analysis limit.', {
-          field: 'storagePath',
-        });
+      if (head.sizeBytes != null && head.sizeBytes > maxBytes) {
+        throw sizeLimitError(maxBytes, 'storagePath');
       }
     }
     const object = await files.getObject(CONTENT_REVIEW_ASSETS_BUCKET, storagePath);
@@ -266,23 +336,28 @@ async function resolveImageDataUrl(params: {
         field: 'storagePath',
       });
     }
-    if (object.body.byteLength > 12 * 1024 * 1024) {
-      throw new ValidationError('Image exceeds 12MB analysis limit.', {
-        field: 'storagePath',
-      });
-    }
+    assertImageWithinLimit(object.body, maxBytes, 'storagePath');
     const mime = object.contentType?.split(';')[0]?.trim() || 'image/jpeg';
     if (!mime.startsWith('image/')) {
       throw new ValidationError('Only image objects can be analyzed directly.', {
         field: 'storagePath',
       });
     }
-    return `data:${mime};base64,${bytesToBase64(object.body)}`;
+    return { bytes: object.body, mime, field: 'storagePath' };
   }
 
   const imageUrl = input.imageUrl?.trim();
   if (imageUrl?.startsWith('data:image/')) {
-    return imageUrl;
+    const parsed = parseImageDataUrl(imageUrl, 'imageUrl');
+    assertImageWithinLimit(parsed.bytes, maxBytes, 'imageUrl');
+    return { ...parsed, field: 'imageUrl' };
+  }
+
+  if (imageUrl) {
+    throw new ValidationError(
+      'Provide storagePath (preferred) or a data:image URL for analysis.',
+      { field: 'imageUrl' },
+    );
   }
 
   throw new ValidationError(
@@ -291,19 +366,99 @@ async function resolveImageDataUrl(params: {
   );
 }
 
-export async function analyzeContentStudioMedia(params: {
-  files: FileStorage;
-  organizationId: string;
-  input: ContentStudioAnalyzeInput;
-}): Promise<ContentStudioAnalyzeOutput> {
-  requireLlm();
-  const imageDataUrl = await resolveImageDataUrl(params);
-  const aiText = await llmVisionText({
-    prompt: buildAnalyzePrompt(params.input),
-    imageDataUrl,
-    temperature: 0.5,
-    maxTokens: 1200,
+function joinGenuineScene(mainSubject: string, sceneDescription: string) {
+  const subject = mainSubject.trim();
+  const scene = sceneDescription.trim();
+  if (subject && scene) {
+    if (scene.includes(subject)) return scene;
+    if (subject.includes(scene)) return subject;
+    return `${subject}. ${scene}`;
+  }
+  return scene || subject;
+}
+
+function longestGenuineText(values: string[]) {
+  return values
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .reduce((best, current) => (current.length > best.length ? current : best), '');
+}
+
+function alreadyContains(haystack: string, part: string) {
+  const needle = part.trim();
+  return !needle || haystack.includes(needle);
+}
+
+function readyToPostCaption(social: KodexAiAnalyzeResult['social']) {
+  const body =
+    longestGenuineText([
+      social.instagramCaption,
+      social.facebookCaption,
+      social.primaryCaption,
+    ]) || social.shortAlternative.trim();
+  const hook = social.hook.trim();
+  const cta = social.callToAction.trim();
+  const parts: string[] = [];
+  if (hook && !alreadyContains(body, hook)) {
+    parts.push(hook);
+  }
+  if (body) {
+    parts.push(body);
+  }
+  const assembled = parts.join('\n\n');
+  if (cta && !alreadyContains(assembled, cta)) {
+    parts.push(cta);
+  }
+  return parts.join('\n\n');
+}
+
+export function mapGatewayAnalyzeToContentStudio(
+  result: KodexAiAnalyzeResult,
+): ContentStudioAnalyzeOutput {
+  const sceneDescription = joinGenuineScene(result.social.mainSubject, result.analysis);
+  if (!result.requiresReview) {
+    return {
+      mood: result.social.mood,
+      sceneDescription,
+      hook: '',
+      generatedCaption: '',
+      callToAction: '',
+      hashtags: [],
+      shortAlternative: '',
+      rationale: result.social.uncertainDetails,
+      instagramCaption: '',
+      facebookCaption: '',
+    };
+  }
+
+  return {
+    mood: result.social.mood,
+    sceneDescription,
+    hook: result.social.hook,
+    generatedCaption: readyToPostCaption(result.social),
+    callToAction: result.social.callToAction,
+    hashtags: result.social.hashtags,
+    shortAlternative: result.social.shortAlternative,
+    rationale: result.social.captionRationale || result.social.uncertainDetails,
+    instagramCaption: result.social.instagramCaption,
+    facebookCaption: result.social.facebookCaption,
+  };
+}
+
+function defaultGatewayClient(
+  logger?: (event: KodexAiGatewayLogEvent) => void,
+): KodexAiGatewayClient | null {
+  const config = parseKodexAiGatewayConfig(process.env);
+  if (!isKodexAiGatewayConfigured(config)) {
+    return null;
+  }
+  return createKodexAiGatewayClient({
+    config,
+    logger: logger ?? (() => {}),
   });
+}
+
+function mapLlmVisionToContentStudio(aiText: string): ContentStudioAnalyzeOutput {
   const parsed = parseJsonObject(aiText);
   const generatedCaption = pickString(parsed, [
     'generatedCaption',
@@ -324,4 +479,48 @@ export async function analyzeContentStudioMedia(params: {
     facebookCaption:
       pickString(parsed, ['facebookCaption']) || generatedCaption,
   };
+}
+
+export async function analyzeContentStudioMedia(params: {
+  files: FileStorage;
+  organizationId: string;
+  input: ContentStudioAnalyzeInput;
+  dependencies?: AnalyzeContentStudioMediaDependencies;
+}): Promise<ContentStudioAnalyzeOutput> {
+  const gatewayClient =
+    params.dependencies?.gatewayClient === undefined
+      ? defaultGatewayClient(params.dependencies?.gatewayLogger)
+      : params.dependencies.gatewayClient;
+  const useGateway = gatewayClient?.isConfigured() === true;
+  const maxBytes = useGateway
+    ? KODEX_AI_GATEWAY_MAX_IMAGE_BYTES
+    : CONTENT_STUDIO_LLM_ANALYZE_MAX_BYTES;
+  const image = await resolveAnalyzeImage({
+    files: params.files,
+    organizationId: params.organizationId,
+    input: params.input,
+    maxBytes,
+  });
+
+  if (useGateway && gatewayClient) {
+    const result = await gatewayClient.analyzeImage(
+      {
+        image: image.bytes,
+        fileName: params.input.fileName?.trim() || 'image.png',
+        contentType: image.mime,
+      },
+      { unreviewedCaptions: 'omit' },
+    );
+    return mapGatewayAnalyzeToContentStudio(result);
+  }
+
+  requireLlm(params.dependencies?.isLlmReady ?? isLlmReady);
+  const vision = params.dependencies?.llmVisionText ?? llmVisionText;
+  const aiText = await vision({
+    prompt: buildAnalyzePrompt(params.input),
+    imageDataUrl: toDataUrl(image.mime, image.bytes),
+    temperature: 0.5,
+    maxTokens: 1200,
+  });
+  return mapLlmVisionToContentStudio(aiText);
 }

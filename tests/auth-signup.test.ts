@@ -114,6 +114,7 @@ test('signup options expose public roles and offices for an organization slug', 
   assert.equal(response.status, 200);
   assert.equal(body.organization.slug, 'org-a');
   assert.equal(body.roles.some((role: { roleKey: string }) => role.roleKey === 'admin'), false);
+  assert.equal(body.roles.some((role: { roleKey: string }) => role.roleKey === 'it'), false);
   assert.equal(body.roles.find((role: { isDefaultSignupRole: boolean }) => role.isDefaultSignupRole)?.roleKey, 'media_team');
   assert.equal(body.offices[0].slug, 'harare');
 });

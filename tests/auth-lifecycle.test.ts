@@ -767,4 +767,44 @@ test('cookie-backed mutating requests require an allowed origin and CSRF token',
     }),
   );
   assert.equal(originRejected.error?.code, 'CSRF_ORIGIN_REJECTED');
+
+  const missingCsrf = await json(
+    await app.request('/auth/logout', {
+      method: 'POST',
+      headers: {
+        Origin: corsOrigins[0],
+        Cookie: 'kode_refresh=test-refresh-token',
+        Authorization: 'Bearer abc',
+      },
+    }),
+  );
+  assert.equal(missingCsrf.error?.code, 'CSRF_TOKEN_INVALID');
+});
+
+test('refresh fails closed when the rate limiter is unavailable', async () => {
+  const { ServiceUnavailableError } = await import('../src/http/errors.js');
+  const { app } = await createHarness({
+    rateLimiter: {
+      async consume() {
+        throw new ServiceUnavailableError(
+          'RATE_LIMIT_UNAVAILABLE',
+          'Rate limiting is unavailable.',
+        );
+      },
+      async inspect() {
+        throw new ServiceUnavailableError(
+          'RATE_LIMIT_UNAVAILABLE',
+          'Rate limiting is unavailable.',
+        );
+      },
+    },
+  });
+  const response = await app.request('/auth/refresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh_token: 'x' }),
+  });
+  const body = await json(response);
+  assert.equal(response.status, 503);
+  assert.equal(body.error?.code, 'RATE_LIMIT_UNAVAILABLE');
 });

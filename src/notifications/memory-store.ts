@@ -161,4 +161,19 @@ export class MemoryNotificationStore implements NotificationStore {
     }
     return map;
   }
+
+  async assertActiveOrgRecipients(_organizationId: string, _userIds: string[]) {
+    return;
+  }
+
+  async findActiveMemberByEmail(_organizationId: string, email: string) {
+    const normalized = email.trim().toLowerCase();
+    for (const [userId, name] of this.displayNames) {
+      const candidate = `${userId}@example.test`;
+      if (candidate === normalized || name.toLowerCase() === normalized) {
+        return { userId, email: candidate };
+      }
+    }
+    return null;
+  }
 }

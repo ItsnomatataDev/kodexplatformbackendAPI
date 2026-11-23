@@ -1,7 +1,26 @@
 import { db } from '../db/pool.js';
-import { NotFoundError, ValidationError } from '../http/errors.js';
+import { ForbiddenError, NotFoundError, ValidationError } from '../http/errors.js';
 
-const LEGACY = 'Direct call started from mobile chat';
+export const DIRECT_CALL_LEGACY_DESCRIPTION = 'Direct call started from mobile chat';
+
+const LEGACY = DIRECT_CALL_LEGACY_DESCRIPTION;
+
+export type DirectCallStatus =
+  | 'ringing'
+  | 'live'
+  | 'ended'
+  | 'missed'
+  | 'declined'
+  | 'cancelled';
+
+function isDirectCallMeeting(row: { description?: string | null }) {
+  return row.description === LEGACY;
+}
+
+function generateE2eePassphrase() {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
 
 function mapMeeting(row: Record<string, unknown>) {
   return {
@@ -10,13 +29,18 @@ function mapMeeting(row: Record<string, unknown>) {
     title: row.title as string,
     description: (row.description as string | null) ?? null,
     host_id: row.host_id as string,
+    /** Alias for mobile direct-call clients. */
+    caller_id: row.host_id as string,
     status: row.status as string,
     meeting_type: row.meeting_type as string,
+    /** Alias for mobile direct-call clients. */
+    call_type: row.meeting_type as string,
     room_code: row.room_code as string,
     livekit_room_name: (row.livekit_room_name as string | null) ?? null,
     meet_url: (row.meet_url as string | null) ?? null,
     allow_guest_access: Boolean(row.allow_guest_access),
     guest_code: (row.guest_code as string | null) ?? null,
+    conversation_id: (row.conversation_id as string | null) ?? null,
     scheduled_start: row.scheduled_start ? (row.scheduled_start as Date).toISOString() : null,
     scheduled_for: row.scheduled_for ? (row.scheduled_for as Date).toISOString() : null,
     started_at: row.started_at ? (row.started_at as Date).toISOString() : null,
@@ -26,6 +50,8 @@ function mapMeeting(row: Record<string, unknown>) {
     participant_count: Number(row.participant_count ?? 0),
   };
 }
+
+export const DIRECT_CALL_DESCRIPTION = LEGACY;
 
 function roomCode() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
@@ -119,6 +145,7 @@ export class PostgresMeetingsStore {
         meeting_id: row.meeting_id,
         user_id: row.user_id,
         role: row.role,
+        invite_status: (row.invite_status as string | null) ?? 'accepted',
         joined_at: row.joined_at ? (row.joined_at as Date).toISOString() : null,
         left_at: row.left_at ? (row.left_at as Date).toISOString() : null,
         is_muted: Boolean(row.is_muted),
@@ -557,6 +584,245 @@ export class PostgresMeetingsStore {
        WHERE id = $1 AND status = 'scheduled'`,
       [meetingId],
     );
+  }
+
+  async startDirectCall(input: {
+    organizationId: string;
+    hostId: string;
+    participantIds: string[];
+    callType: 'audio' | 'video';
+    conversationId?: string | null;
+    e2eePassphrase: string;
+    title?: string | null;
+  }) {
+    const participantIds = [
+      ...new Set(input.participantIds.filter((id) => id && id !== input.hostId)),
+    ];
+    const title =
+      input.title?.trim() ||
+      (input.callType === 'video' ? 'Video call' : 'Voice call');
+    const code = roomCode();
+    const inserted = await db.query(
+      `INSERT INTO meetings.meetings (
+         organization_id, title, description, host_id, meeting_type,
+         scheduled_start, status, room_code, allow_guest_access,
+         e2ee_passphrase, conversation_id
+       ) VALUES ($1,$2,$3,$4,$5,NOW(),'ringing',$6,FALSE,$7,$8)
+       RETURNING *`,
+      [
+        input.organizationId,
+        title,
+        LEGACY,
+        input.hostId,
+        input.callType,
+        code,
+        input.e2eePassphrase,
+        input.conversationId ?? null,
+      ],
+    );
+    const meeting = inserted.rows[0];
+    const livekitRoom = `call:${meeting.id}`;
+    await db.query(
+      `UPDATE meetings.meetings
+       SET livekit_room_name = $2, meet_url = $3, updated_at = NOW()
+       WHERE id = $1`,
+      [meeting.id, livekitRoom, `/incoming-call/${meeting.id}`],
+    );
+
+    await db.query(
+      `INSERT INTO meetings.participants (
+         meeting_id, user_id, role, invite_status, joined_at, is_muted, is_camera_on
+       ) VALUES ($1,$2,'host','accepted',NOW(),TRUE,$3)
+       ON CONFLICT (meeting_id, user_id) DO NOTHING`,
+      [meeting.id, input.hostId, input.callType === 'video'],
+    );
+
+    for (const userId of participantIds) {
+      await db.query(
+        `INSERT INTO meetings.participants (
+           meeting_id, user_id, role, invite_status, joined_at, is_muted, is_camera_on
+         ) VALUES ($1,$2,'participant','ringing',NULL,TRUE,$3)
+         ON CONFLICT (meeting_id, user_id) DO NOTHING`,
+        [meeting.id, userId, input.callType === 'video'],
+      );
+    }
+
+    return this.getMeeting(input.organizationId, String(meeting.id));
+  }
+
+  async getDirectCallMeeting(organizationId: string, meetingId: string) {
+    const meeting = await this.getMeeting(organizationId, meetingId);
+    if (!meeting || !isDirectCallMeeting(meeting)) return null;
+    return meeting;
+  }
+
+  async listIncomingRingingCalls(organizationId: string, userId: string) {
+    const result = await db.query<{ id: string }>(
+      `SELECT m.id
+       FROM meetings.meetings m
+       INNER JOIN meetings.participants p ON p.meeting_id = m.id
+       WHERE m.organization_id = $1
+         AND m.description = $3
+         AND m.status = 'ringing'
+         AND p.user_id = $2
+         AND COALESCE(p.role, 'participant') <> 'host'
+         AND COALESCE(p.invite_status, 'ringing') = 'ringing'
+       ORDER BY m.created_at DESC
+       LIMIT 10`,
+      [organizationId, userId, LEGACY],
+    );
+    const meetings = [];
+    for (const row of result.rows) {
+      const meeting = await this.getMeeting(organizationId, String(row.id));
+      if (meeting) meetings.push(meeting);
+    }
+    return meetings;
+  }
+
+  async assertDirectCallParticipant(meetingId: string, userId: string) {
+    const meeting = await this.getMeetingById(meetingId);
+    if (!meeting || !isDirectCallMeeting(meeting)) {
+      throw new NotFoundError('CALL_NOT_FOUND', 'Call was not found.');
+    }
+    const participant = await this.getParticipant(meetingId, userId);
+    if (participant) return participant;
+    if (meeting.host_id === userId) return { user_id: userId, role: 'host' };
+    throw new NotFoundError('CALL_NOT_FOUND', 'Call was not found.');
+  }
+
+  async getE2eePassphrase(meetingId: string, userId: string) {
+    await this.assertDirectCallParticipant(meetingId, userId);
+    const result = await db.query(
+      `SELECT e2ee_passphrase FROM meetings.meetings WHERE id = $1 LIMIT 1`,
+      [meetingId],
+    );
+    const passphrase = (result.rows[0]?.e2ee_passphrase as string | null)?.trim();
+    return passphrase || null;
+  }
+
+  async acceptDirectCall(params: {
+    organizationId: string;
+    meetingId: string;
+    userId: string;
+  }) {
+    await this.assertDirectCallParticipant(params.meetingId, params.userId);
+    await db.query(
+      `UPDATE meetings.participants
+       SET invite_status = 'accepted',
+           joined_at = COALESCE(joined_at, NOW()),
+           left_at = NULL
+       WHERE meeting_id = $1 AND user_id = $2`,
+      [params.meetingId, params.userId],
+    );
+    await db.query(
+      `UPDATE meetings.meetings
+       SET status = 'live',
+           started_at = COALESCE(started_at, NOW()),
+           updated_at = NOW()
+       WHERE organization_id = $1
+         AND id = $2
+         AND status IN ('ringing', 'live', 'scheduled')`,
+      [params.organizationId, params.meetingId],
+    );
+    return this.getMeeting(params.organizationId, params.meetingId);
+  }
+
+  async declineDirectCall(params: {
+    organizationId: string;
+    meetingId: string;
+    userId: string;
+  }) {
+    await this.assertDirectCallParticipant(params.meetingId, params.userId);
+    await db.query(
+      `UPDATE meetings.participants
+       SET invite_status = 'declined', left_at = NOW()
+       WHERE meeting_id = $1 AND user_id = $2`,
+      [params.meetingId, params.userId],
+    );
+    await db.query(
+      `UPDATE meetings.meetings
+       SET status = 'declined',
+           ended_at = COALESCE(ended_at, NOW()),
+           updated_at = NOW()
+       WHERE organization_id = $1 AND id = $2 AND status = 'ringing'`,
+      [params.organizationId, params.meetingId],
+    );
+    return this.getMeeting(params.organizationId, params.meetingId);
+  }
+
+  async markDirectCallMissed(params: {
+    organizationId: string;
+    meetingId: string;
+  }) {
+    const accepted = await db.query(
+      `SELECT user_id FROM meetings.participants
+       WHERE meeting_id = $1 AND invite_status = 'accepted' AND role <> 'host'
+       LIMIT 1`,
+      [params.meetingId],
+    );
+    if (accepted.rows[0]) return false;
+
+    const result = await db.query(
+      `UPDATE meetings.meetings
+       SET status = 'missed',
+           ended_at = COALESCE(ended_at, NOW()),
+           updated_at = NOW()
+       WHERE organization_id = $1 AND id = $2 AND status = 'ringing'
+       RETURNING id`,
+      [params.organizationId, params.meetingId],
+    );
+    return Boolean(result.rows[0]?.id);
+  }
+
+  async endDirectCall(params: {
+    organizationId: string;
+    meetingId: string;
+  }) {
+    const current = await this.getMeeting(params.organizationId, params.meetingId);
+    if (!current) throw new NotFoundError('CALL_NOT_FOUND', 'Call was not found.');
+    const nextStatus = current.status === 'ringing' ? 'missed' : 'ended';
+    await db.query(
+      `UPDATE meetings.meetings
+       SET status = $3,
+           ended_at = COALESCE(ended_at, NOW()),
+           updated_at = NOW()
+       WHERE organization_id = $1 AND id = $2 AND status IN ('ringing', 'live', 'scheduled')`,
+      [params.organizationId, params.meetingId, nextStatus],
+    );
+    return this.getMeeting(params.organizationId, params.meetingId);
+  }
+
+  async leaveDirectCall(params: {
+    meetingId: string;
+    userId: string;
+  }) {
+    await db.query(
+      `UPDATE meetings.participants
+       SET left_at = NOW(), invite_status = 'left'
+       WHERE meeting_id = $1 AND user_id = $2`,
+      [params.meetingId, params.userId],
+    );
+  }
+
+  async inviteDirectCallParticipants(params: {
+    organizationId: string;
+    meetingId: string;
+    userIds: string[];
+    callType: 'audio' | 'video';
+  }) {
+    const meeting = await this.getMeeting(params.organizationId, params.meetingId);
+    if (!meeting) throw new NotFoundError('CALL_NOT_FOUND', 'Call was not found.');
+    for (const userId of [...new Set(params.userIds.filter(Boolean))]) {
+      await db.query(
+        `INSERT INTO meetings.participants (
+           meeting_id, user_id, role, invite_status, joined_at, is_muted, is_camera_on
+         ) VALUES ($1,$2,'participant','ringing',NULL,TRUE,$3)
+         ON CONFLICT (meeting_id, user_id) DO UPDATE
+         SET invite_status = 'ringing', left_at = NULL`,
+        [params.meetingId, userId, params.callType === 'video'],
+      );
+    }
+    return meeting;
   }
 }
 
