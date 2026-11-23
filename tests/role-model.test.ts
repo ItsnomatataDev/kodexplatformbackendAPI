@@ -95,6 +95,19 @@ test('attachment permission migration grants nested attachment and submission ke
   assert.doesNotMatch(sql, /work\.\*/);
 });
 
+test('Content Studio migration grants media roles read and manage access', () => {
+  const sql = fs.readFileSync(
+    path.resolve(process.cwd(), 'migrations/0074_content_studio_media_role_permissions.sql'),
+    'utf8',
+  );
+
+  assert.match(sql, /'\{content_studio\}'/);
+  assert.match(sql, /"read": true/);
+  assert.match(sql, /"manage": true/);
+  assert.match(sql, /role_key IN \(\s*'media_team',\s*'social_media'\s*\)/);
+  assert.match(sql, /is_active = TRUE/);
+});
+
 test('checklist migration grants nested checklist keys without using all as a wildcard', () => {
   const sql = fs.readFileSync(
     path.resolve(process.cwd(), 'migrations/0012_work_checklists.sql'),
