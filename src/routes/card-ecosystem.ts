@@ -67,6 +67,10 @@ import {
   TIMER_BACKDATE_TOLERANCE_MS,
   type ManualEntryAccess,
 } from '../work/manual-entry-policy.js';
+import {
+  assertCardOfficeAccess,
+  workOfficeScope,
+} from '../work/office-access.js';
 
 export type CardEcosystemDependencies = {
   store: WorkStore;
@@ -400,6 +404,28 @@ function resultOrConflict<T>(
 
 export function createCardNestedRoutes(dependencies: CardEcosystemDependencies) {
   const routes = new Hono();
+
+  routes.use('/:cardId/*', async (c, next) => {
+    if (c.req.method !== 'GET') {
+      await next();
+      return;
+    }
+
+    const auth = getAuth(c);
+    if (!workOfficeScope(auth)) {
+      await next();
+      return;
+    }
+
+    const organizationId = requireOrganizationId(auth);
+    const cardId = requireId(c.req.param('cardId'), 'cardId');
+    const card = await dependencies.store.getCardById(organizationId, cardId);
+    if (!card) {
+      throw new NotFoundError('CARD_NOT_FOUND', 'The card was not found.');
+    }
+    await assertCardOfficeAccess(auth, dependencies.store, organizationId, card);
+    await next();
+  });
 
   routes.get('/:cardId/comments', async (c) => {
     const auth = getAuth(c);

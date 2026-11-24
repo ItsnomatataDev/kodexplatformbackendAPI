@@ -19,10 +19,20 @@ organization/target access and binds the session to its original uploader.
 Session IDs do not grant access. Organization, bucket, object key, multipart
 upload ID, ETags, and the completion manifest are server-controlled.
 
+Non-admin memberships are restricted to their active `membership.officeId`.
+An explicit `officeId` must match that assignment; missing assignments return
+`CONTENT_STUDIO_OFFICE_UNASSIGNED`, and cross-office requests return
+`CONTENT_STUDIO_OFFICE_FORBIDDEN`. Admin roles may select another active office
+within their organization. Schedule detail, assets, comments, client media, and
+media-capability issuance use the same office scope. Cross-organization
+resources remain hidden as not found.
+
 The active organization roles `media_team` and `social_media` require
 `content_studio.read` and `content_studio.manage` for upload and playback.
 Migration `0074_content_studio_media_role_permissions.sql` reapplies those
 grants to active role rows so existing role records are repaired on rollout.
+The API resolves role and permissions from the active database membership and
+organization role; access tokens carry identity/session claims, not role grants.
 
 The raw part body is streamed directly to MinIO and is not passed through the
 general text-body buffer. `Content-Length` and the actual stream length must
@@ -69,9 +79,10 @@ Client-library request:
 }
 ```
 
-The server resolves the organization from auth, the schedule's office from the
-stored schedule, and the client office from the current membership or supplied
-office ID after organization-scoped lookup.
+The server resolves the organization from the authenticated membership and the
+schedule office from the stored schedule, then verifies that office against the
+current membership assignment. Client-library uploads use the assigned office;
+an explicit `officeId` must match it unless the caller has an admin role.
 
 Success is `201 Created` with `{ "session": { ... } }`. If the database session
 was persisted but MinIO initiation is uncertain, the server returns

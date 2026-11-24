@@ -13,6 +13,10 @@ import { NotFoundError, ValidationError } from '../http/errors.js';
 import { optionalMetadata } from '../http/fields.js';
 import { FIELD_LIMITS } from '../http/limits.js';
 import { rateLimitWork } from '../http/work-rate-limit.js';
+import {
+  assertBoardOfficeAccess,
+  workOfficeScope,
+} from '../work/office-access.js';
 import type { BoardRecord, BoardStore, UpdateBoardInput } from '../work/store.js';
 import { readJson, readOptionalInteger, readOptionalString, readRequiredText } from '../work/http.js';
 
@@ -86,9 +90,11 @@ export function createBoardRoutes(dependencies: BoardRouteDependencies) {
     });
 
     const page = readListQuery(c);
+    const officeId = workOfficeScope(auth);
     const records = await dependencies.store.listByOrganization(organizationId, {
       limit: page.limit,
       offset: listOffset(Number(c.req.query('offset'))),
+      ...(officeId ? { officeId } : {}),
     });
     return c.json({
       boards: records.boards.map(serializeBoard),
@@ -159,6 +165,7 @@ export function createBoardRoutes(dependencies: BoardRouteDependencies) {
       throw new NotFoundError('BOARD_NOT_FOUND', 'The board was not found.');
     }
 
+    assertBoardOfficeAccess(auth, board);
     return c.json({ board: serializeBoard(board) });
   });
 

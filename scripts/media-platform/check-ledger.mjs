@@ -1,4 +1,4 @@
-// Offline only: imports neither the database pool nor environment configuration.
+
 import { readFile, readdir } from 'node:fs/promises';
 import { planMigrations } from '../../dist/db/migration-plan.js';
 const filename = process.argv[2];

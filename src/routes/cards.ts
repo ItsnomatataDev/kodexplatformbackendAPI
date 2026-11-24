@@ -11,6 +11,11 @@ import { NotFoundError, ValidationError } from '../http/errors.js';
 import { optionalMetadata } from '../http/fields.js';
 import { FIELD_LIMITS } from '../http/limits.js';
 import { rateLimitWork } from '../http/work-rate-limit.js';
+import {
+  assertBoardOfficeAccess,
+  assertCardOfficeAccess,
+  workOfficeScope,
+} from '../work/office-access.js';
 import type { CardRecord, UpdateCardInput, WorkStore } from '../work/store.js';
 import {
   readJson,
@@ -176,10 +181,17 @@ export function createBoardCardRoutes(dependencies: CardRouteDependencies) {
       },
     });
 
-    await requireBoardInOrganization(dependencies.store, organizationId, boardId);
+    const board = await requireBoardInOrganization(
+      dependencies.store,
+      organizationId,
+      boardId,
+    );
+    assertBoardOfficeAccess(auth, board);
+    const officeId = workOfficeScope(auth);
     const cards = await dependencies.store.listCardsByBoard(
       organizationId,
       boardId,
+      officeId ?? undefined,
     );
 
     return c.json({
@@ -306,6 +318,7 @@ export function createCardRoutes(dependencies: CardRouteDependencies) {
       throw new NotFoundError('CARD_NOT_FOUND', 'The card was not found.');
     }
 
+    await assertCardOfficeAccess(auth, dependencies.store, organizationId, card);
     return c.json({ card: serializeCard(card) });
   });
 

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { listLimit, listOffset, pageOf } from '../db/list-bounds.js';
+import { boardOfficeId } from './office-access.js';
 import type {
   AssigneeRecord,
   AttachmentRecord,
@@ -73,12 +74,14 @@ export class MemoryBoardStore implements WorkStore {
 
   async listByOrganization(
     organizationId: string,
-    page: { limit?: number; offset?: number } = {},
+    page: { limit?: number; offset?: number; officeId?: string } = {},
   ) {
     const ordered = [...this.boards.values()]
       .filter(
         (board) =>
-          board.organizationId === organizationId && board.archivedAt == null,
+          board.organizationId === organizationId &&
+          board.archivedAt == null &&
+          (!page.officeId || boardOfficeId(board) === page.officeId),
       )
       .sort((left, right) => {
         if (left.position !== right.position) {
@@ -307,13 +310,18 @@ export class MemoryBoardStore implements WorkStore {
     return { status: 'deleted' } as const;
   }
 
-  async listCardsByBoard(organizationId: string, boardId: string) {
+  async listCardsByBoard(
+    organizationId: string,
+    boardId: string,
+    officeId?: string,
+  ) {
     return [...this.cards.values()]
       .filter(
         (card) =>
           card.organizationId === organizationId &&
           card.boardId === boardId &&
-          card.archivedAt == null,
+          card.archivedAt == null &&
+          (!officeId || !card.legacyOfficeId || card.legacyOfficeId === officeId),
       )
       .sort((left, right) => {
         if (left.position !== right.position) {

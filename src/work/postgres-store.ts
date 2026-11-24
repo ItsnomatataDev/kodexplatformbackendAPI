@@ -784,7 +784,7 @@ function mapChecklist(
 export class PostgresBoardStore implements WorkStore {
   async listByOrganization(
     organizationId: string,
-    page: { limit?: number; offset?: number } = {},
+    page: { limit?: number; offset?: number; officeId?: string } = {},
   ) {
     const limit = listLimit(page.limit);
     const result = await db.query<BoardRow>(
@@ -793,10 +793,17 @@ export class PostgresBoardStore implements WorkStore {
         FROM work.boards
         WHERE organization_id = $1
           AND archived_at IS NULL
+          AND (
+            $4::text IS NULL
+            OR COALESCE(
+              NULLIF(metadata->>'officeId', ''),
+              NULLIF(metadata->>'office_id', '')
+            ) = $4
+          )
         ORDER BY position ASC, created_at DESC, id ASC
         LIMIT $2 OFFSET $3
       `,
-      [organizationId, limit + 1, listOffset(page.offset)],
+      [organizationId, limit + 1, listOffset(page.offset), page.officeId ?? null],
     );
 
     const paged = pageOf(result.rows.map(mapBoard), limit);
@@ -1192,7 +1199,11 @@ export class PostgresBoardStore implements WorkStore {
    * cards from the Kanban until column pagination exists on the client.
    * The organization and board predicates still bound the working set.
    */
-  async listCardsByBoard(organizationId: string, boardId: string) {
+  async listCardsByBoard(
+    organizationId: string,
+    boardId: string,
+    officeId?: string,
+  ) {
     const result = await db.query<CardRow>(
       `
         SELECT ${CARD_PROFILE_COLUMNS}
@@ -1200,9 +1211,14 @@ export class PostgresBoardStore implements WorkStore {
         WHERE card.organization_id = $1
           AND card.board_id = $2
           AND card.archived_at IS NULL
+          AND (
+            $3::text IS NULL
+            OR card.legacy_office_id IS NULL
+            OR card.legacy_office_id = $3
+          )
         ORDER BY card.position ASC, card.created_at ASC, card.id ASC
       `,
-      [organizationId, boardId],
+      [organizationId, boardId, officeId ?? null],
     );
 
     return result.rows.map(mapCard);

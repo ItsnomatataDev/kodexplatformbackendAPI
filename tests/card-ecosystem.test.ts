@@ -85,6 +85,82 @@ test('comments can be created, listed, and updated for a card in the authenticat
   assert.equal(patched.comment.body, 'Updated comment');
 });
 
+test('social-media nested card reads are restricted to the assigned office', async () => {
+  const store = new MemoryBoardStore();
+  const officeA = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+  const officeB = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
+  const officeBoard = await store.create({
+    organizationId: orgA,
+    createdBy: userA,
+    name: 'Head Office board',
+    metadata: { officeId: officeA },
+  });
+  const otherOfficeBoard = await store.create({
+    organizationId: orgA,
+    createdBy: userA,
+    name: 'Other office board',
+    metadata: { officeId: officeB },
+  });
+  const officeColumn = await store.createColumn({
+    organizationId: orgA,
+    boardId: officeBoard.id,
+    name: 'To Do',
+  });
+  const otherOfficeColumn = await store.createColumn({
+    organizationId: orgA,
+    boardId: otherOfficeBoard.id,
+    name: 'To Do',
+  });
+  assert.ok(officeColumn);
+  assert.ok(otherOfficeColumn);
+  const officeCard = await store.createCard({
+    organizationId: orgA,
+    boardId: officeBoard.id,
+    columnId: officeColumn.id,
+    createdBy: userA,
+    title: 'Office task',
+  });
+  const otherOfficeCard = await store.createCard({
+    organizationId: orgA,
+    boardId: otherOfficeBoard.id,
+    columnId: otherOfficeColumn.id,
+    createdBy: userA,
+    title: 'Other office task',
+  });
+  assert.ok(officeCard);
+  assert.ok(otherOfficeCard);
+
+  const app = createWorkApp(store, async () =>
+    authContext({
+      membership: {
+        roleKey: 'social_media',
+        isAdminRole: false,
+        officeId: officeA,
+        permissions: {
+          work: {
+            card_comments: { read: true },
+          },
+        },
+      },
+    }),
+  );
+  const authorization = await bearer(userA);
+
+  const allowed = await json(
+    await app.request(`/api/cards/${officeCard.id}/comments`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.deepEqual(allowed.comments, []);
+
+  const denied = await json(
+    await app.request(`/api/cards/${otherOfficeCard.id}/comments`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(denied.error?.code, 'CARD_NOT_FOUND');
+});
+
 test('labels can be created, assigned, listed, and removed without crossing organizations', async () => {
   const store = new MemoryBoardStore();
   const app = createWorkApp(store);

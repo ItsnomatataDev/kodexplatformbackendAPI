@@ -8,7 +8,6 @@ import { migrationBody, planMigrations, type AppliedMigration } from './migratio
 export async function applyMigrations(client: Pick<PoolClient, 'query'>, directory: string): Promise<string[]> {
   const files = (await fs.readdir(directory)).filter(file => file.endsWith('.sql'));
   if (!files.length) throw new Error('No SQL migrations found');
-  // Validate filenames before opening a connection or creating the ledger.
   planMigrations(files, []);
   try {
     await client.query('SELECT pg_advisory_lock(71402820)');
@@ -25,8 +24,6 @@ export async function applyMigrations(client: Pick<PoolClient, 'query'>, directo
       try {
         await client.query('SET LOCAL statement_timeout = 0');
         await client.query(sql);
-        // Full filenames disambiguate new entries from existing numeric 0058 rows.
-        // Never UPDATE/DELETE or backdate an existing history entry.
         await client.query('INSERT INTO platform.schema_migrations(version, description) VALUES ($1,$2)',
           [migration.filename, migration.description]);
         await client.query('COMMIT');

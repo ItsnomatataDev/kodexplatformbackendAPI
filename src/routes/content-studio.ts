@@ -7,6 +7,11 @@ import { isUuid } from '../auth/uuid.js';
 import { assertAuthorized } from '../authorization/authorize.js';
 import { requireOrganizationId } from '../authorization/organization.js';
 import {
+  assertContentStudioOfficeAccess,
+  assignedContentStudioOfficeId,
+  requireContentStudioOfficeId,
+} from '../content/office-access.js';
+import {
   ForbiddenError,
   NotFoundError,
   PayloadTooLargeError,
@@ -84,14 +89,7 @@ function authorizeContent(
 }
 
 function requireOfficeId(auth: ReturnType<typeof getAuth>, bodyOfficeId?: string | null) {
-  const officeId = (bodyOfficeId ?? auth.membership.officeId ?? '').trim();
-  if (!officeId) {
-    throw new ValidationError(
-      'Your profile must be assigned to a Content Studio office.',
-      { field: 'officeId' },
-    );
-  }
-  return officeId;
+  return requireContentStudioOfficeId(auth, bodyOfficeId);
 }
 
 async function assertContentStudioOffice(params: {
@@ -114,6 +112,43 @@ async function assertContentStudioOffice(params: {
     );
   }
   return office;
+}
+
+async function requireAuthorizedSchedule(params: {
+  auth: ReturnType<typeof getAuth>;
+  store: ContentStore;
+  organizationId: string;
+  scheduleId: string;
+}): Promise<ContentScheduleRecord> {
+  const schedule = await params.store.getSchedule(
+    params.organizationId,
+    params.scheduleId,
+  );
+  if (!schedule) {
+    throw new NotFoundError(
+      'CONTENT_SCHEDULE_NOT_FOUND',
+      'Schedule was not found.',
+    );
+  }
+  assertContentStudioOfficeAccess(params.auth, schedule.officeId);
+  return schedule;
+}
+
+async function requireAuthorizedAsset(params: {
+  auth: ReturnType<typeof getAuth>;
+  store: ContentStore;
+  organizationId: string;
+  assetId: string;
+}) {
+  const asset = await params.store.getAsset(
+    params.organizationId,
+    params.assetId,
+  );
+  if (!asset) {
+    throw new NotFoundError('CONTENT_ASSET_NOT_FOUND', 'Asset was not found.');
+  }
+  assertContentStudioOfficeAccess(params.auth, asset.officeId);
+  return asset;
 }
 
 function iso(value: Date | null | undefined) {
@@ -603,8 +638,13 @@ export function createContentStudioRoutes(
         { field: 'email' },
       );
     }
-    const schedule = await dependencies.store.getSchedule(organizationId, scheduleId);
-    if (!schedule || schedule.clientId !== clientId) {
+    const schedule = await requireAuthorizedSchedule({
+      auth,
+      store: dependencies.store,
+      organizationId,
+      scheduleId,
+    });
+    if (schedule.clientId !== clientId) {
       throw new NotFoundError('CONTENT_SCHEDULE_NOT_FOUND', 'Schedule was not found.');
     }
 
@@ -655,6 +695,11 @@ export function createContentStudioRoutes(
     const auth = getAuth(c);
     const organizationId = authorizeContent(auth, 'content_studio.read');
     const officeId = requireOfficeId(auth, c.req.query('officeId'));
+    await assertContentStudioOffice({
+      directory: dependencies.directory,
+      organizationId,
+      officeId,
+    });
     const clientId = c.req.query('clientId') || undefined;
     const status = (c.req.query('status') as ContentScheduleStatus | 'all' | undefined) ??
       'all';
@@ -734,6 +779,10 @@ export function createContentStudioRoutes(
       monthKey,
     });
 
+    if (schedule) {
+      assertContentStudioOfficeAccess(auth, schedule.officeId);
+    }
+
     if (!schedule) {
       const reviewToken = generateContentReviewToken();
       schedule = await dependencies.store.createSchedule({
@@ -770,18 +819,26 @@ export function createContentStudioRoutes(
     const auth = getAuth(c);
     const organizationId = authorizeContent(auth, 'content_studio.read');
     const scheduleId = requireUuidValue(c.req.param('scheduleId'), 'scheduleId');
-    const schedule = await dependencies.store.getSchedule(organizationId, scheduleId);
-    if (!schedule) {
-      throw new NotFoundError(
-        'CONTENT_SCHEDULE_NOT_FOUND',
-        'Schedule was not found.',
-      );
-    }
+    const schedule = await requireAuthorizedSchedule({
+      auth,
+      store: dependencies.store,
+      organizationId,
+      scheduleId,
+    });
     const [assets, comments, activity] = await Promise.all([
       dependencies.store.listAssetsForSchedules(organizationId, [scheduleId]),
       dependencies.store.listComments(organizationId, [scheduleId]),
       dependencies.store.listActivity(organizationId, [scheduleId]),
     ]);
+    assets.forEach((asset) =>
+      assertContentStudioOfficeAccess(auth, asset.officeId),
+    );
+    comments.forEach((comment) =>
+      assertContentStudioOfficeAccess(auth, comment.officeId),
+    );
+    activity.forEach((item) =>
+      assertContentStudioOfficeAccess(auth, item.officeId),
+    );
     return c.json({
       schedule: serializeSchedule(schedule),
       assets: assets.map(serializeAsset),
@@ -794,6 +851,12 @@ export function createContentStudioRoutes(
     const auth = getAuth(c);
     const organizationId = authorizeContent(auth, 'content_studio.manage');
     const scheduleId = requireUuidValue(c.req.param('scheduleId'), 'scheduleId');
+    await requireAuthorizedSchedule({
+      auth,
+      store: dependencies.store,
+      organizationId,
+      scheduleId,
+    });
     const body = await readJson(c);
     const schedule = await dependencies.store.updateSchedule(organizationId, scheduleId, {
       title: asOptionalString(body.title),
@@ -835,6 +898,12 @@ export function createContentStudioRoutes(
     const auth = getAuth(c);
     const organizationId = authorizeContent(auth, 'content_studio.manage');
     const scheduleId = requireUuidValue(c.req.param('scheduleId'), 'scheduleId');
+    await requireAuthorizedSchedule({
+      auth,
+      store: dependencies.store,
+      organizationId,
+      scheduleId,
+    });
     const schedule = await dependencies.store.updateSchedule(organizationId, scheduleId, {
       status: 'archived',
       reviewStatus: 'archived',
@@ -846,6 +915,12 @@ export function createContentStudioRoutes(
     const auth = getAuth(c);
     const organizationId = authorizeContent(auth, 'content_studio.manage');
     const scheduleId = requireUuidValue(c.req.param('scheduleId'), 'scheduleId');
+    await requireAuthorizedSchedule({
+      auth,
+      store: dependencies.store,
+      organizationId,
+      scheduleId,
+    });
     const assets = await dependencies.store.listAssetsForSchedules(
       organizationId,
       [scheduleId],
@@ -870,9 +945,20 @@ export function createContentStudioRoutes(
       .map((value) => value.trim())
       .filter(Boolean)
       .map((value) => requireUuidValue(value, 'scheduleId'));
+    await Promise.all(scheduleIds.map((scheduleId) =>
+      requireAuthorizedSchedule({
+        auth,
+        store: dependencies.store,
+        organizationId,
+        scheduleId,
+      }),
+    ));
     const assets = await dependencies.store.listAssetsForSchedules(
       organizationId,
       scheduleIds,
+    );
+    assets.forEach((asset) =>
+      assertContentStudioOfficeAccess(auth, asset.officeId),
     );
     return c.json({ assets: assets.map(serializeAsset) });
   });
@@ -885,13 +971,12 @@ export function createContentStudioRoutes(
     const auth = getAuth(c);
     const organizationId = authorizeContent(auth, 'content_studio.manage');
     const scheduleId = requireUuidValue(c.req.param('scheduleId'), 'scheduleId');
-    const schedule = await dependencies.store.getSchedule(organizationId, scheduleId);
-    if (!schedule) {
-      throw new NotFoundError(
-        'CONTENT_SCHEDULE_NOT_FOUND',
-        'Schedule was not found.',
-      );
-    }
+    const schedule = await requireAuthorizedSchedule({
+      auth,
+      store: dependencies.store,
+      organizationId,
+      scheduleId,
+    });
 
     const sizeBytes = requireBinaryUploadSize(c);
     const filename = decodeUploadFilename(
@@ -999,13 +1084,12 @@ export function createContentStudioRoutes(
     const auth = getAuth(c);
     const organizationId = authorizeContent(auth, 'content_studio.manage');
     const scheduleId = requireUuidValue(c.req.param('scheduleId'), 'scheduleId');
-    const schedule = await dependencies.store.getSchedule(organizationId, scheduleId);
-    if (!schedule) {
-      throw new NotFoundError(
-        'CONTENT_SCHEDULE_NOT_FOUND',
-        'Schedule was not found.',
-      );
-    }
+    const schedule = await requireAuthorizedSchedule({
+      auth,
+      store: dependencies.store,
+      organizationId,
+      scheduleId,
+    });
 
     const body = await readJson(c);
     const filename = readRequiredText(
@@ -1074,6 +1158,12 @@ export function createContentStudioRoutes(
     const auth = getAuth(c);
     const organizationId = authorizeContent(auth, 'content_studio.manage');
     const assetId = requireUuidValue(c.req.param('assetId'), 'assetId');
+    await requireAuthorizedAsset({
+      auth,
+      store: dependencies.store,
+      organizationId,
+      assetId,
+    });
     const body = await readJson(c);
     const asset = await dependencies.store.updateAsset(organizationId, assetId, {
       heading: asNullableString(body.heading),
@@ -1095,6 +1185,14 @@ export function createContentStudioRoutes(
     const assetIds = Array.isArray(body.assetIds)
       ? body.assetIds.map((id: unknown) => requireUuidValue(String(id), 'assetId'))
       : [];
+    await Promise.all(assetIds.map((assetId: string) =>
+      requireAuthorizedAsset({
+        auth,
+        store: dependencies.store,
+        organizationId,
+        assetId,
+      }),
+    ));
     await dependencies.store.setAssetsSelected(
       organizationId,
       assetIds,
@@ -1107,6 +1205,12 @@ export function createContentStudioRoutes(
     const auth = getAuth(c);
     const organizationId = authorizeContent(auth, 'content_studio.manage');
     const assetId = requireUuidValue(c.req.param('assetId'), 'assetId');
+    await requireAuthorizedAsset({
+      auth,
+      store: dependencies.store,
+      organizationId,
+      assetId,
+    });
     const asset = await dependencies.store.deleteAsset(organizationId, assetId);
     if (asset.libraryMediaId) {
       const stillAttached = await dependencies.store.countLibraryRefs(
@@ -1133,17 +1237,17 @@ export function createContentStudioRoutes(
       String(body.mediaId ?? body.libraryMediaId),
       'mediaId',
     );
-    const schedule = await dependencies.store.getSchedule(organizationId, scheduleId);
-    if (!schedule) {
-      throw new NotFoundError(
-        'CONTENT_SCHEDULE_NOT_FOUND',
-        'Schedule was not found.',
-      );
-    }
+    const schedule = await requireAuthorizedSchedule({
+      auth,
+      store: dependencies.store,
+      organizationId,
+      scheduleId,
+    });
     const media = await dependencies.store.getClientMedia(organizationId, mediaId);
     if (!media) {
       throw new NotFoundError('CONTENT_MEDIA_NOT_FOUND', 'Media was not found.');
     }
+    assertContentStudioOfficeAccess(auth, media.officeId);
     const displaySlot = Number(body.displaySlot ?? body.display_slot ?? 0) || 0;
     const asset = await dependencies.store.createAsset({
       scheduleId,
@@ -1172,10 +1276,27 @@ export function createContentStudioRoutes(
     const auth = getAuth(c);
     const organizationId = authorizeContent(auth, 'content_studio.read');
     const clientId = requireUuidValue(c.req.param('clientId'), 'clientId');
+    const officeId = assignedContentStudioOfficeId(auth);
+    if (officeId) {
+      const client = await dependencies.store.getClient(
+        organizationId,
+        officeId,
+        clientId,
+      );
+      if (!client) {
+        throw new NotFoundError(
+          'CONTENT_CLIENT_NOT_FOUND',
+          'Client was not found.',
+        );
+      }
+    }
     const media = await dependencies.store.listClientMedia(
       organizationId,
       clientId,
       readListQuery(c),
+    );
+    media.media.forEach((item) =>
+      assertContentStudioOfficeAccess(auth, item.officeId),
     );
     return c.json({
       media: media.media.map(serializeMedia),
@@ -1372,6 +1493,14 @@ export function createContentStudioRoutes(
     const auth = getAuth(c);
     const organizationId = authorizeContent(auth, 'content_studio.manage');
     const mediaId = requireUuidValue(c.req.param('mediaId'), 'mediaId');
+    const existing = await dependencies.store.getClientMedia(
+      organizationId,
+      mediaId,
+    );
+    if (!existing) {
+      throw new NotFoundError('CONTENT_MEDIA_NOT_FOUND', 'Media was not found.');
+    }
+    assertContentStudioOfficeAccess(auth, existing.officeId);
     await dependencies.store.deleteScheduleAssetsByLibraryMediaId(
       organizationId,
       mediaId,
@@ -1386,8 +1515,13 @@ export function createContentStudioRoutes(
     const organizationId = authorizeContent(auth, 'content_studio.read');
     const body = await readJson(c);
     const objectKey = readMediaObjectKey(String(body.objectKey ?? body.object_key ?? ''));
+    const officeId = assignedContentStudioOfficeId(auth);
     if (!objectKey || !dependencies.store.findMediaOwnership ||
-        !(await dependencies.store.findMediaOwnership(organizationId, objectKey))) {
+        !(await dependencies.store.findMediaOwnership(
+          organizationId,
+          objectKey,
+          officeId ?? undefined,
+        ))) {
       throw new NotFoundError('CONTENT_MEDIA_NOT_FOUND', 'Media was not found.');
     }
     c.header('Cache-Control', 'no-store');
@@ -1458,6 +1592,7 @@ export function createContentStudioRoutes(
     if (!schedule || schedule.organizationId !== organizationId) {
       throw new NotFoundError('CONTENT_SCHEDULE_NOT_FOUND', 'Schedule was not found.');
     }
+    assertContentStudioOfficeAccess(auth, schedule.officeId);
     await assertContentStudioOffice({ directory: dependencies.directory, organizationId, officeId: schedule.officeId });
     const body = await readJson(c);
     const result = await submitInternalReview({
@@ -1472,13 +1607,12 @@ export function createContentStudioRoutes(
     const auth = getAuth(c);
     const organizationId = authorizeContent(auth, 'content_studio.manage');
     const scheduleId = requireUuidValue(c.req.param('scheduleId'), 'scheduleId');
-    const schedule = await dependencies.store.getSchedule(organizationId, scheduleId);
-    if (!schedule) {
-      throw new NotFoundError(
-        'CONTENT_SCHEDULE_NOT_FOUND',
-        'Schedule was not found.',
-      );
-    }
+    const schedule = await requireAuthorizedSchedule({
+      auth,
+      store: dependencies.store,
+      organizationId,
+      scheduleId,
+    });
     const body = await readJson(c);
     const comment = await dependencies.store.addComment({
       scheduleId,
@@ -1501,13 +1635,12 @@ export function createContentStudioRoutes(
     const auth = getAuth(c);
     const organizationId = authorizeContent(auth, 'content_studio.manage');
     const scheduleId = requireUuidValue(c.req.param('scheduleId'), 'scheduleId');
-    const schedule = await dependencies.store.getSchedule(organizationId, scheduleId);
-    if (!schedule) {
-      throw new NotFoundError(
-        'CONTENT_SCHEDULE_NOT_FOUND',
-        'Schedule was not found.',
-      );
-    }
+    const schedule = await requireAuthorizedSchedule({
+      auth,
+      store: dependencies.store,
+      organizationId,
+      scheduleId,
+    });
     const body = await readJson(c);
     const activityType = readRequiredText(
       body.activityType ?? body.type ?? body.activity_type,
@@ -1536,9 +1669,20 @@ export function createContentStudioRoutes(
       .split(',')
       .map((id) => id.trim())
       .filter((id) => isUuid(id));
+    await Promise.all(scheduleIds.map((scheduleId) =>
+      requireAuthorizedSchedule({
+        auth,
+        store: dependencies.store,
+        organizationId,
+        scheduleId,
+      }),
+    ));
     const comments = await dependencies.store.listComments(
       organizationId,
       scheduleIds,
+    );
+    comments.forEach((comment) =>
+      assertContentStudioOfficeAccess(auth, comment.officeId),
     );
     return c.json({ comments: comments.map(serializeComment) });
   });

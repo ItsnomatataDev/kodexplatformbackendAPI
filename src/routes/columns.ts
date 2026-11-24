@@ -9,6 +9,7 @@ import {
 import { NotFoundError, ValidationError, ConflictError } from '../http/errors.js';
 import { FIELD_LIMITS } from '../http/limits.js';
 import { rateLimitWork } from '../http/work-rate-limit.js';
+import { assertBoardOfficeAccess } from '../work/office-access.js';
 import type {
   ColumnRecord,
   UpdateColumnInput,
@@ -100,7 +101,12 @@ export function createBoardColumnRoutes(dependencies: ColumnRouteDependencies) {
       },
     });
 
-    await requireBoardInOrganization(dependencies.store, organizationId, boardId);
+    const board = await requireBoardInOrganization(
+      dependencies.store,
+      organizationId,
+      boardId,
+    );
+    assertBoardOfficeAccess(auth, board);
     const columns = await dependencies.store.listColumnsByBoard(
       organizationId,
       boardId,

@@ -42,7 +42,7 @@ export type UpdateBoardInput = {
 export interface BoardStore {
   listByOrganization(
     organizationId: string,
-    page?: { limit?: number; offset?: number },
+    page?: { limit?: number; offset?: number; officeId?: string },
   ): Promise<{ boards: BoardRecord[]; hasMore: boolean }>;
   getById(
     organizationId: string,
@@ -201,6 +201,7 @@ export interface CardStore {
   listCardsByBoard(
     organizationId: string,
     boardId: string,
+    officeId?: string,
   ): Promise<CardRecord[]>;
   getCardById(
     organizationId: string,

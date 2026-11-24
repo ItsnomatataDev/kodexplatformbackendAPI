@@ -153,7 +153,9 @@ for (const kind of ['schedule', 'client'] as const) {
     const uploadPath = kind === 'schedule'
       ? `/api/content-studio/schedules/${parentId}/assets/binary`
       : `/api/content-studio/clients/${parentId}/media/binary`;
-    const upload = await app.request(`${uploadPath}?filename=clip.mov`, {
+    const uploadQuery = new URLSearchParams({ filename: 'clip.mov' });
+    if (kind === 'client') uploadQuery.set('officeId', officeId);
+    const upload = await app.request(`${uploadPath}?${uploadQuery}`, {
       method: 'POST', headers: { authorization, 'content-type': 'video/quicktime', 'content-length': String(body.length) },
       body: new Uint8Array(body),
     });
@@ -210,14 +212,28 @@ for (const kind of ['schedule', 'client'] as const) {
       const path = kind === 'schedule'
         ? `/api/content-studio/schedules/${parentId}/assets`
         : `/api/content-studio/clients/${parentId}/media`;
-      const result = await app.request(path + (encoding === 'binary' ? '/binary?filename=test.png' : ''), {
+      const query = new URLSearchParams();
+      if (encoding === 'binary') query.set('filename', 'test.png');
+      if (kind === 'client') query.set('officeId', officeId);
+      const queryString = query.toString();
+      const result = await app.request(
+        path +
+          (encoding === 'binary' ? '/binary' : '') +
+          (queryString ? `?${queryString}` : ''),
+        {
         method: 'POST',
         headers: encoding === 'binary'
           ? { authorization, 'content-type': 'image/png', 'content-length': String(body.length) }
           : { authorization, 'content-type': 'application/json' },
         body: encoding === 'binary' ? new Uint8Array(body)
-          : JSON.stringify({ filename: 'test.png', contentType: 'image/png', contentBase64: body.toString('base64') }),
-      });
+          : JSON.stringify({
+              ...(kind === 'client' ? { officeId } : {}),
+              filename: 'test.png',
+              contentType: 'image/png',
+              contentBase64: body.toString('base64'),
+            }),
+        },
+      );
       assert.equal(result.status, 500);
       assert(failedKey, 'metadata persistence was attempted');
       assert.equal(await files.getObject(CONTENT_REVIEW_ASSETS_BUCKET, failedKey), null);

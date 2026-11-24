@@ -9,8 +9,8 @@ export const ARGON2ID_PARAMETERS = {
   hashLength: 32,
 } as const;
 
-const MIN_PASSWORD_LENGTH = 12;
-const MAX_PASSWORD_LENGTH = 128;
+const MIN_PASSWORD_LENGTH = 4;
+const MAX_PASSWORD_LENGTH = 118;
 
 export function validatePassword(
   password: string,

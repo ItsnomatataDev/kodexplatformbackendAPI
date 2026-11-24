@@ -1,0 +1,73 @@
+title Content Studio Upload and Video Playback
+direction right
+colorMode pastel
+styleMode plain
+typeface clean
+textSize medium
+
+// HLS is the intended playback path. The Range fallback is local-development only.
+Content Studio Browser [color: blue] {
+  Editor [label: "Staff editor\nItsNomatataWorkspace React/Vite SPA"]
+  Reviewer [label: "Client or internal reviewer\nSeparate portal/preview authorization"]
+}
+
+Ingress and Control Plane [color: purple] {
+  Caddy [label: "HTTPS proxy example\nLive host routing not verified"]
+  Kode API [label: "Kode Hono API\nAuth, tenant ownership and media control"]
+  Upload Role [label: "Optional Kode API upload process\nVPS Compose declares port 3002"]
+}
+
+Persistent Stores [color: green] {
+  PostgreSQL [label: "PostgreSQL\nUpload sessions, assets, variants and job leases"]
+  Redis [label: "Redis\nShort-lived playback grant state"]
+  MinIO [label: "Private MinIO origin\nOriginal video and HLS generations"]
+}
+
+Processing [color: yellow] {
+  Upload Repair [label: "Upload maintenance process\nReconciles recoverable/stalled sessions"]
+  Adaptive Worker [label: "Media-platform worker\nClaims leased jobs and runs FFmpeg"]
+}
+
+Playback Delivery [color: red] {
+  Public Media Entry [label: "Expected HTTPS media hostname\nOperator routing is required; not verified", color: grey]
+  Media Auth [label: "Media-auth\nValidates signed URL and Redis grant"]
+  Nginx Edge [label: "Nginx media edge\nLoopback-bound in VPS Compose; private cache"]
+  Optional CDN [label: "Future geographic CDN\nNot configured; grant check must remain on cache hits", color: grey]
+}
+
+System Notes [color: grey] {
+  Control Data Plane [label: "Control plane\nAPI handles upload metadata, status and grants"]
+  Media Byte Plane [label: "Media byte plane\nEdge streams HLS; API does not carry HLS segments"]
+  Release Boundary [label: "Current evidence\nVPS Compose is staging; media activation is not verified\nRepository release review records NO-GO"]
+  Routing Caveat [label: "Upload routing caveat\nCaddy example sends binary routes to API port 3000\nVPS Compose also declares upload role on port 3002"]
+  Line Legend [label: "Solid lines show repository-defined paths\nDashed lines show DEV-only, optional, or unverified paths"]
+}
+
+Editor <> Caddy: HTTPS auth, upload and control requests
+Caddy <> Kode API: Sessions, upload parts, asset registration, status and grants
+Reviewer <> Caddy: Portal and preview requests
+Kode API > Caddy: Status and 300-second HLS grant; renew about 60 seconds early
+Caddy > Editor: API responses
+Kode API <> PostgreSQL: Create/resume/complete upload session
+Kode API <> MinIO: Server-mediated multipart object upload
+Caddy -- Upload Role: Optional route; this Caddy example targets API port 3000
+Upload Repair <> PostgreSQL: Find and repair stalled sessions
+Upload Repair <> MinIO: Check multipart and stored-object state
+
+Kode API > PostgreSQL: Atomically create asset and adaptive_hls job
+Adaptive Worker <> PostgreSQL: Claim, heartbeat, retry and finalize job lease
+Adaptive Worker <> MinIO: Read original; write immutable HLS renditions
+
+Editor -- Public Media Entry: Signed HLS requests; public route unverified
+Public Media Entry -- Nginx Edge: Operator-managed HTTPS reverse proxy
+Nginx Edge > Media Auth: Internal authorization request for each media URL
+Media Auth <> Redis: Grant scope, expiry and revocation lookup
+Nginx Edge <> MinIO: Signed private-origin reads; eligible 200s cached; Range bypasses cache
+Nginx Edge > Editor: HLS playlists and media bytes
+
+Editor -- Caddy: DEV ONLY capability request and HTTP Range
+Caddy -- Kode API: DEV ONLY authorized Range route
+Kode API -- MinIO: DEV ONLY authorized Range stream
+
+Editor -- Optional CDN: Future geographic distribution
+Optional CDN -- Public Media Entry: Preserve authorization on every cache hit

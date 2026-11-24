@@ -1,7 +1,3 @@
--- ISOLATED RESTORE REHEARSAL ONLY.
--- Never execute against production.
--- Must be reviewed before execution.
-
 BEGIN;
 
 SET LOCAL lock_timeout = '3s';

@@ -23,6 +23,12 @@ automatic retries. Video uses its native `src` so failures reach the video error
 handler rather than being lost on a child `<source>`. QuickTime is no longer
 labelled MP4. CORS permits Range and exposes response range headers.
 
+In the Vite development editor, staff video playback falls back to the
+authenticated Range-capable original proxy when HLS is not already ready. This
+avoids waiting on local transcoding while testing the editor; production builds
+remain HLS-only. The fallback is not a substitute for running and scaling the
+media processing worker and CDN edge.
+
 ## Repeatable video check
 
 Run with the target environment's existing database and MinIO configuration:

@@ -2,6 +2,10 @@ import { Hono, type Context } from 'hono';
 import { assertAuthorized } from '../../authorization/authorize.js';
 import { requireOrganizationId } from '../../authorization/organization.js';
 import { getAuth } from '../../auth/middleware.js';
+import {
+  assertContentStudioOfficeAccess,
+  requireContentStudioOfficeId,
+} from '../office-access.js';
 import { enforceRateLimit } from '../../auth/rate-limit.js';
 import { ForbiddenError, NotFoundError, ServiceUnavailableError, ValidationError } from '../../http/errors.js';
 import { FIELD_LIMITS } from '../../http/limits.js';
@@ -38,13 +42,7 @@ function authorizedOrganization(auth: ReturnType<typeof getAuth>) {
 }
 
 function currentOfficeId(auth: ReturnType<typeof getAuth>, raw?: string | null) {
-  const officeId = (raw ?? auth.membership.officeId ?? '').trim();
-  if (!officeId) {
-    throw new ValidationError('Your profile must be assigned to a Content Studio office.', {
-      field: 'officeId',
-    });
-  }
-  return officeId;
+  return requireContentStudioOfficeId(auth, raw);
 }
 
 function iso(value: Date | string | null | undefined) {
@@ -140,6 +138,7 @@ export function createResumableUploadRoutes(dependencies: {
     if (!session) throw new NotFoundError('UPLOAD_SESSION_NOT_FOUND');
     const office = await dependencies.directory.getOffice(organizationId, session.target.officeId);
     if (!office) throw new NotFoundError('OFFICE_NOT_FOUND', 'Office was not found.');
+    assertContentStudioOfficeAccess(auth, session.target.officeId);
     if ((office.slug ?? '').toLowerCase() === 'three-little-birds') {
       throw new ForbiddenError(
         'CONTENT_STUDIO_OFFICE_BLOCKED',
@@ -229,6 +228,7 @@ export function createResumableUploadRoutes(dependencies: {
       if (!schedule) {
         throw new NotFoundError('CONTENT_SCHEDULE_NOT_FOUND', 'Schedule was not found.');
       }
+      assertContentStudioOfficeAccess(auth, schedule.officeId);
       const office = await dependencies.directory.getOffice(organizationId, schedule.officeId);
       if (!office) throw new NotFoundError('OFFICE_NOT_FOUND', 'Office was not found.');
       if ((office.slug ?? '').toLowerCase() === 'three-little-birds') {

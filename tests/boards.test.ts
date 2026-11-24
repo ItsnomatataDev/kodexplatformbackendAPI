@@ -10,6 +10,8 @@ const userA = '11111111-1111-1111-1111-111111111111';
 const userB = '22222222-2222-2222-2222-222222222222';
 const orgA = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const orgB = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+const officeA = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+const officeB = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
 const missingBoard = '99999999-9999-9999-9999-999999999999';
 
 const tokenService = new AccessTokenService({
@@ -308,6 +310,83 @@ test('members without permission cannot create boards', async () => {
   );
 
   assert.equal(denied.error?.code, 'INSUFFICIENT_PERMISSION');
+});
+
+test('social-media board reads are restricted to its assigned office and remain read-only', async () => {
+  const store = new MemoryBoardStore();
+  const officeBoard = await store.create({
+    organizationId: orgA,
+    createdBy: userA,
+    name: 'Head Office board',
+    metadata: { officeId: officeA },
+  });
+  const otherOfficeBoard = await store.create({
+    organizationId: orgA,
+    createdBy: userA,
+    name: 'Other office board',
+    metadata: { officeId: officeB },
+  });
+  const app = createBoardApp(store, async () =>
+    authContext({
+      membership: {
+        roleKey: 'social_media',
+        isAdminRole: false,
+        officeId: officeA,
+        permissions: { work: { boards: { read: true } } },
+      },
+    }),
+  );
+  const authorization = await bearer(userA);
+
+  const listed = await json(
+    await app.request('/api/boards', {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.deepEqual(
+    listed.boards?.map((board) => board.id),
+    [officeBoard.id],
+  );
+
+  const otherOffice = await json(
+    await app.request(`/api/boards/${otherOfficeBoard.id}`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(otherOffice.error?.code, 'BOARD_NOT_FOUND');
+
+  const createDenied = await json(
+    await app.request('/api/boards', {
+      method: 'POST',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name: 'Not allowed' }),
+    }),
+  );
+  assert.equal(createDenied.error?.code, 'INSUFFICIENT_PERMISSION');
+});
+
+test('social-media board reads require an active office assignment', async () => {
+  const app = createBoardApp(new MemoryBoardStore(), async () =>
+    authContext({
+      membership: {
+        roleKey: 'social_media',
+        isAdminRole: false,
+        officeId: null,
+        permissions: { work: { boards: { read: true } } },
+      },
+    }),
+  );
+
+  const response = await app.request('/api/boards', {
+    headers: { Authorization: await bearer(userA) },
+  });
+  const body = await json(response);
+
+  assert.equal(response.status, 403);
+  assert.equal(body.error?.code, 'OFFICE_ASSIGNMENT_REQUIRED');
 });
 
 test('deleting a board archives it and hides it from the organization list', async () => {

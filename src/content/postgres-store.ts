@@ -874,15 +874,21 @@ export class PostgresContentStore implements ContentStore {
     return Number(result.rows[0]?.count ?? 0);
   }
 
-  async findMediaOwnership(organizationId: string, storagePath: string) {
+  async findMediaOwnership(
+    organizationId: string,
+    storagePath: string,
+    officeId?: string,
+  ) {
     const result = await this.connection.query(
       `SELECT 1 FROM content.schedule_assets
-         WHERE organization_id = $1 AND storage_path = $2
+        WHERE organization_id = $1 AND storage_path = $2
+          AND ($3::uuid IS NULL OR office_id = $3)
        UNION ALL
        SELECT 1 FROM content.client_media
          WHERE organization_id = $1 AND storage_path = $2
+           AND ($3::uuid IS NULL OR office_id = $3)
        LIMIT 1`,
-      [organizationId, storagePath],
+      [organizationId, storagePath, officeId ?? null],
     );
     return result.rows.length > 0;
   }

@@ -100,6 +100,343 @@ test('schedule-wide revocation clears slot approvals and permits fresh review', 
   assert.equal((await f.feedback('approved', 1)).data.ok, true);
 });
 
+const accessOfficeA = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
+const accessOfficeB = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
+const accessForeignOffice = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+const accessScheduleA = '11111111-2222-3333-4444-555555555555';
+const accessScheduleB = '22222222-3333-4444-5555-666666666666';
+const accessScheduleForeign = '33333333-4444-5555-6666-777777777777';
+const accessAssetA = '44444444-5555-6666-7777-888888888888';
+const accessAssetB = '55555555-6666-7777-8888-999999999999';
+
+function accessSchedule(
+  id: string,
+  organizationId: string,
+  officeId: string,
+): ContentScheduleRecord {
+  const now = new Date(0);
+  return {
+    id,
+    organizationId,
+    officeId,
+    clientId: null,
+    createdBy: userA,
+    assignedTo: null,
+    title: `Schedule ${id}`,
+    subtitle: null,
+    body: null,
+    summary: null,
+    captions: null,
+    notes: null,
+    layoutType: 'article',
+    ctaLabel: null,
+    ctaUrl: null,
+    reviewToken: `review-${id}`,
+    reviewUrl: null,
+    slug: null,
+    status: 'draft',
+    reviewStatus: null,
+    scheduledAt: null,
+    expiresAt: null,
+    approvedAt: null,
+    approvedByName: null,
+    approvedByEmail: null,
+    changesRequestedAt: null,
+    lastViewedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function accessAsset(
+  id: string,
+  scheduleId: string,
+  organizationId: string,
+  officeId: string,
+): ContentScheduleAssetRecord {
+  const now = new Date(0);
+  return {
+    id,
+    scheduleId,
+    organizationId,
+    officeId,
+    libraryMediaId: null,
+    uploadedBy: userA,
+    fileName: `${id}.mp4`,
+    fileUrl: 'https://media.example.test/video.mp4',
+    storagePath: `content/${id}.mp4`,
+    bucket: 'content-review-assets',
+    mimeType: 'video/mp4',
+    assetType: 'video',
+    heading: null,
+    caption: null,
+    isSelected: true,
+    cropX: null,
+    cropY: null,
+    cropZoom: null,
+    sortOrder: 0,
+    displaySlot: 0,
+    originalSizeBytes: 1,
+    storedSizeBytes: 1,
+    compressionStatus: 'stored_original',
+    webPlaybackStatus: null,
+    expiresAt: null,
+    createdAt: now,
+  };
+}
+
+function scheduleAccessFixture(
+  context = authContext({
+    membership: {
+      officeId: accessOfficeA,
+      roleKey: 'social_media',
+      isAdminRole: false,
+      permissions: { content_studio: { read: true, manage: true } },
+    },
+  }),
+) {
+  const schedules = [
+    accessSchedule(accessScheduleA, orgA, accessOfficeA),
+    accessSchedule(accessScheduleB, orgA, accessOfficeB),
+    accessSchedule(accessScheduleForeign, orgB, accessForeignOffice),
+  ];
+  const assets = [
+    accessAsset(accessAssetA, accessScheduleA, orgA, accessOfficeA),
+    accessAsset(accessAssetB, accessScheduleB, orgA, accessOfficeB),
+  ];
+  const store = {
+    async listSchedules(params: { organizationId: string; officeId: string }) {
+      return schedules.filter(
+        (schedule) =>
+          schedule.organizationId === params.organizationId &&
+          schedule.officeId === params.officeId,
+      );
+    },
+    async getSchedule(organizationId: string, scheduleId: string) {
+      return schedules.find(
+        (schedule) =>
+          schedule.organizationId === organizationId &&
+          schedule.id === scheduleId,
+      ) ?? null;
+    },
+    async listAssetsForSchedules(
+      organizationId: string,
+      scheduleIds: string[],
+    ) {
+      return assets.filter(
+        (asset) =>
+          asset.organizationId === organizationId &&
+          scheduleIds.includes(asset.scheduleId),
+      );
+    },
+    async listComments() {
+      return [];
+    },
+    async listActivity() {
+      return [];
+    },
+    async findMediaOwnership(
+      organizationId: string,
+      storagePath: string,
+      officeId?: string,
+    ) {
+      return assets.some(
+        (asset) =>
+          asset.organizationId === organizationId &&
+          asset.storagePath === storagePath &&
+          (!officeId || asset.officeId === officeId),
+      );
+    },
+  } as unknown as ContentStore;
+  const directory = {
+    async getOffice(organizationId: string, officeId: string) {
+      if (
+        organizationId !== orgA ||
+        ![accessOfficeA, accessOfficeB].includes(officeId)
+      ) {
+        return null;
+      }
+      return {
+        id: officeId,
+        organizationId,
+        name: officeId === accessOfficeA ? 'Head Office' : 'Branch Office',
+        slug: officeId === accessOfficeA ? 'head-office' : 'branch-office',
+        isPrimary: officeId === accessOfficeA,
+        isActive: true,
+        settings: {},
+      };
+    },
+  } as unknown as OrganizationDirectoryStore;
+  const app = createApp({
+    content: store,
+    organizationDirectory: directory,
+    auth: {
+      verifier: tokenService,
+      resolveAuthContext: async () => context,
+      requireActiveSession: sessionAuth.requireActiveSession,
+    },
+  });
+  async function request(
+    path: string,
+    init: RequestInit = {},
+  ) {
+    const { authorization } = await sessionAuth.issueBearer(userA);
+    const headers = new Headers(init.headers);
+    headers.set('authorization', authorization);
+    return app.request(path, { ...init, headers });
+  }
+  return { request };
+}
+
+test('social_media can list and read schedules and media in its assigned office', async () => {
+  const f = scheduleAccessFixture();
+  const listed = await f.request(
+    `/api/content-studio/schedules?officeId=${accessOfficeA}`,
+  );
+  assert.equal(listed.status, 200);
+  const listBody = await listed.json() as {
+    schedules: Array<{ id: string }>;
+  };
+  assert.deepEqual(listBody.schedules.map((schedule) => schedule.id), [
+    accessScheduleA,
+  ]);
+
+  const detail = await f.request(
+    `/api/content-studio/schedules/${accessScheduleA}`,
+  );
+  assert.equal(detail.status, 200);
+  const detailBody = await detail.json() as {
+    schedule: { id: string };
+    assets: Array<{ id: string }>;
+  };
+  assert.equal(detailBody.schedule.id, accessScheduleA);
+  assert.deepEqual(detailBody.assets.map((asset) => asset.id), [accessAssetA]);
+
+  const assets = await f.request(
+    `/api/content-studio/assets?scheduleIds=${accessScheduleA}`,
+  );
+  assert.equal(assets.status, 200);
+  assert.deepEqual(
+    ((await assets.json()) as { assets: Array<{ id: string }> }).assets.map(
+      (asset) => asset.id,
+    ),
+    [accessAssetA],
+  );
+
+  const capability = await f.request('/api/content-studio/media/capability', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ objectKey: `content/${accessAssetA}.mp4` }),
+  });
+  assert.equal(capability.status, 200);
+
+  const crossOfficeCapability = await f.request(
+    '/api/content-studio/media/capability',
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ objectKey: `content/${accessAssetB}.mp4` }),
+    },
+  );
+  assert.equal(crossOfficeCapability.status, 404);
+  assert.equal(
+    ((await crossOfficeCapability.json()) as { error: { code: string } })
+      .error.code,
+    'CONTENT_MEDIA_NOT_FOUND',
+  );
+});
+
+test('schedule list and detail reject unauthorized roles and office scopes', async () => {
+  const unauthorized = scheduleAccessFixture(
+    authContext({
+      membership: {
+        officeId: accessOfficeA,
+        roleKey: 'employee',
+        isAdminRole: false,
+        permissions: {},
+      },
+    }),
+  );
+  for (const path of [
+    `/api/content-studio/schedules?officeId=${accessOfficeA}`,
+    `/api/content-studio/schedules/${accessScheduleA}`,
+  ]) {
+    const response = await unauthorized.request(path);
+    assert.equal(response.status, 403);
+    assert.equal(
+      ((await response.json()) as { error: { code: string } }).error.code,
+      'INSUFFICIENT_PERMISSION',
+    );
+  }
+
+  const socialMedia = scheduleAccessFixture();
+  for (const path of [
+    `/api/content-studio/schedules?officeId=${accessOfficeB}`,
+    `/api/content-studio/schedules/${accessScheduleB}`,
+    `/api/content-studio/assets?scheduleIds=${accessScheduleB}`,
+    `/api/content-studio/comments?scheduleIds=${accessScheduleB}`,
+  ]) {
+    const response = await socialMedia.request(path);
+    assert.equal(response.status, 403);
+    assert.equal(
+      ((await response.json()) as { error: { code: string } }).error.code,
+      'CONTENT_STUDIO_OFFICE_FORBIDDEN',
+    );
+  }
+
+  const crossOrganization = await socialMedia.request(
+    `/api/content-studio/schedules/${accessScheduleForeign}`,
+  );
+  assert.equal(crossOrganization.status, 404);
+  assert.equal(
+    ((await crossOrganization.json()) as { error: { code: string } }).error
+      .code,
+    'CONTENT_SCHEDULE_NOT_FOUND',
+  );
+});
+
+test('missing office assignments return an actionable code and admins retain office selection', async () => {
+  const unassigned = scheduleAccessFixture(
+    authContext({
+      membership: {
+        officeId: null,
+        roleKey: 'social_media',
+        isAdminRole: false,
+        permissions: { content_studio: { read: true } },
+      },
+    }),
+  );
+  const unassignedResponse = await unassigned.request(
+    `/api/content-studio/schedules?officeId=${accessOfficeA}`,
+  );
+  assert.equal(unassignedResponse.status, 403);
+  assert.equal(
+    ((await unassignedResponse.json()) as { error: { code: string } }).error
+      .code,
+    'CONTENT_STUDIO_OFFICE_UNASSIGNED',
+  );
+
+  const admin = scheduleAccessFixture(
+    authContext({
+      membership: {
+        officeId: accessOfficeA,
+        roleKey: 'admin',
+        isAdminRole: true,
+        permissions: {},
+      },
+    }),
+  );
+  const adminResponse = await admin.request(
+    `/api/content-studio/schedules?officeId=${accessOfficeB}`,
+  );
+  assert.equal(adminResponse.status, 200);
+  assert.deepEqual(
+    ((await adminResponse.json()) as { schedules: Array<{ id: string }> })
+      .schedules.map((schedule) => schedule.id),
+    [accessScheduleB],
+  );
+});
+
 
 test('authenticated internal preview review persists through the mounted Kode route', async () => {
   const f = fixture();

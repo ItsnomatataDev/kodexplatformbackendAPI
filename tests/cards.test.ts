@@ -10,6 +10,8 @@ const userA = '11111111-1111-1111-1111-111111111111';
 const userB = '22222222-2222-2222-2222-222222222222';
 const orgA = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 const orgB = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+const officeA = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+const officeB = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
 const missingId = '99999999-9999-9999-9999-999999999999';
 
 const tokenService = new AccessTokenService({
@@ -401,6 +403,89 @@ test('board cards are ordered by position and scoped to the board', async () => 
     listed.cards?.every((card) => card.boardId === boardId),
     true,
   );
+});
+
+test('social-media board and card reads stay within the assigned office', async () => {
+  const store = new MemoryBoardStore();
+  const officeBoard = await store.create({
+    organizationId: orgA,
+    createdBy: userA,
+    name: 'Head Office board',
+    metadata: { officeId: officeA },
+  });
+  const otherOfficeBoard = await store.create({
+    organizationId: orgA,
+    createdBy: userA,
+    name: 'Other office board',
+    metadata: { officeId: officeB },
+  });
+  const officeColumn = await store.createColumn({
+    organizationId: orgA,
+    boardId: officeBoard.id,
+    name: 'To Do',
+  });
+  const otherOfficeColumn = await store.createColumn({
+    organizationId: orgA,
+    boardId: otherOfficeBoard.id,
+    name: 'To Do',
+  });
+  assert.ok(officeColumn);
+  assert.ok(otherOfficeColumn);
+  const officeCard = await store.createCard({
+    organizationId: orgA,
+    boardId: officeBoard.id,
+    columnId: officeColumn.id,
+    createdBy: userA,
+    title: 'Office task',
+  });
+  const otherOfficeCard = await store.createCard({
+    organizationId: orgA,
+    boardId: otherOfficeBoard.id,
+    columnId: otherOfficeColumn.id,
+    createdBy: userA,
+    title: 'Other office task',
+  });
+  assert.ok(officeCard);
+  assert.ok(otherOfficeCard);
+
+  const app = createWorkApp(store, async () =>
+    authContext({
+      membership: {
+        roleKey: 'social_media',
+        isAdminRole: false,
+        officeId: officeA,
+        permissions: {
+          work: {
+            boards: { read: true },
+            board_columns: { read: true },
+            cards: { read: true },
+          },
+        },
+      },
+    }),
+  );
+  const authorization = await bearer(userA);
+
+  const cards = await json(
+    await app.request(`/api/boards/${officeBoard.id}/cards`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.deepEqual(cards.cards?.map((card: CardBody) => card.id), [officeCard.id]);
+
+  const otherOfficeCards = await json(
+    await app.request(`/api/boards/${otherOfficeBoard.id}/cards`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(otherOfficeCards.error?.code, 'BOARD_NOT_FOUND');
+
+  const otherOfficeCardDetail = await json(
+    await app.request(`/api/cards/${otherOfficeCard.id}`, {
+      headers: { Authorization: authorization },
+    }),
+  );
+  assert.equal(otherOfficeCardDetail.error?.code, 'CARD_NOT_FOUND');
 });
 
 test('cards can move to another column on the same board only', async () => {

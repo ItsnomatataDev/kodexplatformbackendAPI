@@ -364,6 +364,7 @@ export type ContentStore = {
   findMediaOwnership(
     organizationId: string,
     storagePath: string,
+    officeId?: string,
   ): Promise<boolean>;
 
   listClientMedia(

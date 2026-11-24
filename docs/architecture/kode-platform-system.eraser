@@ -1,0 +1,123 @@
+title Kode Platform System Architecture
+direction right
+colorMode pastel
+styleMode plain
+typeface clean
+textSize medium
+
+// Repository-evidenced architecture. This does not assert a live production deployment.
+Browser Clients [color: blue] {
+  Staff Browser [label: "Staff browser\nContent Studio and internal workspaces"]
+  Reviewer Browser [label: "Client and reviewer browser\nPortal and approval journeys"]
+}
+
+ItsNomatataWorkspace Web [color: orange] {
+  Static Host [label: "SPA static hosting\nVercel configuration present\nLive host not verified"]
+  Web SPA [label: "ItsNomatataWorkspace web app\nReact and Vite; AppRouter"]
+  Vite Proxy [label: "Local development proxy\n/auth, /api, /health, /ws"]
+}
+
+Public Entry [color: purple] {
+  HTTPS Proxy [label: "Caddy reverse-proxy reference\nLive routing not verified"]
+}
+
+Kode Platform API [color: green] {
+  Hono API [label: "Node.js and Hono\nModular monolith"]
+  Auth Module [label: "In-process Kode authentication and authorization\nSession validation, AuthContext,\ntenant and permission checks"]
+  Domain Modules [label: "In-process domain APIs\nIdentity/orgs; boards and work; attendance/leave/duty;\nContent Studio/media/social; chat/meetings/calls;\nnotifications/push; documents/tickets/obligations;\nstock/fleet/IT/location; AI/automation/security;\ntourism/university"]
+  Chat Hub [label: "Chat WebSocket hub\n/ws/chat; Redis pub/sub fan-out"]
+  Media Control [label: "In-process media control plane\nAsset status and short-lived playback grants\nAPI returns metadata, not HLS bytes"]
+  Domain Events [label: "Domain event publisher\nLogging/in-process transport; no durable event bus"]
+}
+
+Private Data Services [color: green] {
+  PostgreSQL [label: "PostgreSQL\nSystem of record for identity,\ntenants, business data and media jobs"]
+  Redis [label: "Redis\nRate limits, chat pub/sub,\nshort-lived media grants"]
+  MinIO [label: "Private MinIO object storage\nOriginals, attachments and media renditions"]
+}
+
+Background Processes [color: yellow] {
+  Upload API Role [label: "Optional Kode API upload process\nKODE_PROCESS_ROLE=uploads; port 3002\nIngress routing not verified"]
+  Upload Maintenance [label: "Resumable upload maintenance\nRepairs or retries stalled sessions"]
+  Legacy FFmpeg Worker [label: "Legacy content playback worker\nSeparate FFmpeg processing path"]
+  HLS Worker [label: "Media-platform worker\nLeased PostgreSQL jobs; FFmpeg HLS/MP4"]
+}
+
+Media Delivery Plane [color: red] {
+  Media HTTPS Entry [label: "Expected public HTTPS media hostname\nOperator routing required; not verified", color: grey]
+  Media Auth [label: "Media-auth service\nValidates signed paths and Redis grants"]
+  Media Edge [label: "Nginx media edge\nLoopback-bound in VPS Compose; private cache"]
+  Future CDN [label: "Optional global CDN\nNot configured in this repository\nMust preserve grant checks on cache hits", color: grey]
+}
+
+External Services [color: grey] {
+  AI Gateway [label: "Kode AI Gateway\nServer-to-server chat and media analysis"]
+  Email Provider [label: "SMTP email provider\nInvitations and account notifications"]
+  LiveKit [label: "LiveKit real-time media\nMeeting room and participant media"]
+}
+
+Operations and Legacy [color: silver] {
+  Migration Tooling [label: "Versioned SQL migrations\nControlled legacy data import"]
+  Legacy Supabase [label: "Supabase compatibility stub\nOffline; legacy or migration-only boundary"]
+  Backup Tooling [label: "Operator-run encrypted database/object scripts\nSchedules and live restore status unverified"]
+  Health and Logs [label: "Pino structured logs, request IDs and health endpoints\nNo metrics/tracing stack evidenced"]
+}
+
+Repository Evidence [color: silver] {
+  Deployment Note [label: "Deployment evidence only\nVPS Compose sets staging; production Compose is an example\nMedia release review dated 2026-10-09 records NO-GO"]
+  Scale Note [label: "Scale boundary\nAPI handles control and grants; media edge carries bytes\nNginx cache is defined; global CDN is not configured"]
+  Client Scope Note [label: "The checked-out frontend is the web SPA\nA mobile script exists but no mobile source was found here"]
+  Feature Note [label: "Kode feature flags select migrated API paths\nLegacy Supabase client calls are inert in this checkout"]
+  Push Note [label: "Browser push subscription is supported locally\nKode subscription persistence is still marked pending in frontend"]
+  Line Legend [label: "Solid lines show repository-defined paths\nDashed lines show optional, future, or unverified paths"]
+}
+
+Staff Browser <> Web SPA: Staff user interface
+Reviewer Browser <> Web SPA: Client and reviewer interface
+Static Host > Web SPA: HTML, JavaScript and CSS
+Web SPA <> HTTPS Proxy: HTTPS API and auth requests
+HTTPS Proxy <> Hono API: Reverse-proxied HTTP
+HTTPS Proxy -- Upload API Role: Optional binary-upload routing; example targets API port 3000
+Web SPA <> Vite Proxy: Local development only
+Vite Proxy <> Hono API: Same-origin development forwarding
+HTTPS Proxy <> Chat Hub: WebSocket upgrade
+Hono API > Auth Module: Authentication middleware
+Hono API > Health and Logs: Liveness, readiness and structured logs
+Auth Module > Domain Modules: Verified identity and permissions
+Auth Module <> PostgreSQL: Credentials, sessions and membership
+Auth Module <> Redis: Shared authentication rate limits
+Domain Modules > Domain Events: Publish after database commit
+Domain Modules <> PostgreSQL: Tenant-scoped business records
+Domain Modules <> Redis: Shared ephemeral state
+Domain Modules <> MinIO: Authorized object operations
+Media Control <> PostgreSQL: Assets, variants and job state
+Media Control > Web SPA: Status and signed playback grant
+Chat Hub <> Redis: Cross-instance chat and presence pub/sub
+
+Upload Maintenance <> PostgreSQL: Session recovery state
+Upload Maintenance <> MinIO: Verify and reconcile objects
+Upload API Role <> PostgreSQL: Upload session state
+Upload API Role <> MinIO: Optional server-mediated upload traffic
+Legacy FFmpeg Worker <> PostgreSQL: Legacy processing state
+Legacy FFmpeg Worker <> MinIO: Source and derived media
+HLS Worker <> PostgreSQL: Claim, lease and finalize media jobs
+HLS Worker <> MinIO: Read originals and publish HLS generations
+HLS Worker > Health and Logs: Structured worker events
+
+Web SPA -- Media HTTPS Entry: Signed HLS requests; public route unverified
+Media HTTPS Entry -- Media Edge: Operator-managed HTTPS reverse proxy
+Media Edge > Media Auth: Internal authorization request per media request
+Media Auth <> Redis: Grant lookup and revocation
+Media Edge <> MinIO: Private origin reads and cache fills
+Web SPA -- Future CDN: Optional geographic scale-out path
+Future CDN -- Media HTTPS Entry: Only with per-request grant authorization
+
+Domain Modules <> AI Gateway: Server-side AI operations
+Domain Modules <> Email Provider: Transactional email
+Domain Modules <> LiveKit: Meeting control and access credentials
+Web SPA <> LiveKit: Browser real-time audio and video
+
+Legacy Supabase -- Migration Tooling: Controlled legacy source only
+Migration Tooling > PostgreSQL: Schema and data migration
+PostgreSQL -- Backup Tooling: Operator-run encrypted backup and restore
+MinIO -- Backup Tooling: Operator-run encrypted object backup and restore

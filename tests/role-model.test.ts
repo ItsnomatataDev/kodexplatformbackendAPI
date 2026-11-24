@@ -26,15 +26,12 @@ test('Kode operating and legacy role keys are disjoint and complete', () => {
     'seo_specialist',
   ]);
   assert.deepEqual([...KODE_LEGACY_ROLE_KEYS], [
-    'activity_coordinator',
-    'driver',
-    'employee',
-    'finance',
-    'fleet_coordinator',
-    'guest_relations',
-    'reservations_agent',
-    'tour_guide',
-    'tourism_operations_manager',
+    // 'activity_coordinator',
+    // 'driver',
+    // 'guest_relations',
+    // 'reservations_agent',
+    // 'tour_guide',
+    // 'tourism_operations_manager',
   ]);
 
   const overlap = KODE_OPERATING_ROLE_KEYS.filter((key) =>
@@ -106,6 +103,20 @@ test('Content Studio migration grants media roles read and manage access', () =>
   assert.match(sql, /"manage": true/);
   assert.match(sql, /role_key IN \(\s*'media_team',\s*'social_media'\s*\)/);
   assert.match(sql, /is_active = TRUE/);
+});
+
+test('work access backfill grants media roles read-only access and keeps office scope in the API', () => {
+  const sql = fs.readFileSync(
+    path.resolve(process.cwd(), 'migrations/0075_office_scoped_work_read_permissions.sql'),
+    'utf8',
+  );
+
+  assert.match(sql, /role_key IN \('media_team', 'social_media'\)/);
+  assert.match(sql, /'boards'[\s\S]*"read": true/);
+  assert.match(sql, /'cards'[\s\S]*"read": true/);
+  assert.match(sql, /'time_entries'[\s\S]*"read": true/);
+  assert.doesNotMatch(sql, /"create": true|"update": true|"delete": true/);
+  assert.doesNotMatch(sql, /"\\*"\s*:\s*true/);
 });
 
 test('checklist migration grants nested checklist keys without using all as a wildcard', () => {

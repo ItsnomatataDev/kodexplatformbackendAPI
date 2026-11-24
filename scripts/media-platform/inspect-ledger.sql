@@ -1,5 +1,4 @@
--- Operator-run ONLY, through an existing authenticated psql session.
--- No migration runner, DDL, ledger repair, credentials or media rows.
+
 \set ON_ERROR_STOP on
 BEGIN READ ONLY;
 SET LOCAL statement_timeout = '10s';
